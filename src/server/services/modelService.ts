@@ -1486,6 +1486,7 @@ export async function rebuildTokenRoutesFromAvailability() {
   let createdChannels = 0;
   let removedChannels = 0;
   let removedRoutes = 0;
+  let sourceAvailabilityChanged = 0;
 
   for (const [modelName, candidateMap] of modelCandidates.entries()) {
     let route = routes.find((r) => (r.routeMode || 'pattern') !== 'explicit_group' && r.modelPattern === modelName);
@@ -1508,7 +1509,18 @@ export async function rebuildTokenRoutesFromAvailability() {
 
     for (const [candidateKey, candidate] of candidateMap.entries()) {
       const exists = routeChannels.some((channel) => buildChannelKey(channel) === candidateKey);
-      if (exists) continue;
+      if (exists) {
+        const existingChannel = routeChannels.find((channel) => buildChannelKey(channel) === candidateKey);
+        if (existingChannel?.sourceUnavailable) {
+          await db.update(schema.routeChannels)
+            .set({ sourceUnavailable: false })
+            .where(eq(schema.routeChannels.id, existingChannel.id))
+            .run();
+          existingChannel.sourceUnavailable = false;
+          sourceAvailabilityChanged++;
+        }
+        continue;
+      }
 
       const inserted = await db.insert(schema.routeChannels).values({
         routeId: route.id,
@@ -1518,6 +1530,7 @@ export async function rebuildTokenRoutesFromAvailability() {
         priority: 0,
         weight: 10,
         enabled: true,
+        sourceUnavailable: false,
         manualOverride: false,
       }).run();
       const insertedId = getInsertedRowId(inserted);
@@ -1546,8 +1559,19 @@ export async function rebuildTokenRoutesFromAvailability() {
         }
       }
 
-      if (!channel.manualOverride) {
+      if (channel.manualOverride) {
+        if (!channel.sourceUnavailable) {
+          await db.update(schema.routeChannels)
+            .set({ sourceUnavailable: true })
+            .where(eq(schema.routeChannels.id, channel.id))
+            .run();
+          channel.sourceUnavailable = true;
+          sourceAvailabilityChanged++;
+        }
+      } else {
         await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+        const channelIndex = channels.findIndex((item) => item.id === channel.id);
+        if (channelIndex >= 0) channels.splice(channelIndex, 1);
         removedChannels++;
       }
     }
@@ -1563,9 +1587,30 @@ export async function rebuildTokenRoutesFromAvailability() {
       continue;
     }
 
-    const routeChannelCount = channels.filter((channel) => channel.routeId === route.id).length;
-    if (routeChannelCount > 0) {
-      removedChannels += routeChannelCount;
+    const routeChannels = channels.filter((channel) => channel.routeId === route.id);
+    const manualChannels = routeChannels.filter((channel) => channel.manualOverride);
+    const automaticChannels = routeChannels.filter((channel) => !channel.manualOverride);
+
+    for (const channel of automaticChannels) {
+      await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+      const channelIndex = channels.findIndex((item) => item.id === channel.id);
+      if (channelIndex >= 0) channels.splice(channelIndex, 1);
+      removedChannels++;
+    }
+
+    for (const channel of manualChannels) {
+      if (!channel.sourceUnavailable) {
+        await db.update(schema.routeChannels)
+          .set({ sourceUnavailable: true })
+          .where(eq(schema.routeChannels.id, channel.id))
+          .run();
+        channel.sourceUnavailable = true;
+        sourceAvailabilityChanged++;
+      }
+    }
+
+    if (manualChannels.length > 0) {
+      continue;
     }
 
     const deleted = (await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run()).changes;
@@ -1574,7 +1619,7 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
   }
 
-  const exactRouteTopologyChanged = createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0;
+  const exactRouteTopologyChanged = createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0 || sourceAvailabilityChanged > 0;
   const patternRouteSync = exactRouteTopologyChanged
     ? await rebuildAllPatternRouteChannels()
     : {
@@ -1582,11 +1627,12 @@ export async function rebuildTokenRoutesFromAvailability() {
       routeIds: [],
       removedChannels: 0,
       createdChannels: 0,
+      changedChannels: 0,
     };
   createdChannels += patternRouteSync.createdChannels;
   removedChannels += patternRouteSync.removedChannels;
 
-  if (exactRouteTopologyChanged || patternRouteSync.createdChannels > 0 || patternRouteSync.removedChannels > 0) {
+  if (exactRouteTopologyChanged || patternRouteSync.changedChannels > 0 || patternRouteSync.removedChannels > 0) {
     await clearAllRouteDecisionSnapshots();
   }
 

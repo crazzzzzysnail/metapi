@@ -738,17 +738,19 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(patternChannels.map((channel) => channel.sourceModel).sort()).toEqual(['gpt-5-alpha', 'manual-special']);
     expect(patternChannels.some((channel) => channel.id === manualPatternChannel.id)).toBe(true);
 
-    const addResponse = await app.inject({
+    const recreateResponse = await app.inject({
       method: 'POST',
-      url: `/api/routes/${exactRouteB.id}/channels`,
+      url: '/api/routes',
       payload: {
-        accountId: sourceB.account.id,
-        tokenId: sourceB.token.id,
-        sourceModel: 'gpt-5-mini',
+        modelPattern: 'gpt-5-mini',
       },
     });
-    expect(addResponse.statusCode).toBe(200);
-    const readdedSourceBChannelId = addResponse.json().id as number;
+    expect(recreateResponse.statusCode).toBe(200);
+    const recreatedRouteId = recreateResponse.json().id as number;
+    const readdedSourceBChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, recreatedRouteId))
+      .get();
+    expect(readdedSourceBChannel).toBeDefined();
 
     patternChannels = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, patternRouteId))
@@ -757,7 +759,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
 
     const updateResponse = await app.inject({
       method: 'PUT',
-      url: `/api/channels/${readdedSourceBChannelId}`,
+      url: `/api/channels/${readdedSourceBChannel!.id}`,
       payload: {
         priority: 6,
         weight: 4,
@@ -777,7 +779,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
       method: 'POST',
       url: '/api/routes/batch',
       payload: {
-        ids: [exactRouteB.id],
+        ids: [recreatedRouteId],
         action: 'disable',
       },
     });
@@ -786,8 +788,54 @@ describe('PUT /api/routes/:id route rebuild', () => {
     patternChannels = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, patternRouteId))
       .all();
-    expect(patternChannels.map((channel) => channel.sourceModel).sort()).toEqual(['gpt-5-alpha', 'manual-special']);
+    expect(patternChannels.map((channel) => channel.sourceModel).sort()).toEqual(['gpt-5-alpha', 'gpt-5-mini', 'manual-special']);
+    const unavailablePatternB = patternChannels.find((channel) => channel.sourceModel === 'gpt-5-mini');
+    expect(unavailablePatternB?.priority).toBe(6);
+    expect(unavailablePatternB?.weight).toBe(4);
+    expect(unavailablePatternB?.enabled).toBe(true);
+    expect(unavailablePatternB?.manualOverride).toBe(false);
+    expect(unavailablePatternB?.sourceUnavailable).toBe(true);
     expect(patternChannels.some((channel) => channel.id === manualPatternChannel.id)).toBe(true);
+  });
+
+  it('removes an empty exact route after deleting its last manually configured channel', async () => {
+    const source = await seedAccountWithToken('gpt-5-manual-delete');
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5-manual-delete',
+      enabled: true,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: exactRoute.id,
+      accountId: source.account.id,
+      tokenId: source.token.id,
+      sourceModel: 'gpt-5-manual-delete',
+      priority: 1,
+      weight: 10,
+      enabled: true,
+      manualOverride: true,
+      sourceUnavailable: true,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/channels/${channel.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      removedRoute: true,
+    });
+
+    const removedChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(removedChannel).toBeUndefined();
+
+    const removedRoute = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, exactRoute.id))
+      .get();
+    expect(removedRoute).toBeUndefined();
   });
 
   it('preserves OAuth route-unit channels when rebuilding pattern groups from exact routes', async () => {

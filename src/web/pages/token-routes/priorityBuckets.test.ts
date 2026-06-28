@@ -17,6 +17,7 @@ function buildChannel(id: number, priority: number): RouteChannel {
     priority,
     weight: 10,
     enabled: true,
+    sourceUnavailable: false,
     manualOverride: false,
     successCount: 0,
     failCount: 0,

@@ -55,6 +55,7 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE route_channels ADD COLUMN last_selected_at text;',
         'ALTER TABLE route_channels ADD COLUMN consecutive_fail_count integer NOT NULL DEFAULT 0;',
         'ALTER TABLE route_channels ADD COLUMN cooldown_level integer NOT NULL DEFAULT 0;',
+        'ALTER TABLE route_channels ADD COLUMN source_unavailable integer DEFAULT false;',
       ],
     },
     {
@@ -73,6 +74,7 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE "route_channels" ADD COLUMN "last_selected_at" TEXT',
         'ALTER TABLE "route_channels" ADD COLUMN "consecutive_fail_count" INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE "route_channels" ADD COLUMN "cooldown_level" INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE "route_channels" ADD COLUMN "source_unavailable" BOOLEAN DEFAULT false',
       ],
     },
     {
@@ -91,6 +93,7 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
         'ALTER TABLE `route_channels` ADD COLUMN `last_selected_at` TEXT NULL',
         'ALTER TABLE `route_channels` ADD COLUMN `consecutive_fail_count` INT NOT NULL DEFAULT 0',
         'ALTER TABLE `route_channels` ADD COLUMN `cooldown_level` INT NOT NULL DEFAULT 0',
+        'ALTER TABLE `route_channels` ADD COLUMN `source_unavailable` BOOLEAN DEFAULT false',
       ],
     },
   ])('adds missing route grouping columns for $dialect', async ({ dialect, expectedSql }) => {
@@ -105,7 +108,7 @@ describe('ensureRouteGroupingSchemaCompatibility', () => {
     const { inspector, executedSql } = createInspector('postgres', {
       existingColumnsByTable: {
         token_routes: ['display_name', 'display_icon', 'route_mode', 'decision_snapshot', 'decision_refreshed_at', 'routing_strategy'],
-        route_channels: ['source_model', 'last_selected_at', 'consecutive_fail_count', 'cooldown_level'],
+        route_channels: ['source_model', 'last_selected_at', 'consecutive_fail_count', 'cooldown_level', 'source_unavailable'],
       },
       existingTables: ['token_routes', 'route_channels', 'route_group_sources'],
     });
