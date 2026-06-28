@@ -3104,6 +3104,7 @@ export class TokenRouter {
       reasonParts.push(`来源模型不匹配=${outerCandidate.channel.sourceModel || ''}`);
     }
 
+    if (outerCandidate.channel.sourceUnavailable) reasonParts.push('来源不可用');
     if (!outerCandidate.channel.enabled) reasonParts.push('通道禁用');
 
     if (memberCandidate.account.status !== 'active') {
@@ -3333,6 +3334,7 @@ export class TokenRouter {
       reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
     }
 
+    if (candidate.channel.sourceUnavailable) reasonParts.push('来源不可用');
     if (!candidate.channel.enabled) reasonParts.push('通道禁用');
 
     if (isOauthRouteUnitCandidate(candidate)) {

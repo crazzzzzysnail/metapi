@@ -93,6 +93,10 @@ function isExplicitGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof s
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
 }
 
+function isAutoManagedExactRoute(route: Pick<typeof schema.tokenRoutes.$inferSelect, 'modelPattern' | 'routeMode'>): boolean {
+  return !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern);
+}
+
 function normalizeSourceRouteIdsInput(input: unknown): number[] {
   const rawValues = Array.isArray(input) ? input : [];
   const normalized: number[] = [];
@@ -643,7 +647,7 @@ async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<numb
     const siteNames = new Set<string>();
     let enabledChannelCount = 0;
     for (const channel of channels) {
-      if (channel.enabled) enabledChannelCount += 1;
+      if (channel.enabled && !channel.sourceUnavailable) enabledChannelCount += 1;
       if (channel.site?.name) siteNames.add(channel.site.name);
     }
     summaryByRoute.set(route.id, {
@@ -782,6 +786,7 @@ export async function tokensRoutes(app: FastifyInstance) {
           sourceModel: sourceModel || null,
           priority: 0,
           weight: 10,
+          sourceUnavailable: false,
           manualOverride: true,
         }).run();
         existingPairs.add(pairKey);
@@ -1241,6 +1246,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       sourceModel: sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
+      sourceUnavailable: false,
     }).run();
     const channelId = requireInsertedRowId(insertedChannel, '创建通道失败');
     const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
@@ -1352,16 +1358,39 @@ export async function tokensRoutes(app: FastifyInstance) {
   app.delete<{ Params: { channelId: string } }>('/api/channels/:channelId', async (request) => {
     const channelId = parseInt(request.params.channelId, 10);
     const channel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+    const route = channel
+      ? await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, channel.routeId)).get()
+      : null;
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
+    let removedRoute: { modelPattern: string; routeMode?: string | null } | null = null;
     if (channel) {
-      await clearRouteDecisionSnapshot(channel.routeId);
-      await clearDependentExplicitGroupSnapshotsBySourceRouteIds([channel.routeId]);
+      if (route && isAutoManagedExactRoute(route)) {
+        const remainingChannel = await db.select({ id: schema.routeChannels.id })
+          .from(schema.routeChannels)
+          .where(eq(schema.routeChannels.routeId, route.id))
+          .limit(1)
+          .get();
+        if (!remainingChannel) {
+          await clearDependentExplicitGroupSnapshotsBySourceRouteIds([route.id]);
+          await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run();
+          removedRoute = {
+            modelPattern: route.modelPattern,
+            routeMode: route.routeMode,
+          };
+        }
+      }
+
+      if (!removedRoute) {
+        await clearRouteDecisionSnapshot(channel.routeId);
+        await clearDependentExplicitGroupSnapshotsBySourceRouteIds([channel.routeId]);
+      }
       await syncPatternRouteChannelsAfterAffectedRouteChanges({
-        affectedRouteIds: [channel.routeId],
+        affectedRouteIds: removedRoute ? [] : [channel.routeId],
+        removedRoutes: removedRoute ? [removedRoute] : [],
       });
     }
     invalidateTokenRouterCache();
-    return { success: true };
+    return { success: true, removedRoute: !!removedRoute };
   });
 
   // Rebuild routes/channels from model availability.

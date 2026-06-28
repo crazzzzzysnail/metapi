@@ -453,4 +453,129 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(patternChannels[0]?.sourceModel).toBe('gpt-5-new');
     expect(patternChannels[0]?.manualOverride).toBe(false);
   });
+
+  it('marks manually configured stale channels as source unavailable and restores them without losing priority', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'manual-priority-site',
+      url: 'https://manual-priority.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'manual-priority-user',
+      accessToken: 'access-manual-priority',
+      status: 'active',
+    }).returning().get();
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-manual-priority',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5-manual-priority',
+      enabled: true,
+    }).returning().get();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-5-manual-priority',
+      priority: 1,
+      weight: 10,
+      enabled: true,
+      manualOverride: true,
+      sourceUnavailable: false,
+    }).returning().get();
+
+    await rebuildTokenRoutesFromAvailability();
+
+    const unavailableChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(unavailableChannel?.priority).toBe(1);
+    expect(unavailableChannel?.manualOverride).toBe(true);
+    expect(unavailableChannel?.sourceUnavailable).toBe(true);
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'gpt-5-manual-priority',
+      available: true,
+    }).run();
+
+    await rebuildTokenRoutesFromAvailability();
+
+    const restoredChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(restoredChannel?.priority).toBe(1);
+    expect(restoredChannel?.manualOverride).toBe(true);
+    expect(restoredChannel?.sourceUnavailable).toBe(false);
+  });
+
+  it('deletes automatic stale channels and recreates recovered models as P0', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'auto-recover-site',
+      url: 'https://auto-recover.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'auto-recover-user',
+      accessToken: 'access-auto-recover',
+      status: 'active',
+    }).returning().get();
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-auto-recover',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5-auto-recover',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-5-auto-recover',
+      priority: 1,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    await rebuildTokenRoutesFromAvailability();
+    const removedRoute = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, route.id))
+      .get();
+    expect(removedRoute).toBeUndefined();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'gpt-5-auto-recover',
+      available: true,
+    }).run();
+
+    await rebuildTokenRoutesFromAvailability();
+    const restoredRoute = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5-auto-recover'))
+      .get();
+    expect(restoredRoute).toBeDefined();
+
+    const restoredChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, restoredRoute!.id))
+      .all();
+    expect(restoredChannels).toHaveLength(1);
+    expect(restoredChannels[0]?.priority).toBe(0);
+    expect(restoredChannels[0]?.sourceUnavailable).toBe(false);
+    expect(restoredChannels[0]?.manualOverride).toBe(false);
+  });
 });
