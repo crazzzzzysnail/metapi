@@ -105,6 +105,7 @@ describe('syncPatternRouteChannelsAfterAffectedRouteChanges', () => {
       routeIds: [],
       removedChannels: 0,
       createdChannels: 0,
+      changedChannels: 0,
     });
   });
 
@@ -196,5 +197,71 @@ describe('syncPatternRouteChannelsAfterAffectedRouteChanges', () => {
       .where(eq(schema.routeChannels.routeId, patternRoute.id))
       .all();
     expect(patternChannels).toHaveLength(0);
+  });
+
+  it('projects exact source unavailable state onto manually adjusted pattern channels', async () => {
+    const seeded = await seedAccountWithToken('gpt-5-source-state');
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5-source-state',
+      enabled: true,
+    }).returning().get();
+    const patternRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 're:^gpt-5.*$',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: exactRoute.id,
+      accountId: seeded.account.id,
+      tokenId: seeded.token.id,
+      sourceModel: 'gpt-5-source-state',
+      priority: 4,
+      weight: 8,
+      enabled: false,
+      sourceUnavailable: false,
+      manualOverride: true,
+    }).run();
+
+    await syncPatternRouteChannelsAfterAffectedRouteChanges({
+      affectedRouteIds: [exactRoute.id],
+    });
+    let patternChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, patternRoute.id))
+      .get();
+    expect(patternChannel).toMatchObject({
+      sourceModel: 'gpt-5-source-state',
+      priority: 4,
+      weight: 8,
+      enabled: false,
+      sourceUnavailable: true,
+      manualOverride: false,
+    });
+
+    await db.update(schema.routeChannels)
+      .set({
+        priority: 7,
+        enabled: true,
+        manualOverride: true,
+      })
+      .where(eq(schema.routeChannels.id, patternChannel!.id))
+      .run();
+    await db.update(schema.routeChannels)
+      .set({ enabled: true })
+      .where(eq(schema.routeChannels.routeId, exactRoute.id))
+      .run();
+
+    await syncPatternRouteChannelsAfterAffectedRouteChanges({
+      affectedRouteIds: [exactRoute.id],
+    });
+
+    patternChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, patternChannel!.id))
+      .get();
+    expect(patternChannel).toMatchObject({
+      priority: 7,
+      enabled: true,
+      sourceUnavailable: false,
+      manualOverride: true,
+    });
   });
 });

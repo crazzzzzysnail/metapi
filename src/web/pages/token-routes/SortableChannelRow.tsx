@@ -24,6 +24,7 @@ export function SortableChannelRow({
   displayPriority,
   showPriorityBadge = true,
   dragging = false,
+  selected = false,
   dragHandleProps,
   dragHandleRef,
   decisionCandidate,
@@ -41,11 +42,14 @@ export function SortableChannelRow({
   onSaveToken,
   onDeleteChannel,
   onToggleEnabled,
+  onToggleSelected,
   onSiteBlockModel,
 }: SortableChannelRowProps) {
   const resolvedPriority = displayPriority ?? channel.priority ?? 0;
   const managementLocked = readOnly || channelManagementDisabled;
   const suppressTooltips = dragInProgress || dragging;
+  const sourceUnavailable = channel.sourceUnavailable === true;
+  const visuallyUnavailable = channel.enabled === false || sourceUnavailable;
   const rowTransition = [
     'box-shadow 180ms ease',
     'background-color 180ms ease',
@@ -71,7 +75,7 @@ export function SortableChannelRow({
 
   const rowStyle: CSSProperties = {
     transition: rowTransition || undefined,
-    opacity: dragging ? 0.92 : channel.enabled === false ? 0.56 : 1,
+    opacity: dragging ? 0.92 : visuallyUnavailable ? 0.56 : 1,
     display: 'grid',
     gridTemplateColumns: managementLocked || mobile ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) auto auto auto',
     alignItems: mobile ? 'stretch' : 'center',
@@ -81,6 +85,8 @@ export function SortableChannelRow({
     borderRadius: 14,
     backgroundColor: dragging
       ? 'color-mix(in srgb, var(--color-bg-card) 82%, var(--color-info) 18%)'
+      : selected
+        ? 'color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-card))'
       : 'color-mix(in srgb, var(--color-bg-card) 96%, white 4%)',
     boxShadow: dragging
       ? '0 18px 34px rgba(15, 23, 42, 0.12)'
@@ -111,6 +117,25 @@ export function SortableChannelRow({
     return (
       <div data-layer-root style={{ ...rowStyle, display: 'block' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          {onToggleSelected ? (
+            <button
+              type="button"
+              onClick={onToggleSelected}
+              className={`btn btn-ghost ${selected ? 'btn-primary' : ''}`}
+              style={{
+                width: 22,
+                minWidth: 22,
+                height: 22,
+                padding: 0,
+                border: '1px solid var(--color-border-light)',
+                borderRadius: 8,
+                marginTop: 2,
+              }}
+              aria-label={selected ? '取消选择通道' : '选择通道'}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700 }}>{selected ? '✓' : '+'}</span>
+            </button>
+          ) : null}
           <button
             type="button"
             ref={dragHandleRef}
@@ -208,6 +233,16 @@ export function SortableChannelRow({
                   data-tooltip={suppressTooltips ? undefined : '该通道由用户手动添加，而非系统自动生成'}
                 >
                   手动配置
+                </span>
+              ) : null}
+
+              {sourceUnavailable ? (
+                <span
+                  className="badge badge-muted"
+                  style={{ fontSize: 10 }}
+                  data-tooltip={suppressTooltips ? undefined : '模型刷新后发现该来源暂不可用，恢复后会自动重新参与路由'}
+                >
+                  来源不可用
                 </span>
               ) : null}
 
@@ -358,6 +393,25 @@ export function SortableChannelRow({
   return (
     <div data-layer-root style={rowStyle}>
       <div style={{ display: 'flex', alignItems: mobile ? 'stretch' : 'center', flexDirection: mobile ? 'column' : 'row', gap: 6, fontSize: 12, flexWrap: 'wrap', minWidth: 0 }}>
+        {onToggleSelected ? (
+          <button
+            type="button"
+            onClick={onToggleSelected}
+            className={`btn btn-ghost ${selected ? 'btn-primary' : ''}`}
+            style={{
+              width: 22,
+              minWidth: 22,
+              height: 22,
+              padding: 0,
+              border: '1px solid var(--color-border-light)',
+              borderRadius: 8,
+              alignSelf: mobile ? 'flex-start' : undefined,
+            }}
+            aria-label={selected ? '取消选择通道' : '选择通道'}
+          >
+            <span style={{ fontSize: 11, fontWeight: 700 }}>{selected ? '✓' : '+'}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           ref={dragHandleRef}
@@ -445,8 +499,18 @@ export function SortableChannelRow({
           </span>
         ) : null}
 
+        {sourceUnavailable ? (
+          <span
+            className="badge badge-muted"
+            style={{ fontSize: 10 }}
+            data-tooltip={suppressTooltips ? undefined : '模型刷新后发现该来源暂不可用，恢复后会自动重新参与路由'}
+          >
+            来源不可用
+          </span>
+        ) : null}
+
         {channel.enabled === false ? (
-          <span className="badge badge-muted" style={{ fontSize: 10 }}>已禁用</span>
+          <span className="badge badge-muted" style={{ fontSize: 10 }}>禁用</span>
         ) : null}
 
         {routeUnit ? (

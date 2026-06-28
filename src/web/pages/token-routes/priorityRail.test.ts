@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyPriorityRailBatchAction,
   applyPriorityRailDrop,
   buildPriorityRailNodeStyle,
   buildPriorityRailDragTargets,
   buildPriorityRailSections,
   createPriorityRailNewLayerId,
+  PRIORITY_RAIL_NEW_TOP_LAYER_ID,
 } from './priorityRail.js';
 
 describe('priorityRail helpers', () => {
@@ -34,6 +36,7 @@ describe('priorityRail helpers', () => {
         showNewLayerTarget: true,
       }),
     ).toEqual([
+      { kind: 'new_top_layer', priority: 0, highlighted: false },
       { kind: 'existing_layer', priority: 0, highlighted: false },
       { kind: 'existing_layer', priority: 1, highlighted: true },
       { kind: 'new_layer', priority: 2, highlighted: false },
@@ -72,6 +75,96 @@ describe('priorityRail helpers', () => {
     expect(reordered).toEqual([
       { id: 11, priority: 0 },
       { id: 12, priority: 1 },
+      { id: 21, priority: 2 },
+    ]);
+  });
+
+  it('creates a new top layer when dropped onto the top target', () => {
+    const reordered = applyPriorityRailDrop(
+      [
+        { id: 11, priority: 0 },
+        { id: 12, priority: 0 },
+        { id: 21, priority: 1 },
+      ],
+      21,
+      PRIORITY_RAIL_NEW_TOP_LAYER_ID,
+    );
+
+    expect(reordered).toEqual([
+      { id: 11, priority: 1 },
+      { id: 12, priority: 1 },
+      { id: 21, priority: 0 },
+    ]);
+  });
+
+  it('moves selected channels to P0 in batch mode', () => {
+    const reordered = applyPriorityRailBatchAction(
+      [
+        { id: 11, priority: 0 },
+        { id: 12, priority: 0 },
+        { id: 21, priority: 1 },
+      ],
+      [12],
+      'set_p0',
+    );
+
+    expect(reordered).toEqual([
+      { id: 12, priority: 0 },
+      { id: 11, priority: 1 },
+      { id: 21, priority: 2 },
+    ]);
+  });
+
+  it('merges selected channels into the next layer in batch mode', () => {
+    const reordered = applyPriorityRailBatchAction(
+      [
+        { id: 11, priority: 0 },
+        { id: 12, priority: 0 },
+        { id: 21, priority: 1 },
+      ],
+      [11, 12],
+      'move_down_one_layer',
+    );
+
+    expect(reordered).toEqual([
+      { id: 21, priority: 0 },
+      { id: 11, priority: 1 },
+      { id: 12, priority: 1 },
+    ]);
+  });
+
+  it('moves a partial layer selection down into the next layer in batch mode', () => {
+    const reordered = applyPriorityRailBatchAction(
+      [
+        { id: 11, priority: 0 },
+        { id: 12, priority: 0 },
+        { id: 21, priority: 1 },
+      ],
+      [12],
+      'move_down_one_layer',
+    );
+
+    expect(reordered).toEqual([
+      { id: 11, priority: 0 },
+      { id: 12, priority: 1 },
+      { id: 21, priority: 1 },
+    ]);
+  });
+
+  it('keeps batch results dense when selected channels move across sparse layers', () => {
+    const reordered = applyPriorityRailBatchAction(
+      [
+        { id: 11, priority: 0 },
+        { id: 21, priority: 2 },
+        { id: 31, priority: 5 },
+      ],
+      [11, 21],
+      'move_down_one_layer',
+    );
+
+    expect(reordered).toEqual([
+      { id: 31, priority: 0 },
+      { id: 11, priority: 1 },
       { id: 21, priority: 2 },
     ]);
   });

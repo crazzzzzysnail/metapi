@@ -109,6 +109,15 @@ export const ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS: RouteGroupingColumnCompa
       postgres: 'ALTER TABLE "route_channels" ADD COLUMN "cooldown_level" INTEGER NOT NULL DEFAULT 0',
     },
   },
+  {
+    table: 'route_channels',
+    column: 'source_unavailable',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN source_unavailable integer DEFAULT false;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `source_unavailable` BOOLEAN DEFAULT false',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "source_unavailable" BOOLEAN DEFAULT false',
+    },
+  },
 ];
 
 export const ROUTE_GROUPING_TABLE_COMPATIBILITY_SPECS: RouteGroupingTableCompatibilitySpec[] = [

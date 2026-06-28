@@ -1662,6 +1662,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         priority: row.priority,
         weight: row.weight,
         enabled: row.enabled,
+        sourceUnavailable: row.sourceUnavailable ?? false,
         manualOverride: row.manualOverride,
         successCount: runtimeChannel?.successCount ?? row.successCount,
         failCount: runtimeChannel?.failCount ?? row.failCount,

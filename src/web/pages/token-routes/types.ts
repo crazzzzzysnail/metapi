@@ -38,6 +38,7 @@ export type RouteChannel = {
   priority: number;
   weight: number;
   enabled: boolean;
+  sourceUnavailable?: boolean;
   manualOverride: boolean;
   successCount: number;
   failCount: number;
@@ -145,6 +146,7 @@ export type SortableChannelRowProps = {
   displayPriority?: number;
   showPriorityBadge?: boolean;
   dragging?: boolean;
+  selected?: boolean;
   dragHandleProps?: ButtonHTMLAttributes<HTMLButtonElement>;
   dragHandleRef?: RefCallback<HTMLButtonElement>;
   decisionCandidate?: RouteDecisionCandidate;
@@ -162,6 +164,7 @@ export type SortableChannelRowProps = {
   onSaveToken: () => void;
   onDeleteChannel: () => void;
   onToggleEnabled: (enabled: boolean) => void;
+  onToggleSelected?: () => void;
   onSiteBlockModel?: () => void;
 };
 
@@ -184,6 +187,11 @@ export type PriorityRailSection = {
 export type PriorityRailDragTarget =
   | {
     kind: 'existing_layer';
+    priority: number;
+    highlighted: boolean;
+  }
+  | {
+    kind: 'new_top_layer';
     priority: number;
     highlighted: boolean;
   }
