@@ -54,6 +54,7 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
     priority: 0,
     weight: 1,
     enabled: true,
+    sourceUnavailable: false,
     manualOverride: false,
     successCount: 0,
     failCount: 0,

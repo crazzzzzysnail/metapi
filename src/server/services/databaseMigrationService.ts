@@ -550,7 +550,7 @@ function buildStatements(
   for (const row of snapshot.accounts.routeChannels) {
     statements.push({
       table: 'route_channels',
-      columns: ['id', 'route_id', 'account_id', 'token_id', 'source_model', 'priority', 'weight', 'enabled', 'manual_override', 'success_count', 'fail_count', 'total_latency_ms', 'total_cost', 'last_used_at', 'last_selected_at', 'last_fail_at', 'consecutive_fail_count', 'cooldown_level', 'cooldown_until'],
+      columns: ['id', 'route_id', 'account_id', 'token_id', 'source_model', 'priority', 'weight', 'enabled', 'source_unavailable', 'manual_override', 'success_count', 'fail_count', 'total_latency_ms', 'total_cost', 'last_used_at', 'last_selected_at', 'last_fail_at', 'consecutive_fail_count', 'cooldown_level', 'cooldown_until'],
       values: [
         asNumber(row.id, 0),
         asNumber(row.routeId, 0),
@@ -560,6 +560,7 @@ function buildStatements(
         asNumber(row.priority, 0),
         asNumber(row.weight, 10),
         asBoolean(row.enabled, true),
+        asBoolean(row.sourceUnavailable, false),
         asBoolean(row.manualOverride, false),
         asNumber(row.successCount, 0),
         asNumber(row.failCount, 0),

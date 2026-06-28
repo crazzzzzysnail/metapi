@@ -16,6 +16,7 @@ type PatternRouteChannelCandidate = {
   priority: number;
   weight: number;
   enabled: boolean;
+  sourceUnavailable: boolean;
 };
 
 export type PatternRouteChannelSyncResult = {
@@ -23,6 +24,7 @@ export type PatternRouteChannelSyncResult = {
   routeIds: number[];
   removedChannels: number;
   createdChannels: number;
+  changedChannels: number;
 };
 
 type RebuildPatternRouteOptions = {
@@ -77,6 +79,7 @@ function createEmptyPatternRouteChannelSyncResult(): PatternRouteChannelSyncResu
     routeIds: [],
     removedChannels: 0,
     createdChannels: 0,
+    changedChannels: 0,
   };
 }
 
@@ -144,6 +147,7 @@ async function getPatternTokenCandidates(
       priority: 0,
       weight: 10,
       enabled: true,
+      sourceUnavailable: false,
     });
   }
 
@@ -169,29 +173,32 @@ async function getMatchedExactRouteChannelCandidates(
     exactModelNames.add(normalizeModelKey(route.modelPattern));
   }
 
-  const enabledRoutes = matchedExactRoutes.filter((route) => route.enabled);
-  if (enabledRoutes.length === 0) {
+  if (matchedExactRoutes.length === 0) {
     return { candidates: [], exactModelNames };
   }
 
-  const routeMap = new Map<number, typeof enabledRoutes[number]>();
-  for (const route of enabledRoutes) routeMap.set(route.id, route);
+  const routeMap = new Map<number, typeof matchedExactRoutes[number]>();
+  for (const route of matchedExactRoutes) routeMap.set(route.id, route);
 
   const channels = await db.select().from(schema.routeChannels)
-    .where(inArray(schema.routeChannels.routeId, enabledRoutes.map((route) => route.id)))
+    .where(inArray(schema.routeChannels.routeId, matchedExactRoutes.map((route) => route.id)))
     .all();
 
   return {
     exactModelNames,
-    candidates: channels.map((channel) => ({
-      tokenId: channel.tokenId ?? null,
-      accountId: channel.accountId,
-      oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
-      sourceModel: (channel.sourceModel || routeMap.get(channel.routeId)?.modelPattern || '').trim(),
-      priority: channel.priority ?? 0,
-      weight: channel.weight ?? 10,
-      enabled: !!channel.enabled,
-    })).filter((candidate) => candidate.sourceModel.length > 0),
+    candidates: channels.map((channel) => {
+      const route = routeMap.get(channel.routeId);
+      return {
+        tokenId: channel.tokenId ?? null,
+        accountId: channel.accountId,
+        oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
+        sourceModel: (channel.sourceModel || route?.modelPattern || '').trim(),
+        priority: channel.priority ?? 0,
+        weight: channel.weight ?? 10,
+        enabled: !!channel.enabled,
+        sourceUnavailable: !route?.enabled || !channel.enabled || !!channel.sourceUnavailable,
+      };
+    }).filter((candidate) => candidate.sourceModel.length > 0),
   };
 }
 
@@ -199,7 +206,7 @@ export async function populateRouteChannelsByModelPattern(
   routeId: number,
   modelPattern: string,
   options: RebuildPatternRouteOptions = {},
-): Promise<number> {
+): Promise<{ createdChannels: number; changedChannels: number }> {
   const excludedExactModelNames = new Set(
     (options.excludeExactModelPatterns || [])
       .map(normalizeModelKey)
@@ -211,7 +218,6 @@ export async function populateRouteChannelsByModelPattern(
     : routeCandidates.exactModelNames;
   const availabilityCandidates = await getPatternTokenCandidates(modelPattern, availabilityExclusions);
   const candidates = [...routeCandidates.candidates, ...availabilityCandidates];
-  if (candidates.length === 0) return 0;
 
   const existingChannels = await db.select().from(schema.routeChannels)
     .where(eq(schema.routeChannels.routeId, routeId))
@@ -223,10 +229,28 @@ export async function populateRouteChannelsByModelPattern(
     sourceModel: channel.sourceModel,
   })));
 
+  const candidatePairs = new Set(candidates.map((candidate) => buildChannelPairKey(candidate)));
   let created = 0;
+  let changed = 0;
   for (const candidate of candidates) {
     const pairKey = buildChannelPairKey(candidate);
-    if (existingPairs.has(pairKey)) continue;
+    if (existingPairs.has(pairKey)) {
+      const existingChannel = existingChannels.find((channel) => buildChannelPairKey({
+        accountId: channel.accountId,
+        tokenId: channel.tokenId ?? null,
+        oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
+        sourceModel: channel.sourceModel,
+      }) === pairKey);
+      if (existingChannel && !!existingChannel.sourceUnavailable !== candidate.sourceUnavailable) {
+        await db.update(schema.routeChannels)
+          .set({ sourceUnavailable: candidate.sourceUnavailable })
+          .where(eq(schema.routeChannels.id, existingChannel.id))
+          .run();
+        existingChannel.sourceUnavailable = candidate.sourceUnavailable;
+        changed += 1;
+      }
+      continue;
+    }
     await db.insert(schema.routeChannels).values({
       routeId,
       accountId: candidate.accountId,
@@ -236,13 +260,38 @@ export async function populateRouteChannelsByModelPattern(
       priority: candidate.priority,
       weight: candidate.weight,
       enabled: candidate.enabled,
+      sourceUnavailable: candidate.sourceUnavailable,
       manualOverride: false,
     }).run();
     existingPairs.add(pairKey);
     created += 1;
+    changed += 1;
   }
 
-  return created;
+  for (const channel of existingChannels) {
+    if (!channel.manualOverride) continue;
+    if (channel.sourceUnavailable) continue;
+    const sourceModel = (channel.sourceModel || '').trim();
+    if (!sourceModel || !matchesModelPattern(sourceModel, modelPattern)) continue;
+    const pairKey = buildChannelPairKey({
+      accountId: channel.accountId,
+      tokenId: channel.tokenId ?? null,
+      oauthRouteUnitId: channel.oauthRouteUnitId ?? null,
+      sourceModel: channel.sourceModel,
+    });
+    if (candidatePairs.has(pairKey)) continue;
+
+    await db.update(schema.routeChannels)
+      .set({ sourceUnavailable: true })
+      .where(eq(schema.routeChannels.id, channel.id))
+      .run();
+    changed += 1;
+  }
+
+  return {
+    createdChannels: created,
+    changedChannels: changed,
+  };
 }
 
 export async function rebuildAutomaticRouteChannelsByModelPattern(
@@ -263,8 +312,8 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
   }
 
-  const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern, options);
-  if (removableChannels.length > 0 || createdChannels > 0) {
+  const populated = await populateRouteChannelsByModelPattern(routeId, modelPattern, options);
+  if (removableChannels.length > 0 || populated.changedChannels > 0) {
     await clearRouteDecisionSnapshot(routeId);
   }
 
@@ -272,7 +321,8 @@ export async function rebuildAutomaticRouteChannelsByModelPattern(
     rebuiltRoutes: 1,
     routeIds: [routeId],
     removedChannels: removableChannels.length,
-    createdChannels,
+    createdChannels: populated.createdChannels,
+    changedChannels: populated.changedChannels,
   };
 }
 
@@ -287,6 +337,7 @@ export async function rebuildAllPatternRouteChannels(
     routeIds: [],
     removedChannels: 0,
     createdChannels: 0,
+    changedChannels: 0,
   };
 
   for (const route of patternRoutes) {
@@ -295,9 +346,10 @@ export async function rebuildAllPatternRouteChannels(
     result.routeIds.push(route.id);
     result.removedChannels += routeResult.removedChannels;
     result.createdChannels += routeResult.createdChannels;
+    result.changedChannels += routeResult.changedChannels;
   }
 
-  if (result.removedChannels > 0 || result.createdChannels > 0) {
+  if (result.removedChannels > 0 || result.changedChannels > 0) {
     await clearRouteDecisionSnapshots(result.routeIds);
   }
 

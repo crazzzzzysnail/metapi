@@ -67,6 +67,7 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
     priority: 0,
     weight: 1,
     enabled: true,
+    sourceUnavailable: false,
     manualOverride: false,
     successCount: 0,
     failCount: 0,
@@ -612,12 +613,13 @@ describe('RouteCard', () => {
     expect(activeShell).toBeDefined();
     expect(activeShell?.props.style.visibility).toBe('hidden');
 
-    const newLayerTarget = root.root.find((node) => (
+    const newLayerTargets = root.root.findAll((node) => (
       node.type === 'div'
       && node.props['data-testid'] === 'route-priority-new-layer-target'
     ));
-    expect(newLayerTarget.props.style.display).toBe('flex');
-    expect(newLayerTarget.props.style.minHeight).toBe(34);
+    expect(newLayerTargets).toHaveLength(2);
+    expect(newLayerTargets[0]!.props.style.display).toBe('flex');
+    expect(newLayerTargets[0]!.props.style.minHeight).toBe(34);
   });
 
   it('keeps compact desktop detail bucket headers outside draggable channel shells', () => {
@@ -732,6 +734,71 @@ describe('RouteCard', () => {
     ));
 
     expect(directShells.map((child) => child.props['data-channel-id'])).toEqual([11, 12, 21]);
+  });
+
+  it('renders a batch selection toggle for channel rows', () => {
+    const onToggleChannelSelection = vi.fn();
+    const onBatchDisableChannels = vi.fn();
+    const onBatchDeleteChannels = vi.fn();
+    const root = create(
+      <RouteCard
+        route={buildRoute()}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[buildChannel({ id: 11, priority: 0 })]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        selectedChannelIds={[11]}
+        batchModeEnabled
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        onToggleChannelSelection={onToggleChannelSelection}
+        onClearChannelSelection={vi.fn()}
+        onApplyBatchPriorityAction={vi.fn()}
+        onBatchDisableChannels={onBatchDisableChannels}
+        onBatchDeleteChannels={onBatchDeleteChannels}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const button = root.root.find((node) => (
+      node.type === 'button'
+      && String(node.props['aria-label'] || '').includes('选择通道')
+    ));
+    button.props.onClick();
+    expect(onToggleChannelSelection).toHaveBeenCalledWith(42, 11);
+
+    const batchButtons = root.root.findAll((node) => node.type === 'button');
+    const disableButton = batchButtons.find((node) => collectText(node).includes('批量禁用'));
+    const deleteButton = batchButtons.find((node) => collectText(node).includes('批量删除'));
+    expect(disableButton).toBeDefined();
+    expect(deleteButton).toBeDefined();
+    disableButton!.props.onClick();
+    deleteButton!.props.onClick();
+    expect(onBatchDisableChannels).toHaveBeenCalledWith(42);
+    expect(onBatchDeleteChannels).toHaveBeenCalledWith(42);
   });
 
   it('omits long explanatory copy in compact detail panels', () => {

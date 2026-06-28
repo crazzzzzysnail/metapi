@@ -27,6 +27,10 @@ describe('schema contract generation', () => {
     expect(contract.tables.proxy_video_tasks).toBeDefined();
     expect(contract.tables.route_channels.columns.source_model).toBeDefined();
     expect(contract.tables.route_channels.columns.last_selected_at).toBeDefined();
+    expect(contract.tables.route_channels.columns.source_unavailable).toMatchObject({
+      logicalType: 'boolean',
+      defaultValue: 'false',
+    });
     expect(contract.tables.route_channels.columns.consecutive_fail_count).toMatchObject({
       logicalType: 'integer',
       notNull: true,

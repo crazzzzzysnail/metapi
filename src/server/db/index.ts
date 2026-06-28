@@ -541,6 +541,10 @@ function ensureRouteGroupingSchema() {
     execSqliteLegacyCompat(`ALTER TABLE route_channels ADD COLUMN cooldown_level integer NOT NULL DEFAULT 0;`);
   }
 
+  if (!tableColumnExists('route_channels', 'source_unavailable')) {
+    execSqliteLegacyCompat(`ALTER TABLE route_channels ADD COLUMN source_unavailable integer DEFAULT false;`);
+  }
+
   execSqliteLegacyCompat(`
     CREATE TABLE IF NOT EXISTS route_group_sources (
       id integer PRIMARY KEY AUTOINCREMENT NOT NULL,

@@ -5,6 +5,14 @@ import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { SortableChannelRow } from './SortableChannelRow.js';
 import type { RouteChannel } from './types.js';
 
+function collectText(node: { children?: unknown[] }): string {
+  return (node.children || []).map((child) => {
+    if (typeof child === 'string') return child;
+    if (child && typeof child === 'object') return collectText(child as { children?: unknown[] });
+    return '';
+  }).join('');
+}
+
 function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
   return {
     id: 301,
@@ -15,6 +23,7 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
     priority: 0,
     weight: 100,
     enabled: true,
+    sourceUnavailable: false,
     manualOverride: true,
     successCount: 12,
     failCount: 1,
@@ -148,5 +157,34 @@ describe('SortableChannelRow layering', () => {
 
     expect(dragHandle.props.disabled).toBe(true);
     expect(dragHandle.props['data-tooltip']).toBe('该路由当前不可编辑优先级');
+  });
+
+  it('separates user disabled and source unavailable channel states', () => {
+    const channel = buildChannel({ enabled: false, sourceUnavailable: true });
+    const root = create(
+      <DndContext>
+        <SortableContext items={[channel.id]} strategy={verticalListSortingStrategy}>
+          <SortableChannelRow
+            channel={channel}
+            decisionCandidate={undefined}
+            isExactRoute
+            loadingDecision={false}
+            isSavingPriority={false}
+            tokenOptions={[]}
+            activeTokenId={0}
+            isUpdatingToken={false}
+            onTokenDraftChange={vi.fn()}
+            onSaveToken={vi.fn()}
+            onDeleteChannel={vi.fn()}
+            onToggleEnabled={vi.fn()}
+            onSiteBlockModel={vi.fn()}
+          />
+        </SortableContext>
+      </DndContext>,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('来源不可用');
+    expect(text).toContain('禁用');
   });
 });
