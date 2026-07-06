@@ -3,6 +3,7 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 import { fetchJsonWithShieldCookieRetry } from './newApiShield.js';
+import { resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
@@ -851,9 +852,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private async getOpenAiModelsViaShieldCookie(baseUrl: string, token: string): Promise<string[]> {
+    const modelsUrl = resolveModelDiscoveryUrl(baseUrl, '/v1/models');
+    if (!modelsUrl) return [];
     for (const cookie of this.buildCookieCandidates(token)) {
       try {
-        const { data } = await fetchJsonWithShieldCookieRetry<any>(`${baseUrl}/v1/models`, {
+        const { data } = await fetchJsonWithShieldCookieRetry<any>(modelsUrl, {
           headers: {
             Authorization: `Bearer ${token}`,
             Cookie: cookie,
@@ -867,6 +870,8 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private async getOpenAiModels(baseUrl: string, token: string): Promise<string[]> {
+    const modelsUrl = resolveModelDiscoveryUrl(baseUrl, '/v1/models');
+    if (!modelsUrl) return [];
     const shouldTryShieldCookie = this.platformName === 'anyrouter' || token.includes('=');
     if (shouldTryShieldCookie) {
       const shieldModels = await this.getOpenAiModelsViaShieldCookie(baseUrl, token);
@@ -874,7 +879,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     try {
-      const res = await this.fetchJson<any>(`${baseUrl}/v1/models`, {
+      const res = await this.fetchJson<any>(modelsUrl, {
         headers: { Authorization: `Bearer ${token}` },
       });
       return this.extractOpenAiModels(res);

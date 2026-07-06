@@ -1460,7 +1460,13 @@ export default function Sites() {
               </button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
-              这里只用于 `/v1/*`、模型发现和 API Key 验证。不填时默认跟随主站点 URL；多条地址会按列表顺序参与轮询，禁用的地址不会参与调度。
+              这里只用于 `/v1/*`、模型发现和 API Key 验证。不填时默认跟随主站点 URL；多条地址会按列表顺序参与轮询，禁用的地址不会参与调度。兼容以下三种模式。
+              <br />
+              默认：/v1/*，系统自动拼接接口路径。
+              <br />
+              后缀：/v1#，只拼接口后缀，兼容非标准请求地址。
+              <br />
+              完整：/v1/chat/completions$，只请求该完整地址，不轮询其他接口。
             </div>
             {form.apiEndpoints.map((endpoint, index) => (
               <div

@@ -1,7 +1,8 @@
 import { fetch } from 'undici';
 import { schema } from '../db/index.js';
 import { withSiteRecordProxyRequestInit } from './siteProxy.js';
-import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointSkipError } from './siteApiEndpointService.js';
+import { resolveModelDiscoveryUrl } from '../proxy-core/orchestration/upstreamRequest.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { CLAUDE_DEFAULT_ANTHROPIC_VERSION } from './oauth/claudeProvider.js';
 import {
@@ -41,9 +42,8 @@ function normalizeBaseUrl(baseUrl: string): string {
   return (baseUrl || '').replace(/\/+$/, '');
 }
 
-function buildCodexModelsEndpoint(baseUrl: string): string {
-  const normalized = normalizeBaseUrl(baseUrl);
-  return `${normalized}/models?client_version=${encodeURIComponent('1.0.0')}`;
+function buildCodexModelsEndpoint(baseUrl: string): string | null {
+  return resolveModelDiscoveryUrl(baseUrl, `/models?client_version=${encodeURIComponent('1.0.0')}`);
 }
 
 function extractCodexModelIds(payload: unknown): string[] {
@@ -138,8 +138,12 @@ export async function discoverCodexModelsFromCloud(input: {
   }
 
   const payload = await runWithSiteApiEndpointPool(input.site, async (target) => {
+    const modelsUrl = buildCodexModelsEndpoint(target.baseUrl);
+    if (!modelsUrl) {
+      throw new SiteApiEndpointSkipError();
+    }
     const response = await fetch(
-      buildCodexModelsEndpoint(target.baseUrl),
+      modelsUrl,
       withSiteRecordProxyRequestInit(input.site, { method: 'GET', headers }),
     );
     if (!response.ok) {
@@ -160,8 +164,12 @@ export async function discoverClaudeModelsFromCloud(input: {
     throw new Error('claude oauth access token missing');
   }
   const payload = await runWithSiteApiEndpointPool(input.site, async (target) => {
+    const modelsUrl = resolveModelDiscoveryUrl(target.baseUrl, '/v1/models');
+    if (!modelsUrl) {
+      throw new SiteApiEndpointSkipError();
+    }
     const response = await fetch(
-      `${target.baseUrl.replace(/\/+$/, '')}/v1/models`,
+      modelsUrl,
       withSiteRecordProxyRequestInit(input.site, {
         method: 'GET',
         headers: {

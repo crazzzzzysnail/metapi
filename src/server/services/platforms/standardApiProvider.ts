@@ -4,6 +4,7 @@ import {
   type CheckinResult,
   type UserInfo,
 } from './base.js';
+import { parseUpstreamUrlMode, resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 type FetchModelsOptions = {
   baseUrl: string;
@@ -21,6 +22,9 @@ export function normalizePlatformBaseUrl(baseUrl: string): string {
 }
 
 export function resolveVersionedModelsUrl(baseUrl: string): string {
+  const modeResolved = resolveModelDiscoveryUrl(baseUrl, '/v1/models');
+  if (modeResolved) return modeResolved;
+  if (parseUpstreamUrlMode(baseUrl).mode === 'fixed') return '';
   const normalized = normalizePlatformBaseUrl(baseUrl);
   if (/\/v\d+(?:\.\d+)?(?:beta)?$/i.test(normalized)) {
     return `${normalized}/models`;

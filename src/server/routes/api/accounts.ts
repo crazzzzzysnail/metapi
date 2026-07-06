@@ -52,7 +52,9 @@ import {
 import {
   requireSiteApiBaseUrl,
   runWithSiteApiEndpointPool,
+  SiteApiEndpointSkipError,
 } from "../../services/siteApiEndpointService.js";
+import { resolveModelDiscoveryUrl } from "../../proxy-core/orchestration/upstreamRequest.js";
 import {
   buildBatchApiKeyConnectionName,
   parseBatchApiKeys,
@@ -333,6 +335,9 @@ async function getModelsWithSiteApiEndpointPool(
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw new Error(timeoutMessage);
+    }
+    if (!resolveModelDiscoveryUrl(target.baseUrl, "/v1/models")) {
+      throw new SiteApiEndpointSkipError();
     }
     return withTimeout(
       () => adapter.getModels(target.baseUrl, accessToken, platformUserId),

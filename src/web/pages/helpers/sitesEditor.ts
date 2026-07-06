@@ -159,18 +159,19 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
   };
 }
 
-// Keep this in sync with normalizeSiteApiEndpointBaseUrl in
-// src/server/services/siteApiEndpointService.ts.
+// 需与 src/server/services/siteApiEndpointService.ts 的规范化逻辑保持一致。
 function normalizeSiteApiEndpointUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
+  const marker = trimmed.endsWith('#') ? '#' : trimmed.endsWith('$') ? '$' : '';
+  const withoutMarker = marker ? trimmed.slice(0, -1).trim() : trimmed;
   try {
-    const parsed = new URL(trimmed);
+    const parsed = new URL(withoutMarker);
     parsed.search = '';
     parsed.hash = '';
-    return parsed.toString().replace(/\/+$/, '');
+    return `${parsed.toString().replace(/\/+$/, '')}${marker}`;
   } catch {
-    return trimmed.replace(/\/+$/, '');
+    return `${withoutMarker.replace(/[?#].*$/, '').replace(/\/+$/, '')}${marker}`;
   }
 }
 

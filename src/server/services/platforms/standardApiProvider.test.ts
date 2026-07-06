@@ -34,6 +34,12 @@ describe('standardApiProvider helpers', () => {
     expect(resolveVersionedModelsUrl('https://api.example.com/v1beta')).toBe('https://api.example.com/v1beta/models');
   });
 
+  it('resolves model discovery urls with endpoint mode markers', () => {
+    expect(resolveVersionedModelsUrl('https://api.example.com/v3#')).toBe('https://api.example.com/v3/models');
+    expect(resolveVersionedModelsUrl('https://api.example.com/v1/chat/completions$')).toBe('https://api.example.com/v1/models');
+    expect(resolveVersionedModelsUrl('https://api.example.com/v1beta/openai/chat/completions$')).toBe('https://api.example.com/v1beta/openai/models');
+  });
+
   it('provides shared unsupported login/checkin and zero-balance defaults', async () => {
     const adapter = new TestStandardApiProviderAdapter();
 

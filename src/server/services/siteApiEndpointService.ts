@@ -1,5 +1,6 @@
 import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { parseUpstreamUrlMode } from '../proxy-core/orchestration/upstreamRequest.js';
 import { RETRYABLE_TIMEOUT_PATTERNS } from './proxyRetryPolicy.js';
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
@@ -69,16 +70,31 @@ export class SiteApiEndpointRequestError extends Error {
   }
 }
 
+export class SiteApiEndpointSkipError extends Error {
+  constructor(message = 'site api endpoint skipped') {
+    super(message);
+    this.name = 'SiteApiEndpointSkipError';
+  }
+}
+
+export function isSiteApiEndpointSkipError(error: unknown): error is SiteApiEndpointSkipError {
+  return error instanceof SiteApiEndpointSkipError
+    || (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'SiteApiEndpointSkipError');
+}
+
 export function normalizeSiteApiEndpointBaseUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
+  const mode = parseUpstreamUrlMode(trimmed).mode;
+  const marker = mode === 'suffix' ? '#' : mode === 'fixed' ? '$' : '';
+  const withoutMarker = marker ? trimmed.slice(0, -1).trim() : trimmed;
   try {
-    const parsed = new URL(trimmed);
+    const parsed = new URL(withoutMarker);
     parsed.search = '';
     parsed.hash = '';
-    return parsed.toString().replace(/\/+$/, '');
+    return `${parsed.toString().replace(/\/+$/, '')}${marker}`;
   } catch {
-    return trimmed.replace(/\/+$/, '');
+    return `${withoutMarker.replace(/[?#].*$/, '').replace(/\/+$/, '')}${marker}`;
   }
 }
 
@@ -152,6 +168,7 @@ export function classifySiteApiEndpointFailure(
 export async function selectSiteApiEndpointTarget(
   site: SiteRow,
   now?: string | Date,
+  excludedEndpointIds?: ReadonlySet<number>,
 ): Promise<SiteApiEndpointTarget | null> {
   const nowIso = toIsoTimestamp(now);
   const endpoints = await db.select().from(schema.siteApiEndpoints)
@@ -171,7 +188,11 @@ export async function selectSiteApiEndpointTarget(
   }
 
   const eligible = endpoints
-    .filter((endpoint) => (endpoint.enabled ?? true) && !isEndpointCoolingDown(endpoint, nowIso))
+    .filter((endpoint) => (
+      (endpoint.enabled ?? true)
+      && !isEndpointCoolingDown(endpoint, nowIso)
+      && !(endpoint.id && excludedEndpointIds?.has(endpoint.id))
+    ))
     .sort((left, right) => {
       const sortOrder = (left.sortOrder ?? 0) - (right.sortOrder ?? 0);
       if (sortOrder !== 0) return sortOrder;
@@ -252,16 +273,36 @@ export async function runWithSiteApiEndpointPool<T>(
   operation: (target: SiteApiEndpointTarget) => Promise<T>,
 ): Promise<T> {
   const attemptedEndpointIds = new Set<number>();
-  let lastError: unknown;
+  let lastRealError: unknown;
+  let skippedEndpoint = false;
+  let siteFallbackAttempted = false;
+
+  const runSiteFallback = async () => {
+    siteFallbackAttempted = true;
+    return operation({
+      kind: 'site-fallback',
+      siteId: site.id,
+      endpointId: null,
+      baseUrl: normalizeSiteApiEndpointBaseUrl(site.url),
+      configuredEndpointCount: attemptedEndpointIds.size,
+      endpoint: null,
+    });
+  };
 
   while (true) {
-    const target = await selectSiteApiEndpointTarget(site);
+    const target = await selectSiteApiEndpointTarget(site, undefined, attemptedEndpointIds);
     if (!target) {
-      if (lastError) throw lastError;
+      if (skippedEndpoint && !lastRealError && !siteFallbackAttempted) {
+        return runSiteFallback();
+      }
+      if (lastRealError) throw lastRealError;
       throw new Error('当前站点的 API 请求地址均不可用');
     }
     if (target.endpointId && attemptedEndpointIds.has(target.endpointId)) {
-      if (lastError) throw lastError;
+      if (skippedEndpoint && !lastRealError && !siteFallbackAttempted) {
+        return runSiteFallback();
+      }
+      if (lastRealError) throw lastRealError;
       throw new Error('当前站点的 API 请求地址均不可用');
     }
 
@@ -276,7 +317,16 @@ export async function runWithSiteApiEndpointPool<T>(
       }
       return result;
     } catch (error) {
-      lastError = error;
+      if (isSiteApiEndpointSkipError(error)) {
+        if (!target.endpointId) {
+          throw error;
+        }
+        skippedEndpoint = true;
+        attemptedEndpointIds.add(target.endpointId);
+        continue;
+      }
+
+      lastRealError = error;
       if (!target.endpointId) {
         throw error;
       }

@@ -9,7 +9,7 @@ import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordD
 import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
-import { buildUpstreamUrl } from './upstreamUrl.js';
+import { buildUpstreamUrl, isFixedUpstreamUrlCompatible } from './upstreamUrl.js';
 import {
   deleteProxyVideoTaskByPublicId,
   getProxyVideoTaskByPublicId,
@@ -24,7 +24,7 @@ import {
   getTesterForcedChannelId,
   selectProxyChannelForAttempt,
 } from '../../proxy-core/channelSelection.js';
-import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError, SiteApiEndpointSkipError } from '../../services/siteApiEndpointService.js';
 
 function rewriteVideoResponsePublicId(payload: unknown, publicId: string): unknown {
   if (!payload || typeof payload !== 'object') return payload;
@@ -87,6 +87,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
 
       try {
         const { upstream, text, baseUrl } = await runWithSiteApiEndpointPool(selected.site, async (target) => {
+          if (!isFixedUpstreamUrlCompatible(target.baseUrl, '/v1/videos')) {
+            throw new SiteApiEndpointSkipError();
+          }
           const targetUrl = buildUpstreamUrl(target.baseUrl, '/v1/videos');
           const accountProxy = getProxyUrlFromExtraConfig(selected.account.extraConfig);
           const requestInit = multipartForm
@@ -264,7 +267,11 @@ async function requestMappedVideoTaskUpstream(
   method: 'GET' | 'DELETE',
 ): Promise<{ upstream: Awaited<ReturnType<typeof fetch>> }> {
   const buildRequest = async (baseUrl: string) => {
-    const targetUrl = buildUpstreamUrl(baseUrl, `/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`);
+    const requestPath = `/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`;
+    if (!isFixedUpstreamUrlCompatible(baseUrl, requestPath)) {
+      throw new SiteApiEndpointSkipError();
+    }
+    const targetUrl = buildUpstreamUrl(baseUrl, requestPath);
     const upstream = await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
       method,
       headers: {

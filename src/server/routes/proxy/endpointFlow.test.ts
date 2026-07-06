@@ -111,6 +111,55 @@ describe('executeEndpointFlow', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://openrouter.ai/api/v1/chat/completions');
   });
 
+  it('uses suffix mode to append only the request suffix after /v1', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    await executeEndpointFlow({
+      siteUrl: 'https://abc.com/v3#',
+      endpointCandidates: ['chat'],
+      buildRequest: () => ({ ...requestFor('/v1/chat/completions'), endpoint: 'chat' }),
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://abc.com/v3/chat/completions');
+  });
+
+  it('filters fixed chat urls so they do not probe responses or messages candidates', async () => {
+    const dispatchRequest = vi.fn(async () => toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://abc.com/v1/chat/completions$',
+      endpointCandidates: ['responses', 'chat', 'messages'],
+      buildRequest: (endpoint) => {
+        if (endpoint === 'responses') return requestFor('/v1/responses');
+        if (endpoint === 'messages') return { ...requestFor('/v1/messages'), endpoint };
+        return { ...requestFor('/v1/chat/completions'), endpoint };
+      },
+      dispatchRequest,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(dispatchRequest).toHaveBeenCalledTimes(1);
+    expect(dispatchRequest.mock.calls[0]?.[0]?.endpoint).toBe('chat');
+    expect(dispatchRequest.mock.calls[0]?.[1]).toBe('https://abc.com/v1/chat/completions');
+  });
+
+  it('throws a skip signal when fixed url is incompatible with every candidate', async () => {
+    await expect(executeEndpointFlow({
+      siteUrl: 'https://abc.com/v1/chat/completions$',
+      endpointCandidates: ['responses', 'messages'],
+      buildRequest: (endpoint) => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/messages'), endpoint },
+    })).rejects.toMatchObject({ name: 'SiteApiEndpointSkipError' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('keeps url well-formed when base url includes query/hash', async () => {
     fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
       status: 200,

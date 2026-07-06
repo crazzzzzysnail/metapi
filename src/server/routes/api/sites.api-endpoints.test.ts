@@ -171,6 +171,36 @@ describe('sites api endpoints', () => {
     expect((response.json() as { error?: string }).error).toContain('Duplicate apiEndpoints url');
   });
 
+  it('preserves empty mode markers and clears query or named fragments on api endpoint urls', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'mode-markers-site',
+        url: 'https://panel.example.com',
+        platform: 'new-api',
+        apiEndpoints: [
+          { url: 'https://api-a.example.com/v3#', enabled: true, sortOrder: 0 },
+          { url: 'https://api-b.example.com/v1/chat/completions$', enabled: true, sortOrder: 1 },
+          { url: 'https://api-c.example.com/v1?trace=1#foo', enabled: true, sortOrder: 2 },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { id: number };
+    const stored = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.siteId, payload.id))
+      .orderBy(asc(schema.siteApiEndpoints.sortOrder), asc(schema.siteApiEndpoints.id))
+      .all();
+
+    expect(stored.map((row) => row.url)).toEqual([
+      'https://api-a.example.com/v3#',
+      'https://api-b.example.com/v1/chat/completions$',
+      'https://api-c.example.com/v1',
+    ]);
+  });
+
   it('includes apiEndpoints in GET /api/sites using stable endpoint order', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'listed-site',

@@ -192,6 +192,21 @@ describe('buildSiteSaveAction', () => {
     });
   });
 
+  it('preserves empty suffix and fixed markers while clearing query and named fragments', () => {
+    expect(serializeSiteApiEndpoints([
+      { url: 'https://api-a.example.com/v3#', enabled: true },
+      { url: 'https://api-b.example.com/v1/chat/completions$', enabled: true },
+      { url: 'https://api-c.example.com/v1?trace=1#foo', enabled: true },
+    ])).toEqual({
+      valid: true,
+      apiEndpoints: [
+        { url: 'https://api-a.example.com/v3#', enabled: true, sortOrder: 0 },
+        { url: 'https://api-b.example.com/v1/chat/completions$', enabled: true, sortOrder: 1 },
+        { url: 'https://api-c.example.com/v1', enabled: true, sortOrder: 2 },
+      ],
+    });
+  });
+
   it('rejects duplicate api endpoints after normalization', () => {
     expect(serializeSiteApiEndpoints([
       { url: 'https://api.example.com/', enabled: true },

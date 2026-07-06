@@ -13,6 +13,8 @@ describe('siteApiEndpointService', () => {
   let selectSiteApiEndpointTarget: SiteApiEndpointServiceModule['selectSiteApiEndpointTarget'];
   let recordSiteApiEndpointFailure: SiteApiEndpointServiceModule['recordSiteApiEndpointFailure'];
   let recordSiteApiEndpointSuccess: SiteApiEndpointServiceModule['recordSiteApiEndpointSuccess'];
+  let runWithSiteApiEndpointPool: SiteApiEndpointServiceModule['runWithSiteApiEndpointPool'];
+  let SiteApiEndpointSkipError: SiteApiEndpointServiceModule['SiteApiEndpointSkipError'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -28,6 +30,8 @@ describe('siteApiEndpointService', () => {
     selectSiteApiEndpointTarget = serviceModule.selectSiteApiEndpointTarget;
     recordSiteApiEndpointFailure = serviceModule.recordSiteApiEndpointFailure;
     recordSiteApiEndpointSuccess = serviceModule.recordSiteApiEndpointSuccess;
+    runWithSiteApiEndpointPool = serviceModule.runWithSiteApiEndpointPool;
+    SiteApiEndpointSkipError = serviceModule.SiteApiEndpointSkipError;
   });
 
   beforeEach(async () => {
@@ -203,6 +207,85 @@ describe('siteApiEndpointService', () => {
     const selected = await selectSiteApiEndpointTarget(site, '2026-03-31T12:00:00.000Z');
 
     expect(selected).toBeNull();
+  });
+
+  it('falls back to the primary site url when all eligible endpoints are skipped', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'skip-fallback-site',
+      url: 'https://primary.example.com/v1',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values([
+      {
+        siteId: site.id,
+        url: 'https://api-a.example.com/v1/chat/completions$',
+        enabled: true,
+        sortOrder: 0,
+      },
+      {
+        siteId: site.id,
+        url: 'https://api-b.example.com/v1/responses$',
+        enabled: true,
+        sortOrder: 1,
+      },
+    ]).run();
+
+    const attempted: string[] = [];
+    const result = await runWithSiteApiEndpointPool(site, async (target) => {
+      attempted.push(`${target.kind}:${target.baseUrl}`);
+      if (target.kind === 'endpoint') {
+        throw new SiteApiEndpointSkipError();
+      }
+      return target.baseUrl;
+    });
+
+    expect(result).toBe('https://primary.example.com/v1');
+    expect(attempted).toEqual([
+      'endpoint:https://api-a.example.com/v1/chat/completions$',
+      'endpoint:https://api-b.example.com/v1/responses$',
+      'site-fallback:https://primary.example.com/v1',
+    ]);
+
+    const rows = await db.select().from(schema.siteApiEndpoints).all();
+    expect(rows.every((row) => !row.lastFailedAt && !row.cooldownUntil && !row.lastFailureReason)).toBe(true);
+  });
+
+  it('keeps real endpoint failures ahead of skip-only fallback', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'real-failure-site',
+      url: 'https://primary.example.com/v1',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values([
+      {
+        siteId: site.id,
+        url: 'https://api-failing.example.com/v1/chat/completions$',
+        enabled: true,
+        sortOrder: 0,
+      },
+      {
+        siteId: site.id,
+        url: 'https://api-skipped.example.com/v1/responses$',
+        enabled: true,
+        sortOrder: 1,
+      },
+    ]).run();
+
+    await expect(runWithSiteApiEndpointPool(site, async (target) => {
+      if (target.baseUrl.includes('api-failing')) {
+        throw new Error('HTTP 502: upstream failed');
+      }
+      throw new SiteApiEndpointSkipError();
+    })).rejects.toThrow('HTTP 502: upstream failed');
+
+    const failed = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.url, 'https://api-failing.example.com/v1/chat/completions$'))
+      .get();
+    expect(failed?.lastFailureReason).toBe('HTTP 502: upstream failed');
   });
 
   it('records retryable failures with a 5-minute cooldown', async () => {

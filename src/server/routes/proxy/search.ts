@@ -11,12 +11,12 @@ import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
-import { buildUpstreamUrl } from './upstreamUrl.js';
+import { buildUpstreamUrl, isFixedUpstreamUrlCompatible } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../proxy-core/downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
-import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError, SiteApiEndpointSkipError } from '../../services/siteApiEndpointService.js';
 import {
   buildForcedChannelUnavailableMessage,
   canRetryChannelSelection,
@@ -109,6 +109,9 @@ export async function searchProxyRoute(app: FastifyInstance) {
       try {
         const { upstream, text, firstByteLatencyMs } = await runWithSiteApiEndpointPool(selected.site, async (target) => {
           const attemptStartedAtMs = Date.now();
+          if (!isFixedUpstreamUrlCompatible(target.baseUrl, '/v1/search')) {
+            throw new SiteApiEndpointSkipError();
+          }
           const targetUrl = buildUpstreamUrl(target.baseUrl, '/v1/search');
           const response = await fetchWithObservedFirstByte(
             async (signal) => fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {

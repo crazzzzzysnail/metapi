@@ -23,6 +23,7 @@ import {
   recordDownstreamCostUsage,
 } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
+import { buildUpstreamUrl, isFixedUpstreamUrlCompatible } from '../orchestration/upstreamRequest.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
@@ -67,7 +68,7 @@ import {
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
 } from './sharedSurface.js';
-import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError, SiteApiEndpointSkipError } from '../../services/siteApiEndpointService.js';
 import {
   buildSurfaceProxyDebugResponseHeaders,
   captureSurfaceProxyDebugSuccessResponseBody,
@@ -1328,12 +1329,16 @@ export async function handleClaudeCountTokensSurfaceRequest(
     try {
       const countTokensResult = await runWithSiteApiEndpointPool(selected.site, async (target) => {
         let upstreamRequest = buildRequest();
+        if (!isFixedUpstreamUrlCompatible(target.baseUrl, upstreamRequest.path)) {
+          throw new SiteApiEndpointSkipError();
+        }
+        let targetUrl = buildUpstreamUrl(target.baseUrl, upstreamRequest.path);
         const dispatchRequest = createSurfaceDispatchRequest({
           site: selected.site,
           siteUrl: target.baseUrl,
           accountExtraConfig: selected.account.extraConfig,
         });
-        let upstream = await dispatchRequest(upstreamRequest);
+        let upstream = await dispatchRequest(upstreamRequest, targetUrl);
         let recoverApplied = false;
 
         if ((upstream.status === 401 || upstream.status === 403) && oauth) {
@@ -1352,10 +1357,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
           });
           if (recovered?.upstream?.ok) {
             upstreamRequest = buildRequest();
+            targetUrl = buildUpstreamUrl(target.baseUrl, upstreamRequest.path);
             upstream = recovered.upstream;
             recoverApplied = true;
           } else {
             upstreamRequest = recoverContext.request;
+            targetUrl = buildUpstreamUrl(target.baseUrl, upstreamRequest.path);
             upstream = recoverContext.response;
           }
         }
@@ -1373,7 +1380,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
           attemptIndex: retryCount,
           endpoint: upstreamRequest.endpoint,
           requestPath: upstreamRequest.path,
-          targetUrl: `${target.baseUrl}${upstreamRequest.path}`,
+          targetUrl,
           runtimeExecutor: upstreamRequest.runtime?.executor || 'default',
           requestHeaders: upstreamRequest.headers,
           requestBody: upstreamRequest.body,

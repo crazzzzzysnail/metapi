@@ -27,4 +27,12 @@ describe('Sites centered modal adoption', () => {
     expect(source).not.toContain('label="AI 请求地址"');
     expect(source).not.toContain('AI 地址: {buildSiteApiEndpointSummary(site)}');
   });
+
+  it('documents api endpoint mode markers', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/web/pages/Sites.tsx'), 'utf8');
+
+    expect(source).toContain('/v1#');
+    expect(source).toContain('/v1/chat/completions$');
+    expect(source).toContain('只请求该完整地址');
+  });
 });

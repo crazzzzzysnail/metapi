@@ -28,7 +28,11 @@ import { isCodexPlatform } from './oauth/codexAccount.js';
 import { buildStoredOauthStateFromAccount, getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from './oauth/refreshSingleflight.js';
 import { listEnabledOauthRouteUnitsWithMembers } from './oauth/routeUnitService.js';
-import { requireSiteApiBaseUrl } from './siteApiEndpointService.js';
+import {
+  normalizeSiteApiEndpointBaseUrl,
+  selectSiteApiEndpointTarget,
+} from './siteApiEndpointService.js';
+import { resolveModelDiscoveryUrl } from '../proxy-core/orchestration/upstreamRequest.js';
 import {
   discoverAntigravityModelsFromCloud,
   discoverClaudeModelsFromCloud,
@@ -344,6 +348,32 @@ function shouldRetryModelDiscoveryWithOauthRefresh(error: unknown): boolean {
   return message.includes('http 401')
     || message.includes('unauthorized')
     || message.includes('unauthenticated');
+}
+
+async function resolveModelDiscoveryBaseUrl(site: typeof schema.sites.$inferSelect): Promise<string> {
+  const attemptedEndpointIds = new Set<number>();
+  let skippedEndpoint = false;
+
+  while (true) {
+    const target = await selectSiteApiEndpointTarget(site, undefined, attemptedEndpointIds);
+    if (!target) {
+      if (skippedEndpoint) {
+        const fallbackBaseUrl = normalizeSiteApiEndpointBaseUrl(site.url);
+        if (resolveModelDiscoveryUrl(fallbackBaseUrl, '/v1/models')) return fallbackBaseUrl;
+      }
+      throw new Error('当前站点的 API 请求地址均不可用');
+    }
+
+    if (resolveModelDiscoveryUrl(target.baseUrl, '/v1/models')) {
+      return target.baseUrl;
+    }
+
+    if (!target.endpointId) {
+      throw new Error('当前站点的 API 请求地址均不可用');
+    }
+    skippedEndpoint = true;
+    attemptedEndpointIds.add(target.endpointId);
+  }
 }
 
 async function retryOauthModelDiscoveryWithRefresh<T>(input: {
@@ -1118,7 +1148,7 @@ export async function refreshModelsForAccount(
 
   let aiBaseUrl: string;
   try {
-    aiBaseUrl = await requireSiteApiBaseUrl(site);
+    aiBaseUrl = await resolveModelDiscoveryBaseUrl(site);
   } catch (err) {
     const rawMessage = (err as { message?: string })?.message || '模型获取失败';
     const errorCode = classifyModelDiscoveryError(rawMessage);
@@ -1150,6 +1180,11 @@ export async function refreshModelsForAccount(
     const message = (err as { message?: string })?.message || String(err || '');
     if (message) failureMessages.push(message);
   };
+  const ensureModelDiscoverySupported = (baseUrl: string) => {
+    if (!resolveModelDiscoveryUrl(baseUrl, '/v1/models')) {
+      throw new Error('当前站点的 API 请求地址均不可用');
+    }
+  };
 
   const mergeDiscoveredModels = (models: string[], latencyMs: number | null) => {
     for (const modelName of models) {
@@ -1177,8 +1212,10 @@ export async function refreshModelsForAccount(
     try {
       models = normalizeModels(
         await withTimeout(
-          () => withAccountProxyOverride(accountProxyUrl,
-            () => adapter.getModels(aiBaseUrl, credential, platformUserId)),
+          () => withAccountProxyOverride(accountProxyUrl, () => {
+            ensureModelDiscoverySupported(aiBaseUrl);
+            return adapter.getModels(aiBaseUrl, credential, platformUserId);
+          }),
           MODEL_DISCOVERY_TIMEOUT_MS,
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),
@@ -1205,8 +1242,10 @@ export async function refreshModelsForAccount(
     try {
       models = normalizeModels(
         await withTimeout(
-          () => withAccountProxyOverride(accountProxyUrl,
-            () => adapter.getModels(aiBaseUrl, token.token, platformUserId)),
+          () => withAccountProxyOverride(accountProxyUrl, () => {
+            ensureModelDiscoverySupported(aiBaseUrl);
+            return adapter.getModels(aiBaseUrl, token.token, platformUserId);
+          }),
           MODEL_DISCOVERY_TIMEOUT_MS,
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),

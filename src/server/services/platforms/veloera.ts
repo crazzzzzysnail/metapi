@@ -1,4 +1,5 @@
 import { BasePlatformAdapter, CheckinResult, BalanceInfo } from './base.js';
+import { resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 export class VeloeraAdapter extends BasePlatformAdapter {
   readonly platformName = 'veloera';
@@ -54,7 +55,9 @@ export class VeloeraAdapter extends BasePlatformAdapter {
   }
 
   async getModels(baseUrl: string, apiToken: string, _platformUserId?: number): Promise<string[]> {
-    const res = await this.fetchJson<any>(`${baseUrl}/v1/models`, {
+    const modelsUrl = resolveModelDiscoveryUrl(baseUrl, '/v1/models');
+    if (!modelsUrl) return [];
+    const res = await this.fetchJson<any>(modelsUrl, {
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     return (res?.data || []).map((m: any) => m.id).filter(Boolean);

@@ -2,8 +2,10 @@ import { fetch } from 'undici';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
+import { SiteApiEndpointSkipError } from '../../services/siteApiEndpointService.js';
 import {
   buildUpstreamUrl,
+  isFixedUpstreamUrlCompatible,
   summarizeUpstreamError,
   type UpstreamEndpoint,
 } from './upstreamRequest.js';
@@ -85,6 +87,12 @@ export function withUpstreamPath(path: string, message: string): string {
   return `[upstream:${path}] ${message}`;
 }
 
+function endpointCompatibilityPath(endpoint: UpstreamEndpoint): string {
+  if (endpoint === 'messages') return '/v1/messages';
+  if (endpoint === 'responses') return '/v1/responses';
+  return '/v1/chat/completions';
+}
+
 async function runEndpointFlowHook<T>(
   hook: ((ctx: T) => void | Promise<void>) | undefined,
   ctx: T,
@@ -99,8 +107,14 @@ async function runEndpointFlowHook<T>(
 }
 
 export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Promise<EndpointFlowResult> {
-  const endpointCount = input.endpointCandidates.length;
+  const endpointCandidates = input.endpointCandidates.filter((endpoint) => (
+    isFixedUpstreamUrlCompatible(input.siteUrl, endpointCompatibilityPath(endpoint))
+  ));
+  const endpointCount = endpointCandidates.length;
   if (endpointCount <= 0) {
+    if (input.endpointCandidates.length > 0) {
+      throw new SiteApiEndpointSkipError('fixed upstream url is incompatible with endpoint candidates');
+    }
     return {
       ok: false,
       status: 502,
@@ -113,8 +127,11 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalRawErrText: string | undefined;
 
   for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
-    const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
+    const endpoint = endpointCandidates[endpointIndex] as UpstreamEndpoint;
     const request = input.buildRequest(endpoint, endpointIndex);
+    if (!isFixedUpstreamUrlCompatible(input.siteUrl, request.path)) {
+      continue;
+    }
     const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
     const targetUrl = input.proxyUrl
       ? buildUpstreamUrl(input.proxyUrl, request.path)

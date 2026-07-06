@@ -8,7 +8,8 @@ import {
   mergeAccountExtraConfig,
   type AccountCredentialMode,
 } from './accountExtraConfig.js';
-import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointSkipError } from './siteApiEndpointService.js';
+import { resolveModelDiscoveryUrl } from '../proxy-core/orchestration/upstreamRequest.js';
 import { type AccountCreatePayload } from '../contracts/accountsRoutePayloads.js';
 import { convergeAccountMutation } from './accountMutationWorkflow.js';
 
@@ -81,6 +82,9 @@ async function getModelsWithSiteApiEndpointPool(
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw new Error(timeoutMessage);
+    }
+    if (!resolveModelDiscoveryUrl(target.baseUrl, '/v1/models')) {
+      throw new SiteApiEndpointSkipError();
     }
     return withTimeout(
       () => adapter.getModels(target.baseUrl, accessToken, platformUserId),

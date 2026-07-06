@@ -11,7 +11,7 @@ import {
   isModelAllowedByPolicyOrAllowedRoutes,
   type DownstreamTokenAuthSuccess,
 } from '../../services/downstreamApiKeyService.js';
-import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError, SiteApiEndpointSkipError } from '../../services/siteApiEndpointService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromAccount } from '../../services/oauth/oauthAccount.js';
@@ -19,6 +19,7 @@ import { openAiResponsesTransformer } from '../../transformers/openai/responses/
 import { buildUpstreamEndpointRequest } from './upstreamEndpoint.js';
 import { config } from '../../config.js';
 import { applyOpenAiServiceTierPolicy } from '../../proxy-core/serviceTierPolicy.js';
+import { buildUpstreamUrl, isFixedUpstreamUrlCompatible } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 const installedApps = new WeakSet<FastifyInstance>();
 const WS_TURN_STATE_HEADER = 'x-codex-turn-state';
@@ -723,7 +724,10 @@ async function handleResponsesWebsocketConnection(
                     providerHeaders,
                     codexExplicitSessionId: deriveCodexExplicitSessionId(normalized.request, websocketSessionId),
                   });
-                  const requestUrl = `${target.baseUrl.replace(/\/+$/, '')}${prepared.path}`;
+                  if (!isFixedUpstreamUrlCompatible(target.baseUrl, prepared.path)) {
+                    throw new SiteApiEndpointSkipError();
+                  }
+                  const requestUrl = buildUpstreamUrl(target.baseUrl, prepared.path);
 
                   try {
                     return await codexWebsocketRuntime.sendRequest({

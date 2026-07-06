@@ -23,6 +23,7 @@ import {
 } from '../../services/upstreamEndpointRuntimeMemory.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
+import { buildUpstreamUrl } from '../orchestration/upstreamRequest.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import { getProxyAuthContext, getProxyResourceOwner } from '../../middleware/auth.js';
 import { normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
@@ -702,7 +703,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
               headers: recoveredHeaders,
               body: recoveredBody,
             };
-            const recoveredResponse = await dispatchRequest(recoveredRequest);
+            const recoveredResponse = await dispatchRequest(
+              recoveredRequest,
+              buildUpstreamUrl(siteApiBaseUrl, recoveredRequest.path),
+            );
             if (recoveredResponse.ok) {
               return {
                 upstream: recoveredResponse,

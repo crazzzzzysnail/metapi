@@ -797,6 +797,128 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
   });
 
+  it('derives codex cloud model discovery from a fixed ai endpoint instead of requesting the business endpoint', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockRejectedValue(new Error('codex plan discovery should not call adapter.getModels'));
+    undiciFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [
+          { id: 'gpt-5.3-codex' },
+        ],
+      }),
+      text: async () => JSON.stringify({ ok: true }),
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'codex-fixed-endpoint-site',
+      url: 'https://chatgpt.com/panel-codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://chatgpt.com/backend-api/codex/chat/completions$',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'codex-fixed-user@example.com',
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'chatgpt-account-fixed',
+          email: 'codex-fixed-user@example.com',
+          planType: 'plus',
+        },
+      }),
+    }).returning().get();
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result).toMatchObject({
+      accountId: account.id,
+      refreshed: true,
+      status: 'success',
+      modelCount: 1,
+      modelsPreview: ['gpt-5.3-codex'],
+    });
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+  });
+
+  it('skips unrecognized fixed codex model discovery endpoints and falls back to the site url', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockRejectedValue(new Error('codex plan discovery should not call adapter.getModels'));
+    undiciFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [
+          { id: 'gpt-5.3-codex' },
+        ],
+      }),
+      text: async () => JSON.stringify({ ok: true }),
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'codex-unrecognized-fixed-site',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://chatgpt.com/backend-api/codex/custom-endpoint$',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'codex-skip-user@example.com',
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'chatgpt-account-skip',
+          email: 'codex-skip-user@example.com',
+          planType: 'plus',
+        },
+      }),
+    }).returning().get();
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result).toMatchObject({
+      accountId: account.id,
+      refreshed: true,
+      status: 'success',
+      modelCount: 1,
+      modelsPreview: ['gpt-5.3-codex'],
+    });
+    expect(undiciFetchMock).toHaveBeenCalledTimes(1);
+    expect(String(undiciFetchMock.mock.calls[0]?.[0] || '')).toBe('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0');
+
+    const endpoint = await db.select().from(schema.siteApiEndpoints)
+      .where(eq(schema.siteApiEndpoints.siteId, site.id))
+      .get();
+    expect(endpoint?.lastFailedAt).toBeNull();
+    expect(endpoint?.lastFailureReason).toBeNull();
+    expect(endpoint?.cooldownUntil).toBeNull();
+  });
+
   it('rotates codex cloud discovery across configured ai endpoints after a retryable failure', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockRejectedValue(new Error('codex plan discovery should not call adapter.getModels'));

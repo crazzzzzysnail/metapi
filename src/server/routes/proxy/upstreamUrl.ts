@@ -1,1 +1,4 @@
-export { buildUpstreamUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
+export {
+  buildUpstreamUrl,
+  isFixedUpstreamUrlCompatible,
+} from '../../proxy-core/orchestration/upstreamRequest.js';

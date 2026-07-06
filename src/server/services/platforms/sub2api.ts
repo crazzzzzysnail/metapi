@@ -10,6 +10,7 @@ import {
   UserInfo,
 } from './base.js';
 import { stripTrailingSlashes } from '../urlNormalization.js';
+import { parseUpstreamUrlMode, resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
   return stripTrailingSlashes(baseUrl || '');
@@ -446,6 +447,10 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   private resolveModelEndpoints(baseUrl: string): string[] {
     const normalizedBase = normalizeBaseUrl(baseUrl);
     if (!normalizedBase) return [];
+    const modeResolved = parseUpstreamUrlMode(normalizedBase).mode === 'default'
+      ? null
+      : resolveModelDiscoveryUrl(normalizedBase, '/v1/models');
+    if (modeResolved) return [modeResolved];
     if (/\/models$/i.test(normalizedBase)) return [normalizedBase];
     if (/\/(?:antigravity\/)?v\d+(?:\.\d+)?(?:beta)?$/i.test(normalizedBase)) {
       return [`${normalizedBase}/models`];
