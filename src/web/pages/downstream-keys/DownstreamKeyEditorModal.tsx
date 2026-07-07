@@ -154,6 +154,44 @@ function normalizeExcludedCredentialRefs(values: DownstreamExcludedCredentialRef
   return Array.from(deduped.values()).sort((left, right) => buildExcludedCredentialRefKey(left).localeCompare(buildExcludedCredentialRefKey(right)));
 }
 
+function invertStringSelection(current: string[], options: string[]): string[] {
+  const optionSet = new Set(options);
+  const selectedSet = new Set(current);
+  return uniqStrings([
+    ...current.filter((item) => !optionSet.has(item)),
+    ...options.filter((item) => !selectedSet.has(item)),
+  ]);
+}
+
+function invertIdSelection(current: number[], options: number[]): number[] {
+  const optionSet = new Set(options);
+  const selectedSet = new Set(current);
+  return uniqIds([
+    ...current.filter((item) => !optionSet.has(item)),
+    ...options.filter((item) => !selectedSet.has(item)),
+  ]);
+}
+
+function mergeExcludedCredentialRefs(
+  current: DownstreamExcludedCredentialRef[],
+  additions: DownstreamExcludedCredentialRef[],
+): DownstreamExcludedCredentialRef[] {
+  return normalizeExcludedCredentialRefs([...current, ...additions]);
+}
+
+function invertExcludedCredentialRefs(
+  current: DownstreamExcludedCredentialRef[],
+  options: DownstreamCredentialOption[],
+): DownstreamExcludedCredentialRef[] {
+  const optionKeys = new Set(options.map((item) => buildExcludedCredentialRefKey(item.ref)));
+  const currentKeys = new Set(current.map(buildExcludedCredentialRefKey));
+  const keptOtherRefs = current.filter((ref) => !optionKeys.has(buildExcludedCredentialRefKey(ref)));
+  const newlySelectedRefs = options
+    .filter((item) => !currentKeys.has(buildExcludedCredentialRefKey(item.ref)))
+    .map((item) => item.ref);
+  return normalizeExcludedCredentialRefs([...keptOtherRefs, ...newlySelectedRefs]);
+}
+
 export function TagInput({
   tags,
   onChange,
@@ -332,8 +370,28 @@ export default function DownstreamKeyEditorModal({
     ));
   }, [credentialOptions, credentialSearch]);
 
+  const selectableSiteIds = useMemo(
+    () => siteOptions.map((site) => site.siteId),
+    [siteOptions],
+  );
+  const selectableCredentialRefs = useMemo(
+    () => credentialOptions.map((item) => item.ref),
+    [credentialOptions],
+  );
+
   const selectedModelCount = form.selectedModels.length;
   const selectedGroupCount = normalizedSelectedGroupRouteIds.length;
+  const advancedActionRowStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
+  };
+  const advancedActionButtonStyle: React.CSSProperties = {
+    border: '1px solid var(--color-border)',
+    whiteSpace: 'nowrap',
+    minWidth: 52,
+  };
   const inputStyle: React.CSSProperties = {
     width: '100%',
     padding: '10px 12px',
@@ -468,9 +526,10 @@ export default function DownstreamKeyEditorModal({
                     <div className="downstream-key-modal-section-title">模型白名单</div>
                     <div className="downstream-key-modal-help">只展示精确模型；未勾选时默认不允许任何精确模型，可点“全选”一次性放开。</div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, selectedModels: exactModels }))}>全选</button>
-                    <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, selectedModels: [] }))}>清空</button>
+                  <div style={advancedActionRowStyle}>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedModels: exactModels }))}>全选</button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedModels: invertStringSelection(prev.selectedModels, exactModels) }))}>反选</button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedModels: [] }))}>清空</button>
                   </div>
                 </div>
                 <div className="downstream-key-modal-meta">已选 {selectedModelCount} 个模型</div>
@@ -508,9 +567,10 @@ export default function DownstreamKeyEditorModal({
                     <div className="downstream-key-modal-section-title">群组范围</div>
                     <div className="downstream-key-modal-help">限制可访问的群组路由；未勾选时默认不允许任何群组，可点“全选”一次性放开。</div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, selectedGroupRouteIds: groupRouteOptions.map((route) => route.id) }))}>全选</button>
-                    <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, selectedGroupRouteIds: [] }))}>清空</button>
+                  <div style={advancedActionRowStyle}>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedGroupRouteIds: groupRouteOptions.map((route) => route.id) }))}>全选</button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedGroupRouteIds: invertIdSelection(prev.selectedGroupRouteIds, groupRouteOptions.map((route) => route.id)) }))}>反选</button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, selectedGroupRouteIds: [] }))}>清空</button>
                   </div>
                 </div>
                 <div className="downstream-key-modal-meta">已选 {selectedGroupCount} 个群组</div>
@@ -557,7 +617,40 @@ export default function DownstreamKeyEditorModal({
                     <div className="downstream-key-modal-section-title">排除站点</div>
                     <div className="downstream-key-modal-help">命中的站点会直接跳过，不参与当前下游密钥的通道路由。</div>
                   </div>
-                  <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, excludedSiteIds: [] }))}>清空</button>
+                  <div style={advancedActionRowStyle}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={advancedActionButtonStyle}
+                      disabled={selectableSiteIds.length === 0}
+                      onClick={() => onChange((prev) => ({
+                        ...prev,
+                        excludedSiteIds: normalizeExcludedSiteIds([...prev.excludedSiteIds, ...selectableSiteIds]),
+                      }))}
+                    >
+                      全选
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={advancedActionButtonStyle}
+                      disabled={selectableSiteIds.length === 0}
+                      onClick={() => onChange((prev) => {
+                        const optionSet = new Set(selectableSiteIds);
+                        const selectedSet = new Set(prev.excludedSiteIds);
+                        return {
+                          ...prev,
+                          excludedSiteIds: normalizeExcludedSiteIds([
+                            ...prev.excludedSiteIds.filter((siteId) => !optionSet.has(siteId)),
+                            ...selectableSiteIds.filter((siteId) => !selectedSet.has(siteId)),
+                          ]),
+                        };
+                      })}
+                    >
+                      反选
+                    </button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, excludedSiteIds: [] }))}>清空</button>
+                  </div>
                 </div>
                 <div className="downstream-key-modal-meta">已排除 {form.excludedSiteIds.length} 个站点</div>
                 <div className="toolbar-search" style={{ maxWidth: '100%' }}>
@@ -603,7 +696,33 @@ export default function DownstreamKeyEditorModal({
                     <div className="downstream-key-modal-section-title">排除 API Key/令牌</div>
                     <div className="downstream-key-modal-help">支持排除显式令牌，以及 `tokenId` 为空时实际使用的默认 API Key。</div>
                   </div>
-                  <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => onChange((prev) => ({ ...prev, excludedCredentialRefs: [] }))}>清空</button>
+                  <div style={advancedActionRowStyle}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={advancedActionButtonStyle}
+                      disabled={selectableCredentialRefs.length === 0}
+                      onClick={() => onChange((prev) => ({
+                        ...prev,
+                        excludedCredentialRefs: mergeExcludedCredentialRefs(prev.excludedCredentialRefs, selectableCredentialRefs),
+                      }))}
+                    >
+                      全选
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={advancedActionButtonStyle}
+                      disabled={selectableCredentialRefs.length === 0}
+                      onClick={() => onChange((prev) => ({
+                        ...prev,
+                        excludedCredentialRefs: invertExcludedCredentialRefs(prev.excludedCredentialRefs, credentialOptions),
+                      }))}
+                    >
+                      反选
+                    </button>
+                    <button type="button" className="btn btn-ghost" style={advancedActionButtonStyle} onClick={() => onChange((prev) => ({ ...prev, excludedCredentialRefs: [] }))}>清空</button>
+                  </div>
                 </div>
                 <div className="downstream-key-modal-meta">已排除 {form.excludedCredentialRefs.length} 个凭证</div>
                 <div className="toolbar-search" style={{ maxWidth: '100%' }}>

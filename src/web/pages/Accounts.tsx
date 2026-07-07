@@ -104,6 +104,20 @@ function resolveConnectionsSegment(search: string): ConnectionsSegment {
   return "session";
 }
 
+function getAccountRuntimeStatusRank(account: any): number {
+  if (account?.status === "expired") return 4;
+  if (account?.status === "disabled" || account?.site?.status === "disabled") {
+    return 3;
+  }
+  const state = String(account?.runtimeHealth?.state || "unknown");
+  if (state === "healthy") return 0;
+  if (state === "degraded") return 1;
+  if (state === "unknown") return 2;
+  if (state === "disabled") return 3;
+  if (state === "unhealthy") return 4;
+  return 2;
+}
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -292,6 +306,7 @@ export default function Accounts() {
         accounts,
         sortMode,
         (account) => account.balance || 0,
+        getAccountRuntimeStatusRank,
       ),
     [accounts, sortMode],
   );
@@ -1289,6 +1304,7 @@ export default function Accounts() {
                     onChange={(nextValue) => setSortMode(nextValue as SortMode)}
                     options={[
                       { value: "custom", label: "自定义排序" },
+                      { value: "runtime-status", label: "运行状态" },
                       { value: "balance-desc", label: "余额高到低" },
                       { value: "balance-asc", label: "余额低到高" },
                     ]}
@@ -1370,6 +1386,7 @@ export default function Accounts() {
                 onChange={(nextValue) => setSortMode(nextValue as SortMode)}
                 options={[
                   { value: "custom", label: "自定义排序" },
+                  { value: "runtime-status", label: "运行状态" },
                   { value: "balance-desc", label: "余额高到低" },
                   { value: "balance-asc", label: "余额低到高" },
                 ]}

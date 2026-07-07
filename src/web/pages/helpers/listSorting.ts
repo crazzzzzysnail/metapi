@@ -1,4 +1,4 @@
-export type SortMode = 'custom' | 'balance-desc' | 'balance-asc';
+export type SortMode = 'custom' | 'balance-desc' | 'balance-asc' | 'runtime-status';
 
 type SortableBase = {
   id: number;
@@ -10,6 +10,7 @@ export function sortItemsForDisplay<T extends SortableBase>(
   items: T[],
   mode: SortMode,
   getBalance: (item: T) => number,
+  getRuntimeStatusRank: (item: T) => number = () => 2,
 ): T[] {
   const list = [...items];
   const customComparator = (a: T, b: T) => {
@@ -25,6 +26,22 @@ export function sortItemsForDisplay<T extends SortableBase>(
 
   if (mode === 'custom') {
     return list.sort(customComparator);
+  }
+
+  if (mode === 'runtime-status') {
+    return list.sort((a, b) => {
+      const aPinned = a.isPinned ? 1 : 0;
+      const bPinned = b.isPinned ? 1 : 0;
+      if (aPinned !== bPinned) return bPinned - aPinned;
+
+      const rawARank = getRuntimeStatusRank(a);
+      const rawBRank = getRuntimeStatusRank(b);
+      const aRank = Number.isFinite(rawARank) ? rawARank : 2;
+      const bRank = Number.isFinite(rawBRank) ? rawBRank : 2;
+      if (aRank !== bRank) return aRank - bRank;
+
+      return customComparator(a, b);
+    });
   }
 
   return list.sort((a, b) => {

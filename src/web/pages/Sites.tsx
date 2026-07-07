@@ -83,6 +83,18 @@ type SiteRow = {
   }>;
 };
 
+type BatchSiteSettingsForm = {
+  applyGlobalWeight: boolean;
+  globalWeight: string;
+  applyProxyUrl: boolean;
+  proxyUrl: string;
+  useSystemProxy: boolean;
+};
+
+function getSiteRuntimeStatusRank(site: SiteRow): number {
+  return site.status === 'disabled' ? 3 : 0;
+}
+
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
   return typeof customHeaders === 'string' && customHeaders.trim().length > 0;
 }
@@ -300,6 +312,14 @@ export default function Sites() {
   const isMobile = useIsMobile();
   const [showMobileTools, setShowMobileTools] = useState(false);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [batchSettingsOpen, setBatchSettingsOpen] = useState(false);
+  const [batchSettingsForm, setBatchSettingsForm] = useState<BatchSiteSettingsForm>({
+    applyGlobalWeight: false,
+    globalWeight: '',
+    applyProxyUrl: false,
+    proxyUrl: '',
+    useSystemProxy: false,
+  });
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
     siteId?: number;
@@ -420,7 +440,12 @@ export default function Sites() {
   }, []);
 
   const sortedSites = useMemo(
-    () => sortItemsForDisplay(sites, sortMode, (site) => site.totalBalance || 0),
+    () => sortItemsForDisplay(
+      sites,
+      sortMode,
+      (site) => site.totalBalance || 0,
+      getSiteRuntimeStatusRank,
+    ),
     [sites, sortMode],
   );
   const allVisibleSitesSelected = sortedSites.length > 0 && sortedSites.every((site) => selectedSiteIds.includes(site.id));
@@ -1114,6 +1139,63 @@ export default function Sites() {
     }
   };
 
+  const openBatchSettings = () => {
+    setBatchSettingsForm({
+      applyGlobalWeight: false,
+      globalWeight: '',
+      applyProxyUrl: false,
+      proxyUrl: '',
+      useSystemProxy: false,
+    });
+    setBatchSettingsOpen(true);
+  };
+
+  const runBatchSettings = async () => {
+    if (selectedSiteIds.length === 0) return;
+    if (!batchSettingsForm.applyGlobalWeight && !batchSettingsForm.applyProxyUrl) {
+      toast.info('请至少选择一个批量设置项');
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      ids: selectedSiteIds,
+      action: 'updateSettings',
+    };
+
+    if (batchSettingsForm.applyGlobalWeight) {
+      const parsedWeight = Number(batchSettingsForm.globalWeight);
+      if (!Number.isFinite(parsedWeight) || parsedWeight <= 0) {
+        toast.error('批量权重必须是大于 0 的数字');
+        return;
+      }
+      payload.globalWeight = Number(parsedWeight.toFixed(3));
+    }
+
+    if (batchSettingsForm.applyProxyUrl) {
+      payload.proxyUrl = batchSettingsForm.proxyUrl.trim();
+      payload.useSystemProxy = batchSettingsForm.useSystemProxy;
+    }
+
+    setBatchActionLoading(true);
+    try {
+      const result = await api.batchUpdateSites(payload);
+      const successIds = Array.isArray(result?.successIds) ? result.successIds.map((id: unknown) => Number(id)) : [];
+      const failedItems = Array.isArray(result?.failedItems) ? result.failedItems : [];
+      if (failedItems.length > 0) {
+        toast.info(`批量设置完成：成功 ${successIds.length}，失败 ${failedItems.length}`);
+      } else {
+        toast.success(`批量设置完成：成功 ${successIds.length}`);
+      }
+      setSelectedSiteIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      setBatchSettingsOpen(failedItems.length > 0);
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '批量设置失败');
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
+
   const confirmDelete = async () => {
     const target = deleteConfirm;
     if (!target) return;
@@ -1175,6 +1257,7 @@ export default function Sites() {
                 onChange={(nextValue) => setSortMode(nextValue as SortMode)}
                 options={[
                   { value: 'custom', label: '自定义排序' },
+                  { value: 'runtime-status', label: '运行状态' },
                   { value: 'balance-desc', label: '余额高到低' },
                   { value: 'balance-asc', label: '余额低到高' },
                 ]}
@@ -1202,6 +1285,7 @@ export default function Sites() {
                 onChange={(nextValue) => setSortMode(nextValue as SortMode)}
                 options={[
                   { value: 'custom', label: '自定义排序' },
+                  { value: 'runtime-status', label: '运行状态' },
                   { value: 'balance-desc', label: '余额高到低' },
                   { value: 'balance-asc', label: '余额低到高' },
                 ]}
@@ -1246,6 +1330,15 @@ export default function Sites() {
           >
             批量关闭系统代理
           </button>
+          <button
+            data-testid="sites-batch-settings"
+            onClick={openBatchSettings}
+            disabled={batchActionLoading}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            批量设置
+          </button>
           <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             批量启用
           </button>
@@ -1261,6 +1354,87 @@ export default function Sites() {
       <div className="info-tip" style={{ marginBottom: 12 }}>
         站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
       </div>
+
+      <CenteredModal
+        open={batchSettingsOpen}
+        onClose={() => setBatchSettingsOpen(false)}
+        title="批量设置站点"
+        maxWidth={560}
+        bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+        footer={(
+          <>
+            <button className="btn btn-ghost" onClick={() => setBatchSettingsOpen(false)} disabled={batchActionLoading}>取消</button>
+            <button className="btn btn-primary" onClick={() => void runBatchSettings()} disabled={batchActionLoading}>
+              {batchActionLoading ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '应用到所选站点'}
+            </button>
+          </>
+        )}
+      >
+        <div className="info-tip" style={{ marginBottom: 0 }}>
+          本次会对已选中的 {selectedSiteIds.length} 个站点批量设置权重或站点代理。未勾选的项目不会改动。
+        </div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <input
+            type="checkbox"
+            aria-label="启用批量设置权重"
+            checked={batchSettingsForm.applyGlobalWeight}
+            onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, applyGlobalWeight: event.target.checked }))}
+            style={{ marginTop: 10 }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 6 }}>批量设置权重</div>
+            <input
+              style={formInputStyle}
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={batchSettingsForm.globalWeight}
+              onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, globalWeight: event.target.value }))}
+              placeholder="站点全局权重（默认 1）"
+              disabled={!batchSettingsForm.applyGlobalWeight}
+            />
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <input
+            type="checkbox"
+            aria-label="启用批量设置站点代理"
+            checked={batchSettingsForm.applyProxyUrl}
+            onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, applyProxyUrl: event.target.checked }))}
+            style={{ marginTop: 10 }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 6 }}>批量设置站点代理</div>
+            <input
+              style={formInputStyle}
+              value={batchSettingsForm.proxyUrl}
+              onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, proxyUrl: event.target.value }))}
+              placeholder="站点代理（留空并勾选表示清空）"
+              disabled={!batchSettingsForm.applyProxyUrl}
+            />
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              marginTop: 8,
+              fontSize: 13,
+              color: batchSettingsForm.applyProxyUrl ? 'var(--color-text-primary)' : 'var(--color-text-muted)',
+              cursor: batchSettingsForm.applyProxyUrl ? 'pointer' : 'not-allowed',
+            }}>
+              <input
+                type="checkbox"
+                checked={batchSettingsForm.useSystemProxy}
+                onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, useSystemProxy: event.target.checked }))}
+                disabled={!batchSettingsForm.applyProxyUrl}
+              />
+              使用系统代理
+            </label>
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
+              支持 http(s)://、socks4://、socks5:// 代理地址；开启系统代理时会复用设置页中的系统代理。
+            </div>
+          </div>
+        </div>
+      </CenteredModal>
 
       <DeleteConfirmModal
         open={Boolean(deleteConfirm)}

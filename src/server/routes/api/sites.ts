@@ -751,8 +751,28 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (ids.length === 0) {
       return reply.code(400).send({ message: 'ids is required' });
     }
-    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy'].includes(action)) {
+    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy', 'updateSettings'].includes(action)) {
       return reply.code(400).send({ message: 'Invalid action' });
+    }
+    const normalizedBatchGlobalWeight = normalizeGlobalWeight(parsedBody.data.globalWeight);
+    if (action === 'updateSettings' && parsedBody.data.globalWeight !== undefined && normalizedBatchGlobalWeight === null) {
+      return reply.code(400).send({ message: 'Invalid globalWeight value. Expected a positive number.' });
+    }
+    const normalizedBatchProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
+    if (action === 'updateSettings' && !normalizedBatchProxyUrl.valid) {
+      return reply.code(400).send({ message: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
+    }
+    const normalizedBatchUseSystemProxy = normalizeUseSystemProxyFlag(parsedBody.data.useSystemProxy);
+    if (action === 'updateSettings' && parsedBody.data.useSystemProxy !== undefined && normalizedBatchUseSystemProxy === null) {
+      return reply.code(400).send({ message: 'Invalid useSystemProxy value. Expected boolean.' });
+    }
+    if (
+      action === 'updateSettings'
+      && normalizedBatchGlobalWeight === null
+      && !normalizedBatchProxyUrl.present
+      && parsedBody.data.useSystemProxy === undefined
+    ) {
+      return reply.code(400).send({ message: 'No batch settings provided.' });
     }
 
     const successIds: number[] = [];
@@ -776,6 +796,17 @@ export async function sitesRoutes(app: FastifyInstance) {
         } else if (action === 'disableSystemProxy') {
           await db.update(schema.sites)
             .set({ useSystemProxy: false, updatedAt: new Date().toISOString() })
+            .where(eq(schema.sites.id, id))
+            .run();
+        } else if (action === 'updateSettings') {
+          const updates: Partial<typeof schema.sites.$inferInsert> = {
+            updatedAt: new Date().toISOString(),
+          };
+          if (normalizedBatchGlobalWeight !== null) updates.globalWeight = normalizedBatchGlobalWeight;
+          if (normalizedBatchProxyUrl.present) updates.proxyUrl = normalizedBatchProxyUrl.proxyUrl;
+          if (parsedBody.data.useSystemProxy !== undefined) updates.useSystemProxy = normalizedBatchUseSystemProxy;
+          await db.update(schema.sites)
+            .set(updates)
             .where(eq(schema.sites.id, id))
             .run();
         } else {

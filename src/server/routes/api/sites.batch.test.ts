@@ -90,6 +90,66 @@ describe('sites batch routes', () => {
     expect((response.json() as { message?: string }).message).toContain('action');
   });
 
+  it('updates global weight and proxy url for selected sites', async () => {
+    await db.insert(schema.sites).values([
+      {
+        id: 1,
+        name: 'site-1',
+        url: 'https://site-1.example.com',
+        platform: 'new-api',
+        globalWeight: 1,
+        proxyUrl: null,
+      },
+      {
+        id: 2,
+        name: 'site-2',
+        url: 'https://site-2.example.com',
+        platform: 'new-api',
+        globalWeight: 1,
+        proxyUrl: null,
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1, 2],
+        action: 'updateSettings',
+        globalWeight: 2.5,
+        proxyUrl: 'socks5://127.0.0.1:1080',
+        useSystemProxy: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { successIds?: number[] }).successIds).toEqual([1, 2]);
+
+    const rows = await db.select().from(schema.sites).all();
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    expect(rowsById.get(1)?.globalWeight).toBe(2.5);
+    expect(rowsById.get(2)?.globalWeight).toBe(2.5);
+    expect(rowsById.get(1)?.proxyUrl).toBe('socks5://127.0.0.1:1080');
+    expect(rowsById.get(2)?.proxyUrl).toBe('socks5://127.0.0.1:1080');
+    expect(rowsById.get(1)?.useSystemProxy).toBe(true);
+    expect(rowsById.get(2)?.useSystemProxy).toBe(true);
+  });
+
+  it('rejects invalid batch proxy url', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1],
+        action: 'updateSettings',
+        proxyUrl: 'not-a-proxy',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { message?: string }).message).toContain('proxyUrl');
+  });
+
   it('rejects non-number site ids at the route boundary', async () => {
     const response = await app.inject({
       method: 'POST',

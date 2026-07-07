@@ -906,4 +906,158 @@ describe('DownstreamKeys page', () => {
       root?.unmount();
     }
   });
+
+  it('supports invert selection for exact models and group routes', async () => {
+    apiMock.getRoutesLite.mockResolvedValue([
+      { id: 11, modelPattern: 'claude-*', displayName: '默认群组', enabled: true },
+      { id: 12, modelPattern: 'gpt-4.1-mini', displayName: 'GPT 4.1 Mini', enabled: true },
+      { id: 13, modelPattern: 're:^gemini-2\\..*$', displayName: 'Gemini 全家桶', enabled: true },
+      { id: 14, modelPattern: 'claude-opus-4-6', displayName: 'Claude Opus 4.6', enabled: true },
+    ]);
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/downstream-keys']}>
+            <ToastProvider>
+              <DownstreamKeys />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const createBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('新增下游密钥'))[0];
+      await act(async () => {
+        createBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const advancedBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('高级配置'))[0];
+      await act(async () => {
+        advancedBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const panels = root!.root.findAll((node) => node.props.className === 'downstream-key-advanced-panel');
+      const modelPanel = panels.find((node) => collectText(node).includes('模型白名单'));
+      const groupPanel = panels.find((node) => collectText(node).includes('群组范围'));
+      const modelClearBtn = modelPanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '清空')[0];
+      const groupClearBtn = groupPanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '清空')[0];
+      const modelInvertBtn = modelPanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '反选')[0];
+      const groupInvertBtn = groupPanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '反选')[0];
+
+      await act(async () => {
+        modelClearBtn.props.onClick();
+        groupClearBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        modelInvertBtn.props.onClick();
+        groupInvertBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const inputs = root!.root.findAllByType('input');
+      const nameInput = inputs.find((node) => node.props.placeholder === '例如：项目 A / 移动端');
+      const keyInput = inputs.find((node) => node.props.placeholder === 'sk-...');
+      await act(async () => {
+        nameInput!.props.onChange({ target: { value: 'invert-key' } });
+        keyInput!.props.onChange({ target: { value: 'sk-invert-key-0319' } });
+      });
+      await flushMicrotasks();
+
+      const saveBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('创建密钥'))[0];
+      await act(async () => {
+        saveBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.createDownstreamApiKey).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'invert-key',
+        key: 'sk-invert-key-0319',
+        supportedModels: ['claude-opus-4-6'],
+        allowedRouteIds: [13],
+      }));
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('supports select all and invert selection in exclusion lists', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/downstream-keys']}>
+            <ToastProvider>
+              <DownstreamKeys />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const createBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('新增下游密钥'))[0];
+      await act(async () => {
+        createBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const advancedBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('高级配置'))[0];
+      await act(async () => {
+        advancedBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const inputs = root!.root.findAllByType('input');
+      const nameInput = inputs.find((node) => node.props.placeholder === '例如：项目 A / 移动端');
+      const keyInput = inputs.find((node) => node.props.placeholder === 'sk-...');
+      await act(async () => {
+        nameInput!.props.onChange({ target: { value: 'select-all-key' } });
+        keyInput!.props.onChange({ target: { value: 'sk-select-all-key-0405' } });
+      });
+
+      const panels = root!.root.findAll((node) => node.props.className === 'downstream-key-advanced-panel');
+      const excludedSitePanel = panels.find((node) => collectText(node).includes('排除站点'));
+      const excludedCredentialPanel = panels.find((node) => collectText(node).includes('排除 API Key/令牌'));
+      const allButtons = [
+        excludedSitePanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '全选')[0],
+        excludedCredentialPanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '全选')[0],
+      ];
+      await act(async () => {
+        allButtons.forEach((button) => button.props.onClick());
+      });
+      await flushMicrotasks();
+
+      const invertButtons = [
+        excludedSitePanel!.findAll((node) => node.type === 'button' && collectText(node).trim() === '反选')[0],
+      ];
+      await act(async () => {
+        invertButtons[0].props.onClick();
+      });
+      await flushMicrotasks();
+
+      const saveBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('创建密钥'))[0];
+      await act(async () => {
+        saveBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.createDownstreamApiKey).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'select-all-key',
+        key: 'sk-select-all-key-0405',
+        excludedSiteIds: [],
+        excludedCredentialRefs: [
+          { kind: 'account_token', siteId: 201, accountId: 101, tokenId: 301 },
+          { kind: 'default_api_key', siteId: 201, accountId: 101 },
+          { kind: 'default_api_key', siteId: 202, accountId: 102 },
+        ],
+      }));
+    } finally {
+      root?.unmount();
+    }
+  });
 });

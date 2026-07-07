@@ -6,6 +6,7 @@ type Item = {
   isPinned?: boolean | null;
   sortOrder?: number | null;
   balance?: number | null;
+  runtimeStatusRank?: number | null;
 };
 
 function ids(items: Item[]): number[] {
@@ -34,6 +35,22 @@ describe('sortItemsForDisplay', () => {
   it('sorts by balance asc while keeping pinned items first', () => {
     const sorted = sortItemsForDisplay(base, 'balance-asc', (item) => item.balance || 0);
     expect(ids(sorted)).toEqual([2, 4, 1, 3]);
+  });
+
+  it('sorts by runtime status while keeping pinned items first', () => {
+    const sorted = sortItemsForDisplay(
+      [
+        { id: 1, isPinned: false, sortOrder: 1, runtimeStatusRank: 2 },
+        { id: 2, isPinned: false, sortOrder: 0, runtimeStatusRank: 0 },
+        { id: 3, isPinned: true, sortOrder: 0, runtimeStatusRank: 3 },
+        { id: 4, isPinned: false, sortOrder: 2, runtimeStatusRank: 0 },
+      ],
+      'runtime-status',
+      () => 0,
+      (item) => item.runtimeStatusRank ?? 2,
+    );
+
+    expect(ids(sorted)).toEqual([3, 2, 4, 1]);
   });
 });
 
