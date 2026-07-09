@@ -79,7 +79,7 @@ export interface EstimateProxyCostInput {
   billingPricingOverride?: ProxyBillingPricingOverride | null;
 }
 
-interface ModelGroupPricing {
+export interface ModelGroupPricing {
   quotaType: number;
   inputPerMillion?: number;
   outputPerMillion?: number;
@@ -90,7 +90,7 @@ interface ModelGroupPricing {
   perCallTotal?: number;
 }
 
-interface ModelPricingCatalogEntry {
+export interface ModelPricingCatalogEntry {
   modelName: string;
   quotaType: number;
   modelDescription: string | null;
@@ -101,7 +101,7 @@ interface ModelPricingCatalogEntry {
   groupPricing: Record<string, ModelGroupPricing>;
 }
 
-interface ModelPricingCatalog {
+export interface ModelPricingCatalog {
   models: ModelPricingCatalogEntry[];
   groupRatio: Record<string, number>;
 }
@@ -530,6 +530,22 @@ export function getCachedModelRoutingReferenceCost(input: {
   }
 
   return cost;
+}
+
+export function getCachedModelPricingCatalog(input: EstimateProxyCostInput): ModelPricingCatalog | null {
+  const key = getCacheKey(input);
+  const cached = pricingCache.get(key);
+  if (!cached) return null;
+
+  if (Date.now() - cached.fetchedAt >= cached.ttlMs) {
+    return null;
+  }
+  if (!cached.data) return { models: [], groupRatio: {} };
+
+  if (!routingReferenceCostCache.has(key)) {
+    syncRoutingReferenceCostCache(key, cached.fetchedAt, cached.ttlMs, cached.data);
+  }
+  return buildModelPricingCatalogFromData(cached.data);
 }
 
 function resolveModel(modelName: string, data: PricingData): PricingModel | null {

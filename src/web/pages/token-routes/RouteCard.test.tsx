@@ -71,14 +71,191 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
     manualOverride: false,
     successCount: 0,
     failCount: 0,
-    account: { username: 'user_a' },
-    site: { id: 1, name: 'site-a', platform: 'openai' },
-    token: { id: 1001, name: 'token-a', accountId: 101, enabled: true, isDefault: true },
+    account: { username: 'user_a', balance: 12.34 },
+    site: { id: 1, name: 'site-a', platform: 'openai', globalWeight: 2.5 },
+    token: { id: 1001, name: 'token-a', accountId: 101, enabled: true, isDefault: true, tokenGroup: 'vip' },
+    billing: {
+      status: 'ready',
+      groupName: 'vip',
+      modelName: 'gpt-4o-mini',
+      pricing: {
+        quotaType: 0,
+        inputPerMillion: 1.2,
+        outputPerMillion: 2.4,
+      },
+      message: '来自模型广场计费缓存',
+    },
+    health: {
+      status: 'healthy',
+      label: '健康',
+      reason: '暂无失败记录',
+    },
     ...overrides,
   };
 }
 
 describe('RouteCard', () => {
+  it('renders channel weight, balance, billing and health labels', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute({
+          modelPattern: 'gpt-4o-mini',
+          channelCount: 1,
+          enabledChannelCount: 1,
+        })}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[buildChannel()]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('健康');
+    expect(text).not.toContain('健康：健康');
+    expect(text).toContain('权重：2.50');
+    expect(text).toContain('余额：$12.34');
+    expect(text).toContain('vip · 1.2/2.4 USD / 1M');
+    expect(text).not.toContain('分组计费：');
+  });
+
+  it('hides balance for oauth route unit channels while keeping health and billing labels', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute({
+          modelPattern: 'gpt-4o-mini',
+          channelCount: 1,
+          enabledChannelCount: 1,
+        })}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[buildChannel({
+          routeUnit: {
+            id: 'pool-1',
+            name: 'Codex Pool A',
+            strategy: 'round_robin',
+            memberCount: 2,
+            members: [
+              { accountId: 101, username: 'user_a', siteName: 'site-a' },
+              { accountId: 102, username: 'user_b', siteName: 'site-b' },
+            ],
+          },
+        })]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('健康');
+    expect(text).toContain('vip · 1.2/2.4 USD / 1M');
+    expect(text).not.toContain('余额：$12.34');
+  });
+
+  it('does not duplicate source unavailable as a health badge', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute({
+          modelPattern: 'gpt-4o-mini',
+          channelCount: 1,
+          enabledChannelCount: 0,
+        })}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[buildChannel({
+          sourceUnavailable: true,
+          health: {
+            status: 'unavailable',
+            label: '不可用',
+            reason: '模型刷新后发现该来源暂不可用',
+          },
+        })]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('来源不可用');
+    expect(text).not.toContain('健康：不可用');
+  });
+
   it('renders oauth route unit summary and member labels on expanded channels', () => {
     const root = create(
       <RouteCard

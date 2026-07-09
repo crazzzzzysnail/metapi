@@ -48,11 +48,52 @@ function findButtonByText(root: ReactTestInstance, text: string): ReactTestInsta
   ));
 }
 
+function findCollapsedRouteCardByText(root: ReactTestInstance, text: string): ReactTestInstance {
+  return root.find((node) => (
+    node.props.role === 'button'
+    && node.props['aria-expanded'] === false
+    && typeof node.props.onClick === 'function'
+    && collectText(node).includes(text)
+  ));
+}
+
 async function flushMicrotasks() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function buildRefreshingBillingChannel(routeId: number, channelId: number, modelName: string) {
+  return {
+    id: channelId,
+    routeId,
+    accountId: 101,
+    sourceModel: modelName,
+    priority: 0,
+    weight: 1,
+    enabled: true,
+    manualOverride: false,
+    sourceUnavailable: false,
+    successCount: 0,
+    failCount: 0,
+    account: { username: `user-${routeId}`, balance: 12.34 },
+    site: { id: 1, name: 'site-a', platform: 'new-api', globalWeight: 1 },
+    token: { id: 1001, name: 'vip-token', accountId: 101, enabled: true, isDefault: true, tokenGroup: 'vip' },
+    billing: {
+      status: 'refreshing',
+      groupName: 'vip',
+      modelName,
+      pricing: null,
+      refreshTaskId: 'pricing-task-1',
+      message: '计费缓存刷新中',
+    },
+    health: {
+      status: 'healthy',
+      label: '健康',
+      reason: '暂无失败记录',
+    },
+  };
 }
 
 describe('TokenRoutes refresh decision action', () => {
@@ -194,6 +235,86 @@ describe('TokenRoutes refresh decision action', () => {
       expect(apiMock.getTasks).toHaveBeenCalled();
       expect(apiMock.getTask).toHaveBeenCalledWith('task-restore');
       expect(apiMock.getRoutesSummary).toHaveBeenCalledTimes(2);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('refreshes billing for every loaded route sharing the same pricing task', async () => {
+    let root!: ReactTestRenderer;
+    let resolveTask!: (value: { task: { id: string; status: string } }) => void;
+    const taskCompletion = new Promise<{ task: { id: string; status: string } }>((resolve) => {
+      resolveTask = resolve;
+    });
+
+    try {
+      apiMock.getRoutesSummary.mockResolvedValue([
+        {
+          id: 1, modelPattern: 'gpt-4o-mini', displayName: 'gpt-4o-mini',
+          displayIcon: null, modelMapping: null, enabled: true,
+          channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
+        {
+          id: 2, modelPattern: 'gpt-4.1-mini', displayName: 'gpt-4.1-mini',
+          displayIcon: null, modelMapping: null, enabled: true,
+          channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
+      ]);
+      apiMock.getTask.mockReturnValue(taskCompletion);
+      apiMock.getRouteChannels.mockImplementation(async (routeId: number) => [
+        buildRefreshingBillingChannel(routeId, routeId * 100, routeId === 1 ? 'gpt-4o-mini' : 'gpt-4.1-mini'),
+      ]);
+
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findCollapsedRouteCardByText(root.root, 'gpt-4o-mini').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findCollapsedRouteCardByText(root.root, 'gpt-4.1-mini').props.onClick();
+      });
+      await flushMicrotasks();
+
+      apiMock.getRouteChannels.mockClear();
+      apiMock.getRouteChannels.mockImplementation(async (routeId: number) => {
+        const modelName = routeId === 1 ? 'gpt-4o-mini' : 'gpt-4.1-mini';
+        return [{
+          ...buildRefreshingBillingChannel(routeId, routeId * 100, modelName),
+          billing: {
+            status: 'ready',
+            groupName: 'vip',
+            modelName,
+            pricing: {
+              quotaType: 0,
+              inputPerMillion: 1.2,
+              outputPerMillion: 2.4,
+            },
+            message: '来自模型广场计费缓存',
+          },
+        }];
+      });
+      await act(async () => {
+        resolveTask({ task: { id: 'pricing-task-1', status: 'succeeded' } });
+        await taskCompletion;
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getTask).toHaveBeenCalledWith('pricing-task-1');
+      expect(apiMock.getRouteChannels).toHaveBeenCalledWith(1);
+      expect(apiMock.getRouteChannels).toHaveBeenCalledWith(2);
     } finally {
       root?.unmount();
     }
