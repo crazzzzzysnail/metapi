@@ -29,6 +29,28 @@ export type RouteChannelRouteUnit = {
   members?: RouteChannelRouteUnitMember[];
 };
 
+export type RouteChannelBilling = {
+  status: 'ready' | 'refreshing' | 'unavailable';
+  groupName: string | null;
+  modelName: string | null;
+  pricing: {
+    quotaType: number;
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    perCallInput?: number;
+    perCallOutput?: number;
+    perCallTotal?: number;
+  } | null;
+  refreshTaskId?: string | null;
+  message: string;
+} | null;
+
+export type RouteChannelHealth = {
+  status: 'healthy' | 'degraded' | 'cooling' | 'unavailable' | 'disabled';
+  label: string;
+  reason: string;
+} | null;
+
 export type RouteChannel = {
   id: number;
   routeId?: number;
@@ -45,6 +67,7 @@ export type RouteChannel = {
   cooldownUntil?: string | null;
   account?: {
     username: string | null;
+    balance?: number | null;
     accessToken?: string | null;
     extraConfig?: string | null;
     credentialMode?: string | null;
@@ -53,6 +76,7 @@ export type RouteChannel = {
     id: number;
     name: string | null;
     platform: string | null;
+    globalWeight?: number | null;
   };
   token?: {
     id: number;
@@ -60,7 +84,19 @@ export type RouteChannel = {
     accountId: number;
     enabled: boolean;
     isDefault: boolean;
+    tokenGroup?: string | null;
   } | null;
+  effectiveToken?: {
+    id: number;
+    name: string;
+    accountId: number;
+    enabled: boolean;
+    isDefault: boolean;
+    tokenGroup?: string | null;
+    groupName?: string | null;
+  } | null;
+  billing?: RouteChannelBilling;
+  health?: RouteChannelHealth;
   oauthRouteUnitId?: number | null;
   routeUnit?: RouteChannelRouteUnit | null;
 };

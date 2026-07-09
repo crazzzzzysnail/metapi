@@ -9,6 +9,7 @@ import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
+import { renderGroupPricingValue } from './helpers/modelPricingPresentation.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
@@ -111,18 +112,6 @@ function resolveMarketplaceDescription(model: ModelRow, metadataHydrating: boole
   const hasOtherMetadata = model.tags.length > 0 || model.supportedEndpointTypes.length > 0 || model.pricingSources.length > 0;
   if (hasOtherMetadata) return tr('上游未提供描述文本，但已同步标签、能力或价格信息。');
   return tr('当前上游仅返回模型 ID，未返回描述字段。');
-}
-
-function renderGroupPricingValue(pricing: ModelGroupPricing): string {
-  if (pricing.quotaType === 0) {
-    return `${pricing.inputPerMillion ?? 0}/${pricing.outputPerMillion ?? 0} USD / 1M`;
-  }
-
-  if (pricing.perCallInput != null || pricing.perCallOutput != null) {
-    return `${pricing.perCallInput ?? 0}/${pricing.perCallOutput ?? 0} USD / call`;
-  }
-
-  return `${pricing.perCallTotal ?? 0} USD / call`;
 }
 
 const PAGE_SIZES = [10, 20, 50];

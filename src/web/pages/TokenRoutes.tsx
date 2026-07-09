@@ -238,6 +238,7 @@ export default function TokenRoutes() {
     loadChannels,
     invalidateChannels,
     setChannels,
+    refreshChannelBilling,
   } = useRouteChannels();
 
   const toast = useToast();
@@ -248,6 +249,7 @@ export default function TokenRoutes() {
   const candidatesSeqRef = useRef(0);
   const decisionRefreshWatchSeqRef = useRef(0);
   const mountedRef = useRef(true);
+  const pricingRefreshTaskRoutesRef = useRef<Map<string, Set<number>>>(new Map());
 
   const loadCandidates = (force?: boolean) => {
     if (candidatesLoadedRef.current && !force) return;
@@ -405,6 +407,54 @@ export default function TokenRoutes() {
       decisionRefreshWatchSeqRef.current += 1;
     };
   }, [resumeRouteDecisionRefreshTask, toast]);
+
+  useEffect(() => {
+    const taskFetcher = (api as { getTask?: (id: string) => Promise<unknown> }).getTask;
+    if (typeof taskFetcher !== 'function') return;
+
+    for (const [routeIdText, channels] of Object.entries(channelsByRouteId)) {
+      const routeId = Number.parseInt(routeIdText, 10);
+      if (!Number.isFinite(routeId) || !Array.isArray(channels)) continue;
+      const taskIds = Array.from(new Set(channels
+        .map((channel) => channel.billing?.refreshTaskId)
+        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.trim().length > 0)));
+
+      for (const taskId of taskIds) {
+        let routeIds = pricingRefreshTaskRoutesRef.current.get(taskId);
+        const alreadyWatching = !!routeIds;
+        if (!routeIds) {
+          routeIds = new Set<number>();
+          pricingRefreshTaskRoutesRef.current.set(taskId, routeIds);
+        }
+        routeIds.add(routeId);
+        if (alreadyWatching) continue;
+
+        void (async () => {
+          try {
+            while (mountedRef.current) {
+              const response = await taskFetcher(taskId) as {
+                task?: { status?: string };
+              };
+              const status = String(response?.task?.status || '').trim();
+              if (status === 'pending' || status === 'running') {
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+                continue;
+              }
+              if (mountedRef.current) {
+                const affectedRouteIds = Array.from(pricingRefreshTaskRoutesRef.current.get(taskId) || []);
+                await Promise.all(affectedRouteIds.map((affectedRouteId) => (
+                  refreshChannelBilling(affectedRouteId).catch(() => undefined)
+                )));
+              }
+              return;
+            }
+          } finally {
+            pricingRefreshTaskRoutesRef.current.delete(taskId);
+          }
+        })();
+      }
+    }
+  }, [channelsByRouteId, refreshChannelBilling]);
 
   const handleRebuild = async () => {
     try {
