@@ -44,6 +44,7 @@ import {
   parseAccountCreatePayload,
   parseAccountHealthRefreshPayload,
   parseAccountLoginPayload,
+  parseAccountManualModelDeletePayload,
   parseAccountManualModelsPayload,
   parseAccountRebindSessionPayload,
   parseAccountUpdatePayload,
@@ -1930,6 +1931,67 @@ export async function accountsRoutes(app: FastifyInstance) {
           .code(500)
           .send({ success: false, message: err?.message || "保存失败" });
       }
+    },
+  );
+
+  // 从账号中移除手动添加的模型
+  app.delete<{ Params: { id: string }; Body: unknown }>(
+    "/api/accounts/:id/models/manual",
+    async (request, reply) => {
+      const parsedBody = parseAccountManualModelDeletePayload(request.body);
+      if (!parsedBody.success) {
+        return reply.code(400).send({ message: parsedBody.error });
+      }
+
+      const accountId = parseInt(request.params.id, 10);
+      if (!Number.isFinite(accountId) || accountId <= 0) {
+        return reply.code(400).send({ message: "账号 ID 无效" });
+      }
+
+      const modelName = String(parsedBody.data.modelName || "").trim();
+      if (!modelName) {
+        return reply.code(400).send({ message: "模型名称不能为空" });
+      }
+
+      const account = await db
+        .select()
+        .from(schema.accounts)
+        .where(eq(schema.accounts.id, accountId))
+        .get();
+
+      if (!account) {
+        return reply.code(404).send({ message: "账号不存在" });
+      }
+
+      const existing = await db
+        .select({
+          id: schema.modelAvailability.id,
+          isManual: schema.modelAvailability.isManual,
+        })
+        .from(schema.modelAvailability)
+        .where(
+          and(
+            eq(schema.modelAvailability.accountId, accountId),
+            eq(schema.modelAvailability.modelName, modelName),
+          ),
+        )
+        .get();
+
+      if (!existing) {
+        return { success: true };
+      }
+
+      if (!existing.isManual) {
+        return reply.code(400).send({ message: "仅可移除手动添加的模型" });
+      }
+
+      await db
+        .delete(schema.modelAvailability)
+        .where(eq(schema.modelAvailability.id, existing.id))
+        .run();
+
+      await rebuildRoutesBestEffort();
+      return { success: true };
     },
   );
 }

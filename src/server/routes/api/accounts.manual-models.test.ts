@@ -179,4 +179,116 @@ describe('accounts manual models endpoint', () => {
       message: 'Invalid models. Expected string[].',
     });
   });
+
+  it('deletes a manual model and keeps the route idempotent', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Test Site',
+      url: 'https://test.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'test-token',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-manual',
+      available: true,
+      isManual: true,
+    });
+
+    const firstDelete = await app.inject({
+      method: 'DELETE',
+      url: `/api/accounts/${account.id}/models/manual`,
+      payload: {
+        modelName: 'gpt-manual',
+      },
+    });
+
+    expect(firstDelete.statusCode).toBe(200);
+    expect(firstDelete.json()).toMatchObject({ success: true });
+
+    const remaining = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(remaining).toHaveLength(0);
+
+    const secondDelete = await app.inject({
+      method: 'DELETE',
+      url: `/api/accounts/${account.id}/models/manual`,
+      payload: {
+        modelName: 'gpt-manual',
+      },
+    });
+
+    expect(secondDelete.statusCode).toBe(200);
+    expect(secondDelete.json()).toMatchObject({ success: true });
+  });
+
+  it('rejects deleting a synced model that is not manual', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Test Site',
+      url: 'https://test.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'test-token',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-sync',
+      available: true,
+      isManual: false,
+    });
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/accounts/${account.id}/models/manual`,
+      payload: {
+        modelName: 'gpt-sync',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: '仅可移除手动添加的模型',
+    });
+
+    const rows = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.isManual).toBe(false);
+  });
+
+  it('rejects invalid delete payloads at the route boundary', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Test Site',
+      url: 'https://test.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'test-token',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/accounts/${account.id}/models/manual`,
+      payload: {
+        modelName: 123,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      message: 'Invalid modelName. Expected string.',
+    });
+  });
 });

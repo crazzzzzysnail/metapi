@@ -17,6 +17,7 @@ const { apiMock, toastMock } = vi.hoisted(() => ({
     refreshAccountHealth: vi.fn(),
     checkModels: vi.fn(),
     getAccountModels: vi.fn(),
+    deleteAccountAvailableModel: vi.fn(),
   },
   toastMock: {
     success: vi.fn(),
@@ -80,6 +81,7 @@ describe('Accounts edit panel', () => {
     apiMock.updateSiteDisabledModels.mockResolvedValue({ success: true });
     apiMock.rebuildRoutes.mockResolvedValue({ success: true });
     apiMock.refreshAccountHealth.mockResolvedValue({ success: true });
+    apiMock.deleteAccountAvailableModel.mockResolvedValue({ success: true });
     apiMock.getAccountModels.mockResolvedValue({
       siteId: 1,
       siteName: 'Site A',
@@ -313,6 +315,84 @@ describe('Accounts edit panel', () => {
       expect(apiMock.rebuildRoutes).toHaveBeenCalledWith(false, false);
       expect(toastMock.error).toHaveBeenCalledWith('模型禁用设置已保存，但路由重建失败，请手动刷新路由');
       expect(toastMock.success).not.toHaveBeenCalledWith('模型禁用设置已保存，路由已重建');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('deletes a manual model from the account model modal', async () => {
+    apiMock.getAccountModels
+      .mockResolvedValueOnce({
+        siteId: 1,
+        siteName: 'Site A',
+        models: [
+          { name: 'gpt-manual', latencyMs: 90, disabled: false, isManual: true },
+          { name: 'gpt-sync', latencyMs: 120, disabled: false, isManual: false },
+        ],
+        totalCount: 2,
+        disabledCount: 0,
+      })
+      .mockResolvedValueOnce({
+        siteId: 1,
+        siteName: 'Site A',
+        models: [
+          { name: 'gpt-sync', latencyMs: 120, disabled: false, isManual: false },
+        ],
+        totalCount: 1,
+        disabledCount: 0,
+      });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}><ToastProvider><Accounts /></ToastProvider></MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const modelButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('btn-link-info')
+        && collectText(node).trim() === '模型'
+      ));
+
+      await act(async () => {
+        await modelButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const deleteButtons = root.root.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('btn-danger')
+        && node.props.className.includes('btn-sm')
+      ));
+      expect(deleteButtons.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await deleteButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const confirmButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('btn-danger')
+        && !node.props.className.includes('btn-sm')
+      ));
+
+      await act(async () => {
+        await confirmButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.deleteAccountAvailableModel).toHaveBeenCalledWith(1, 'gpt-manual');
+      expect(apiMock.getAccountModels).toHaveBeenCalledTimes(2);
     } finally {
       root?.unmount();
     }

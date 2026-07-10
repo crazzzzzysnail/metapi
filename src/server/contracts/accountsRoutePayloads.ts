@@ -65,11 +65,16 @@ const accountManualModelsPayloadSchema = z.object({
   models: z.array(z.string()).optional(),
 }).passthrough();
 
+const accountManualModelDeletePayloadSchema = z.object({
+  modelName: z.string().optional(),
+}).passthrough();
+
 export type AccountBatchPayload = z.output<typeof accountBatchPayloadSchema>;
 export type AccountCreatePayload = z.output<typeof accountCreatePayloadSchema>;
 export type AccountHealthRefreshPayload = z.output<typeof accountHealthRefreshPayloadSchema>;
 export type AccountLoginPayload = z.output<typeof accountLoginPayloadSchema>;
 export type AccountManualModelsPayload = z.output<typeof accountManualModelsPayloadSchema>;
+export type AccountManualModelDeletePayload = z.output<typeof accountManualModelDeletePayloadSchema>;
 export type AccountRebindSessionPayload = z.output<typeof accountRebindSessionPayloadSchema>;
 export type AccountUpdatePayload = z.output<typeof accountUpdatePayloadSchema>;
 export type AccountVerifyTokenPayload = z.output<typeof accountVerifyTokenPayloadSchema>;
@@ -144,6 +149,9 @@ function formatAccountsPayloadError(error: z.ZodError): string {
   if (firstPath === 'models') {
     return 'Invalid models. Expected string[].';
   }
+  if (firstPath === 'modelName') {
+    return 'Invalid modelName. Expected string.';
+  }
   return 'Invalid account payload.';
 }
 
@@ -200,4 +208,9 @@ export function parseAccountVerifyTokenPayload(input: unknown):
 export function parseAccountManualModelsPayload(input: unknown):
 { success: true; data: AccountManualModelsPayload } | { success: false; error: string } {
   return parseAccountsPayload(accountManualModelsPayloadSchema, input);
+}
+
+export function parseAccountManualModelDeletePayload(input: unknown):
+{ success: true; data: AccountManualModelDeletePayload } | { success: false; error: string } {
+  return parseAccountsPayload(accountManualModelDeletePayloadSchema, input);
 }

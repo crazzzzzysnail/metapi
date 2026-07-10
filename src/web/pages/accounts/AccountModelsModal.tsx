@@ -1,5 +1,6 @@
 import React from 'react';
 import CenteredModal from '../../components/CenteredModal.js';
+import { shouldIgnoreRowSelectionClick } from '../helpers/rowSelection.js';
 
 type AccountModelRow = {
   name: string;
@@ -30,6 +31,7 @@ type AccountModelsModalProps = {
   onSetPendingDisabled: (pendingDisabled: Set<string>) => void;
   onManualInputChange: (value: string) => void;
   onAddManualModels: () => Promise<void> | void;
+  onDeleteManualModel: (modelName: string) => void;
 };
 
 export default function AccountModelsModal({
@@ -42,6 +44,7 @@ export default function AccountModelsModal({
   onSetPendingDisabled,
   onManualInputChange,
   onAddManualModels,
+  onDeleteManualModel,
 }: AccountModelsModalProps) {
   return (
     <CenteredModal
@@ -153,8 +156,20 @@ export default function AccountModelsModal({
                 {modelModal.models.map((model, idx) => {
                   const isDisabled = modelModal.pendingDisabled.has(model.name);
                   return (
-                    <label
+                    <div
                       key={model.name}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(event) => {
+                        if (shouldIgnoreRowSelectionClick(event.target)) return;
+                        onToggleModelDisabled(model.name);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        if (shouldIgnoreRowSelectionClick(event.target)) return;
+                        event.preventDefault();
+                        onToggleModelDisabled(model.name);
+                      }}
                       style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -185,9 +200,19 @@ export default function AccountModelsModal({
                         <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0, padding: '0 4px' }}>手动</span>
                       ) : null}
                       {isDisabled ? (
-                        <span className="badge badge-error" style={{ fontSize: 10, flexShrink: 0 }}>禁用</span>
+                        <span className="badge badge-error" style={{ fontSize: 10, flexShrink: 0 }}>已禁用</span>
                       ) : null}
-                    </label>
+                      {model.isManual ? (
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-sm"
+                          style={{ padding: '4px 8px', fontSize: 11, flexShrink: 0 }}
+                          onClick={() => onDeleteManualModel(model.name)}
+                        >
+                          移除
+                        </button>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>

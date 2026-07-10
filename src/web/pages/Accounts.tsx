@@ -204,6 +204,12 @@ export default function Accounts() {
     manualModelsInput: "",
     addingManualModels: false,
   });
+  const [manualModelDeleteConfirm, setManualModelDeleteConfirm] = useState<null | {
+    accountId: number;
+    accountName: string;
+    modelName: string;
+  }>(null);
+  const [manualModelDeleting, setManualModelDeleting] = useState(false);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastRebindTargetRef = useRef<any | null>(null);
@@ -694,6 +700,8 @@ export default function Accounts() {
       manualModelsInput: "",
       addingManualModels: false,
     }));
+    setManualModelDeleteConfirm(null);
+    setManualModelDeleting(false);
   };
 
   const toggleModelDisabled = (modelName: string) => {
@@ -725,6 +733,46 @@ export default function Accounts() {
       toast.error(e.message || "保存失败");
     } finally {
       setModelModal((s) => ({ ...s, saving: false }));
+    }
+  };
+
+  const openManualModelDeleteConfirm = (modelName: string) => {
+    if (!modelModal.account) return;
+    setManualModelDeleteConfirm({
+      accountId: modelModal.account.id,
+      accountName: resolveAccountDisplayName(modelModal.account),
+      modelName,
+    });
+  };
+
+  const confirmManualModelDelete = async () => {
+    const target = manualModelDeleteConfirm;
+    if (!target) return;
+
+    setManualModelDeleteConfirm(null);
+    setManualModelDeleting(true);
+    try {
+      const res = await api.deleteAccountAvailableModel(
+        target.accountId,
+        target.modelName,
+      );
+      if (!res?.success) {
+        toast.error(res?.message || "移除手动模型失败");
+        return;
+      }
+
+      toast.success("手动模型已移除");
+      if (modelModal.account && modelModal.account.id === target.accountId) {
+        await loadModelModalModels(modelModal.account, {
+          refreshUpstream: false,
+        });
+      } else {
+        await load(true);
+      }
+    } catch (e: any) {
+      toast.error(e.message || "移除手动模型失败");
+    } finally {
+      setManualModelDeleting(false);
     }
   };
 
@@ -3494,6 +3542,21 @@ export default function Accounts() {
           setModelModal((state) => ({ ...state, manualModelsInput: value }))
         }
         onAddManualModels={handleAddManualModels}
+        onDeleteManualModel={openManualModelDeleteConfirm}
+      />
+
+      <DeleteConfirmModal
+        open={Boolean(manualModelDeleteConfirm)}
+        onClose={() => setManualModelDeleteConfirm(null)}
+        onConfirm={confirmManualModelDelete}
+        title="确认移除手动模型"
+        confirmText="确认移除"
+        loading={manualModelDeleting}
+        description={manualModelDeleteConfirm ? (
+          <>
+            确定要移除此账号下的手动模型 <strong>{manualModelDeleteConfirm.modelName}</strong> 吗？
+          </>
+        ) : null}
       />
     </div>
   );
