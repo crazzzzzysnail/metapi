@@ -27,6 +27,19 @@ describe('docker workflows', () => {
     expect(releaseWorkflow).not.toContain('1467078763/metapi');
   });
 
+  it('publishes a manual GHCR workflow with the GitHub Container Registry target', () => {
+    const ghcrWorkflow = readFileSync(resolve(process.cwd(), '.github/workflows/publish-ghcr.yml'), 'utf8');
+
+    expect(ghcrWorkflow).toContain('workflow_dispatch:');
+    expect(ghcrWorkflow).toContain('packages: write');
+    expect(ghcrWorkflow).toContain('registry: ghcr.io');
+    expect(ghcrWorkflow).toContain('ghcr.io/${{ github.repository }}');
+    expect(ghcrWorkflow).toContain('file: docker/Dockerfile');
+    expect(ghcrWorkflow).toContain('tag="${GHCR_IMAGE}:${{ inputs.tag }}"');
+    expect(ghcrWorkflow).not.toContain('DOCKERHUB_IMAGE');
+    expect(ghcrWorkflow).not.toContain('DOCKERHUB_USERNAME');
+  });
+
   it('uses an armv7-capable node base image in the Dockerfile', () => {
     const dockerfile = readFileSync(resolve(process.cwd(), 'docker/Dockerfile'), 'utf8');
 
