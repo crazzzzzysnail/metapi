@@ -34,6 +34,7 @@ type BackgroundTaskStartOptions = {
   title: string;
   dedupeKey?: string;
   keepMs?: number;
+  silentEvents?: boolean;
   notifyOnSuccess?: boolean;
   notifyOnFailure?: boolean;
   successTitle?: TaskMessageTemplate;
@@ -189,7 +190,9 @@ async function runTask(taskId: string, options: BackgroundTaskStartOptions, runn
     const eventTitle = resolveTaskMessage(options.successTitle, task, `${task.title} 已完成`);
     const eventMessage = resolveTaskMessage(options.successMessage, task, `${task.title} 已完成`);
     task = setTaskStatus(task, { message: eventMessage });
-    appendTaskEvent('info', eventTitle, eventMessage, task.id);
+    if (!options.silentEvents) {
+      appendTaskEvent('info', eventTitle, eventMessage, task.id);
+    }
 
     if (options.notifyOnSuccess) {
       await sendNotification(eventTitle, eventMessage, 'info');
@@ -206,7 +209,9 @@ async function runTask(taskId: string, options: BackgroundTaskStartOptions, runn
     const eventTitle = resolveTaskMessage(options.failureTitle, task, `${task.title} 失败`);
     const eventMessage = resolveTaskMessage(options.failureMessage, task, task.message);
     task = setTaskStatus(task, { message: eventMessage });
-    appendTaskEvent('error', eventTitle, eventMessage, task.id);
+    if (!options.silentEvents) {
+      appendTaskEvent('error', eventTitle, eventMessage, task.id);
+    }
 
     if (options.notifyOnFailure ?? true) {
       await sendNotification(eventTitle, eventMessage, 'error');
@@ -276,7 +281,9 @@ export function startBackgroundTask(
   taskLogSeq.set(task.id, 0);
   if (dedupeKey) dedupeTaskIds.set(dedupeKey, task.id);
 
-  appendTaskEvent('info', `${task.title}已开始`, `${task.title} 已开始执行`, task.id);
+  if (!options.silentEvents) {
+    appendTaskEvent('info', `${task.title}已开始`, `${task.title} 已开始执行`, task.id);
+  }
   void runTask(task.id, options, runner);
   return { task, reused: false };
 }

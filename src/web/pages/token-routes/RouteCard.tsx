@@ -53,7 +53,7 @@ import {
   buildPriorityRailNodeStyle,
   buildPriorityRailSections,
   createPriorityRailNewLayerId,
-  isPriorityRailNewLayerId,
+  PRIORITY_RAIL_NEW_TOP_LAYER_ID,
 } from './priorityRail.js';
 import { translateOnlyRectSortingStrategy } from './sortingStrategies.js';
 
@@ -83,11 +83,18 @@ type RouteCardProps = {
   channelTokenDraft: Record<number, number>;
   updatingChannel: Record<number, boolean>;
   savingPriority: boolean;
+  selectedChannelIds?: number[];
+  batchModeEnabled?: boolean;
   onTokenDraftChange: (channelId: number, tokenId: number) => void;
   onSaveToken: (routeId: number, channelId: number, accountId: number) => void;
   onDeleteChannel: (channelId: number, routeId: number) => void;
   onToggleChannelEnabled: (channelId: number, routeId: number, enabled: boolean) => void;
   onChannelDragEnd: (routeId: number, event: DragEndEvent) => void;
+  onToggleChannelSelection?: (routeId: number, channelId: number) => void;
+  onClearChannelSelection?: (routeId: number) => void;
+  onApplyBatchPriorityAction?: (routeId: number, action: 'set_p0' | 'move_down_one_layer') => void;
+  onBatchDisableChannels?: (routeId: number) => void;
+  onBatchDeleteChannels?: (routeId: number) => void;
   // Missing token hints
   missingTokenSiteItems: MissingTokenRouteSiteActionItem[];
   missingTokenGroupItems: MissingTokenGroupRouteSiteActionItem[];
@@ -379,6 +386,9 @@ type SortableChannelShellProps = {
   railNodeStyle: CSSProperties;
   showCompactRailHeader: boolean;
   useDragOverlay: boolean;
+  selectedChannelIds: number[];
+  batchModeEnabled: boolean;
+  onToggleChannelSelection?: (routeId: number, channelId: number) => void;
 };
 
 function SortableChannelShell({
@@ -409,6 +419,9 @@ function SortableChannelShell({
   railNodeStyle,
   showCompactRailHeader,
   useDragOverlay,
+  selectedChannelIds,
+  batchModeEnabled,
+  onToggleChannelSelection,
 }: SortableChannelShellProps) {
   const {
     attributes,
@@ -510,6 +523,7 @@ function SortableChannelShell({
         displayPriority={bucketIndex}
         showPriorityBadge={compact}
         dragging={isDragging}
+        selected={selectedChannelIds.includes(channel.id)}
         dragHandleProps={{ ...attributes, ...listeners }}
         dragHandleRef={setActivatorNodeRef}
         dragInProgress={activeDragChannelId != null}
@@ -527,6 +541,9 @@ function SortableChannelShell({
         onSaveToken={() => onSaveToken(routeId, channel.id, channel.accountId)}
         onDeleteChannel={() => onDeleteChannel(channel.id, routeId)}
         onToggleEnabled={(enabled) => onToggleChannelEnabled(channel.id, routeId, enabled)}
+        onToggleSelected={batchModeEnabled && onToggleChannelSelection
+          ? () => onToggleChannelSelection(routeId, channel.id)
+          : undefined}
         onSiteBlockModel={channelManagementDisabled ? undefined : () => onSiteBlockModel(channel.id, routeId)}
       />
     </div>
@@ -561,6 +578,13 @@ function RouteCardInner({
   onDeleteChannel,
   onToggleChannelEnabled,
   onChannelDragEnd,
+  selectedChannelIds = [],
+  batchModeEnabled = false,
+  onToggleChannelSelection,
+  onClearChannelSelection,
+  onApplyBatchPriorityAction,
+  onBatchDisableChannels,
+  onBatchDeleteChannels,
   missingTokenSiteItems,
   missingTokenGroupItems,
   onCreateTokenForMissing,
@@ -1155,6 +1179,57 @@ function RouteCardInner({
         </div>
       ) : channels && channels.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {batchModeEnabled ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                已选择 {selectedChannelIds.length} 个通道
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+                disabled={selectedChannelIds.length === 0}
+                onClick={() => onApplyBatchPriorityAction?.(route.id, 'set_p0')}
+              >
+                设为 P0
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+                disabled={selectedChannelIds.length === 0}
+                onClick={() => onApplyBatchPriorityAction?.(route.id, 'move_down_one_layer')}
+              >
+                降到下一层
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+                disabled={selectedChannelIds.length === 0}
+                onClick={() => onBatchDisableChannels?.(route.id)}
+              >
+                批量禁用
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-link-danger"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+                disabled={selectedChannelIds.length === 0}
+                onClick={() => onBatchDeleteChannels?.(route.id)}
+              >
+                批量移除
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+                onClick={() => onClearChannelSelection?.(route.id)}
+              >
+                清空选择
+              </button>
+            </div>
+          ) : null}
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -1167,6 +1242,13 @@ function RouteCardInner({
                 data-testid="route-channel-sortable-list"
                 style={{ display: 'flex', flexDirection: 'column', gap: compact ? 8 : 4 }}
               >
+                {activeDragChannelId != null && !readOnlyRoute && (!compact || detailPanel) ? (
+                  <PriorityRailNewLayerRow
+                    id={PRIORITY_RAIL_NEW_TOP_LAYER_ID}
+                    highlighted={false}
+                    compact={compact}
+                  />
+                ) : null}
                 {priorityBuckets.map((bucket, bucketIndex) => {
                   const railSection = priorityRailSections[bucketIndex];
                   const railLabel = `P${bucketIndex} · ${bucket.channels.length}`;
@@ -1217,6 +1299,9 @@ function RouteCardInner({
                             railNodeStyle={railNodeStyle}
                             showCompactRailHeader={!showStandaloneCompactRailHeader && channelIndex === 0}
                             useDragOverlay={useDragOverlay}
+                            selectedChannelIds={selectedChannelIds}
+                            batchModeEnabled={batchModeEnabled}
+                            onToggleChannelSelection={onToggleChannelSelection}
                           />
                         );
                       })}
@@ -1294,6 +1379,11 @@ function areRouteCardPropsEqual(prev: RouteCardProps, next: RouteCardProps): boo
     || prev.onDeleteChannel !== next.onDeleteChannel
     || prev.onToggleChannelEnabled !== next.onToggleChannelEnabled
     || prev.onChannelDragEnd !== next.onChannelDragEnd
+    || prev.onToggleChannelSelection !== next.onToggleChannelSelection
+    || prev.onClearChannelSelection !== next.onClearChannelSelection
+    || prev.onApplyBatchPriorityAction !== next.onApplyBatchPriorityAction
+    || prev.onBatchDisableChannels !== next.onBatchDisableChannels
+    || prev.onBatchDeleteChannels !== next.onBatchDeleteChannels
     || prev.onCreateTokenForMissing !== next.onCreateTokenForMissing
     || prev.onAddChannel !== next.onAddChannel
     || prev.onSiteBlockModel !== next.onSiteBlockModel
@@ -1301,6 +1391,8 @@ function areRouteCardPropsEqual(prev: RouteCardProps, next: RouteCardProps): boo
     || prev.clearingCooldown !== next.clearingCooldown
     || prev.updatingRoutingStrategy !== next.updatingRoutingStrategy
     || prev.savingPriority !== next.savingPriority
+    || prev.batchModeEnabled !== next.batchModeEnabled
+    || (prev.selectedChannelIds || []).join('|') !== (next.selectedChannelIds || []).join('|')
     || prev.loadingChannels !== next.loadingChannels
     || prev.loadingDecision !== next.loadingDecision
     || prev.routeDecision !== next.routeDecision

@@ -38,6 +38,7 @@ import type {
   RouteRoutingStrategy,
   RouteMode,
   RouteDecision,
+  RouteChannel,
   RouteIconOption,
   MissingTokenRouteSiteActionItem,
   MissingTokenGroupRouteSiteActionItem,
@@ -58,7 +59,13 @@ import {
   inferEndpointTypesFromPlatform,
   getModelPatternError,
 } from './token-routes/utils.js';
-import { applyPriorityRailDrop, isPriorityRailNewLayerId } from './token-routes/priorityRail.js';
+import {
+  applyPriorityRailBatchAction,
+  applyPriorityRailDrop,
+  isPriorityRailNewLayerId,
+  isPriorityRailNewTopLayerId,
+  type PriorityRailBatchAction,
+} from './token-routes/priorityRail.js';
 import { useRouteChannels } from './token-routes/useRouteChannels.js';
 import RouteFilterBar, { type EnabledFilter } from './token-routes/RouteFilterBar.js';
 import ManualRoutePanel from './token-routes/ManualRoutePanel.js';
@@ -206,6 +213,7 @@ export default function TokenRoutes() {
   const [batchUpdatingRoutes, setBatchUpdatingRoutes] = useState(false);
   const [batchSelectMode, setBatchSelectMode] = useState(false);
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<number>>(new Set());
+  const [selectedChannelIdsByRoute, setSelectedChannelIdsByRoute] = useState<Record<number, number[]>>({});
 
   const [channelTokenDraft, setChannelTokenDraft] = useState<Record<number, number>>({});
   const [updatingChannel, setUpdatingChannel] = useState<Record<number, boolean>>({});
@@ -230,6 +238,7 @@ export default function TokenRoutes() {
     loadChannels,
     invalidateChannels,
     setChannels,
+    refreshChannelBilling,
   } = useRouteChannels();
 
   const toast = useToast();
@@ -240,6 +249,7 @@ export default function TokenRoutes() {
   const candidatesSeqRef = useRef(0);
   const decisionRefreshWatchSeqRef = useRef(0);
   const mountedRef = useRef(true);
+  const pricingRefreshTaskRoutesRef = useRef<Map<string, Set<number>>>(new Map());
 
   const loadCandidates = (force?: boolean) => {
     if (candidatesLoadedRef.current && !force) return;
@@ -397,6 +407,54 @@ export default function TokenRoutes() {
       decisionRefreshWatchSeqRef.current += 1;
     };
   }, [resumeRouteDecisionRefreshTask, toast]);
+
+  useEffect(() => {
+    const taskFetcher = (api as { getTask?: (id: string) => Promise<unknown> }).getTask;
+    if (typeof taskFetcher !== 'function') return;
+
+    for (const [routeIdText, channels] of Object.entries(channelsByRouteId)) {
+      const routeId = Number.parseInt(routeIdText, 10);
+      if (!Number.isFinite(routeId) || !Array.isArray(channels)) continue;
+      const taskIds = Array.from(new Set(channels
+        .map((channel) => channel.billing?.refreshTaskId)
+        .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.trim().length > 0)));
+
+      for (const taskId of taskIds) {
+        let routeIds = pricingRefreshTaskRoutesRef.current.get(taskId);
+        const alreadyWatching = !!routeIds;
+        if (!routeIds) {
+          routeIds = new Set<number>();
+          pricingRefreshTaskRoutesRef.current.set(taskId, routeIds);
+        }
+        routeIds.add(routeId);
+        if (alreadyWatching) continue;
+
+        void (async () => {
+          try {
+            while (mountedRef.current) {
+              const response = await taskFetcher(taskId) as {
+                task?: { status?: string };
+              };
+              const status = String(response?.task?.status || '').trim();
+              if (status === 'pending' || status === 'running') {
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+                continue;
+              }
+              if (mountedRef.current) {
+                const affectedRouteIds = Array.from(pricingRefreshTaskRoutesRef.current.get(taskId) || []);
+                await Promise.all(affectedRouteIds.map((affectedRouteId) => (
+                  refreshChannelBilling(affectedRouteId).catch(() => undefined)
+                )));
+              }
+              return;
+            }
+          } finally {
+            pricingRefreshTaskRoutesRef.current.delete(taskId);
+          }
+        })();
+      }
+    }
+  }, [channelsByRouteId, refreshChannelBilling]);
 
   const handleRebuild = async () => {
     try {
@@ -878,7 +936,10 @@ export default function TokenRoutes() {
 
   const toggleBatchSelectMode = () => {
     setBatchSelectMode((prev) => {
-      if (prev) setSelectedRouteIds(new Set());
+      if (prev) {
+        setSelectedRouteIds(new Set());
+        setSelectedChannelIdsByRoute({});
+      }
       return !prev;
     });
   };
@@ -1077,12 +1138,14 @@ export default function TokenRoutes() {
       if (dontAskAgain.checked) localStorage.setItem(dismissedKey, 'true');
     }
     try {
-      await api.deleteChannel(channelId);
+      const result = await api.deleteChannel(channelId);
       toast.success('通道已移除');
-      await loadChannels(routeId, true);
-      setRouteSummaries((prev) =>
-        prev.map((r) => r.id === routeId ? { ...r, channelCount: Math.max(0, r.channelCount - 1) } : r),
-      );
+      if (result?.removedRoute) {
+        invalidateChannels(routeId);
+      } else {
+        await loadChannels(routeId, true);
+      }
+      await load();
     } catch (e: any) {
       toast.error(e.message || '移除通道失败');
     }
@@ -1123,34 +1186,18 @@ export default function TokenRoutes() {
     }
   };
 
-  const handleChannelDragEnd = async (routeId: number, event: DragEndEvent) => {
-    if (savingPriorityByRoute[routeId]) return;
-
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
+  const saveChannelPriorities = async (routeId: number, reordered: RouteChannel[]) => {
+    if (savingPriorityByRoute[routeId]) return false;
 
     const route = routeSummaries.find((item) => item.id === routeId);
-    if (!route) return;
+    if (!route) return false;
 
     const channels = channelsByRouteId[routeId] || [];
-    const activeChannel = channels.find((channel) => channel.id === Number(active.id));
-    if (!activeChannel) return;
-
-    const overIsNewLayer = isPriorityRailNewLayerId(over.id);
-    const targetChannel = overIsNewLayer
-      ? null
-      : channels.find((channel) => channel.id === Number(over.id));
-
-    if (!overIsNewLayer && !targetChannel) return;
-    if (!overIsNewLayer && (targetChannel?.priority ?? 0) === (activeChannel.priority ?? 0)) return;
-
-    const reordered = applyPriorityRailDrop(channels, Number(active.id), over.id);
     const changedChannels = reordered.filter((channel) => {
       const previous = channels.find((item) => item.id === channel.id);
       return (previous?.priority ?? 0) !== channel.priority;
     });
-
-    if (changedChannels.length === 0) return;
+    if (changedChannels.length === 0) return false;
 
     if (isExplicitGroupRoute(route)) {
       const changedSourceRouteIds = Array.from(new Set(
@@ -1168,8 +1215,8 @@ export default function TokenRoutes() {
           const affectedNames = affectedGroups.map((candidate) => resolveRouteTitle(candidate));
           const confirmFn = typeof globalThis.confirm === 'function' ? globalThis.confirm : null;
           const confirmed = !confirmFn
-            || confirmFn(`当前群组的优先级桶会直接回写来源通道，并同步影响：${affectedNames.join('、')}。是否继续？`);
-          if (!confirmed) return;
+            || confirmFn(`当前群组的优先级调整会直接回写来源通道，并同步影响：${affectedNames.join('、')}。是否继续？`);
+          if (!confirmed) return false;
         }
       }
     }
@@ -1198,11 +1245,191 @@ export default function TokenRoutes() {
           // ignore route decision refresh failures after reorder
         }
       }
+      return true;
     } catch (e: any) {
       setChannels(routeId, previousChannels);
       toast.error(e.message || '保存通道优先级失败，已回滚');
+      return false;
     } finally {
       setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: false }));
+    }
+  };
+
+  const handleChannelDragEnd = async (routeId: number, event: DragEndEvent) => {
+    if (savingPriorityByRoute[routeId]) return;
+
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const channels = channelsByRouteId[routeId] || [];
+    const activeChannel = channels.find((channel) => channel.id === Number(active.id));
+    if (!activeChannel) return;
+
+    const overIsNewLayer = isPriorityRailNewLayerId(over.id) || isPriorityRailNewTopLayerId(over.id);
+    const targetChannel = overIsNewLayer
+      ? null
+      : channels.find((channel) => channel.id === Number(over.id));
+
+    if (!overIsNewLayer && !targetChannel) return;
+    if (!overIsNewLayer && (targetChannel?.priority ?? 0) === (activeChannel.priority ?? 0)) return;
+
+    const reordered = applyPriorityRailDrop(channels, Number(active.id), over.id);
+    await saveChannelPriorities(routeId, reordered);
+  };
+
+  const handleToggleChannelSelection = (routeId: number, channelId: number) => {
+    setSelectedChannelIdsByRoute((prev) => {
+      const current = prev[routeId] || [];
+      const next = current.includes(channelId)
+        ? current.filter((id) => id !== channelId)
+        : [...current, channelId];
+      return {
+        ...prev,
+        [routeId]: next,
+      };
+    });
+  };
+
+  const handleClearChannelSelection = (routeId: number) => {
+    setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+  };
+
+  const confirmExplicitGroupChannelBatchWrite = (
+    route: RouteSummaryRow,
+    changedChannels: RouteChannel[],
+    actionLabel: string,
+  ) => {
+    if (!isExplicitGroupRoute(route)) return true;
+    const changedSourceRouteIds = Array.from(new Set(
+      changedChannels
+        .map((channel) => channel.routeId)
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0),
+    ));
+    if (changedSourceRouteIds.length === 0) return true;
+
+    const affectedGroups = routeSummaries.filter((candidate) => (
+      candidate.id !== route.id
+      && isExplicitGroupRoute(candidate)
+      && (candidate.sourceRouteIds || []).some((sourceRouteId) => changedSourceRouteIds.includes(sourceRouteId))
+    ));
+    const affectedSuffix = affectedGroups.length > 0
+      ? `，并同步影响：${affectedGroups.map((candidate) => resolveRouteTitle(candidate)).join('、')}`
+      : '';
+    const confirmFn = typeof globalThis.confirm === 'function' ? globalThis.confirm : null;
+    return !confirmFn
+      || confirmFn(`当前群组的通道${actionLabel}会直接回写来源通道${affectedSuffix}。是否继续？`);
+  };
+
+  const handleApplyBatchPriorityAction = async (routeId: number, action: PriorityRailBatchAction) => {
+    const selectedIds = selectedChannelIdsByRoute[routeId] || [];
+    if (selectedIds.length === 0) {
+      toast.info('请先选择要调整优先级的通道');
+      return;
+    }
+
+    const channels = channelsByRouteId[routeId] || [];
+    const reordered = applyPriorityRailBatchAction(channels, selectedIds, action);
+    const saved = await saveChannelPriorities(routeId, reordered);
+    if (saved) {
+      setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+    }
+  };
+
+  const handleBatchDisableChannels = async (routeId: number) => {
+    const selectedIds = selectedChannelIdsByRoute[routeId] || [];
+    if (selectedIds.length === 0) {
+      toast.info('请先选择要禁用的通道');
+      return;
+    }
+
+    const route = routeSummaries.find((item) => item.id === routeId);
+    const channels = channelsByRouteId[routeId] || [];
+    const selectedChannels = channels.filter((channel) => selectedIds.includes(channel.id));
+    const targetChannels = selectedChannels.filter((channel) => channel.enabled !== false);
+    if (targetChannels.length === 0) {
+      toast.info('选中的通道已全部禁用');
+      return;
+    }
+    if (route && !confirmExplicitGroupChannelBatchWrite(route, targetChannels, '禁用')) {
+      return;
+    }
+
+    const confirmed = typeof globalThis.confirm !== 'function'
+      || globalThis.confirm(`确认批量禁用 ${targetChannels.length} 个通道？`);
+    if (!confirmed) return;
+
+    setUpdatingChannel((prev) => {
+      const next = { ...prev };
+      for (const channel of targetChannels) next[channel.id] = true;
+      return next;
+    });
+    try {
+      await Promise.all(targetChannels.map((channel) => api.updateChannel(channel.id, { enabled: false })));
+      toast.success(`已批量禁用 ${targetChannels.length} 个通道`);
+      await loadChannels(routeId, true);
+      await load();
+      setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+    } catch (e: any) {
+      toast.error(e.message || '批量禁用通道失败');
+      await loadChannels(routeId, true).catch(() => undefined);
+    } finally {
+      setUpdatingChannel((prev) => {
+        const next = { ...prev };
+        for (const channel of targetChannels) delete next[channel.id];
+        return next;
+      });
+    }
+  };
+
+  const handleBatchDeleteChannels = async (routeId: number) => {
+    const selectedIds = selectedChannelIdsByRoute[routeId] || [];
+    if (selectedIds.length === 0) {
+      toast.info('请先选择要删除的通道');
+      return;
+    }
+
+    const route = routeSummaries.find((item) => item.id === routeId);
+    const channels = channelsByRouteId[routeId] || [];
+    const selectedChannels = channels.filter((channel) => selectedIds.includes(channel.id));
+    if (selectedChannels.length === 0) return;
+    if (route && !confirmExplicitGroupChannelBatchWrite(route, selectedChannels, '删除')) {
+      return;
+    }
+
+    const confirmed = typeof globalThis.confirm !== 'function'
+      || globalThis.confirm(`确认批量删除 ${selectedChannels.length} 个通道？如果删除最后一个通道，对应的自动精确路由也会被删除。`);
+    if (!confirmed) return;
+
+    setUpdatingChannel((prev) => {
+      const next = { ...prev };
+      for (const channel of selectedChannels) next[channel.id] = true;
+      return next;
+    });
+
+    try {
+      let removedRoute = false;
+      for (const channel of selectedChannels) {
+        const result = await api.deleteChannel(channel.id);
+        if (result?.removedRoute) removedRoute = true;
+      }
+      toast.success(`已批量删除 ${selectedChannels.length} 个通道`);
+      if (removedRoute) {
+        invalidateChannels(routeId);
+      } else {
+        await loadChannels(routeId, true);
+      }
+      await load();
+      setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+    } catch (e: any) {
+      toast.error(e.message || '批量删除通道失败');
+      await loadChannels(routeId, true).catch(() => undefined);
+      await load().catch(() => undefined);
+    } finally {
+      setUpdatingChannel((prev) => {
+        const next = { ...prev };
+        for (const channel of selectedChannels) delete next[channel.id];
+        return next;
+      });
     }
   };
 
@@ -1479,6 +1706,36 @@ export default function TokenRoutes() {
   handleChannelDragEndRef.current = handleChannelDragEnd;
   const stableChannelDragEnd = useCallback(
     (routeId: number, event: DragEndEvent) => handleChannelDragEndRef.current(routeId, event),
+    [],
+  );
+  const handleToggleChannelSelectionRef = useRef(handleToggleChannelSelection);
+  handleToggleChannelSelectionRef.current = handleToggleChannelSelection;
+  const stableToggleChannelSelection = useCallback(
+    (routeId: number, channelId: number) => handleToggleChannelSelectionRef.current(routeId, channelId),
+    [],
+  );
+  const handleClearChannelSelectionRef = useRef(handleClearChannelSelection);
+  handleClearChannelSelectionRef.current = handleClearChannelSelection;
+  const stableClearChannelSelection = useCallback(
+    (routeId: number) => handleClearChannelSelectionRef.current(routeId),
+    [],
+  );
+  const handleApplyBatchPriorityActionRef = useRef(handleApplyBatchPriorityAction);
+  handleApplyBatchPriorityActionRef.current = handleApplyBatchPriorityAction;
+  const stableApplyBatchPriorityAction = useCallback(
+    (routeId: number, action: PriorityRailBatchAction) => handleApplyBatchPriorityActionRef.current(routeId, action),
+    [],
+  );
+  const handleBatchDisableChannelsRef = useRef(handleBatchDisableChannels);
+  handleBatchDisableChannelsRef.current = handleBatchDisableChannels;
+  const stableBatchDisableChannels = useCallback(
+    (routeId: number) => handleBatchDisableChannelsRef.current(routeId),
+    [],
+  );
+  const handleBatchDeleteChannelsRef = useRef(handleBatchDeleteChannels);
+  handleBatchDeleteChannelsRef.current = handleBatchDeleteChannels;
+  const stableBatchDeleteChannels = useCallback(
+    (routeId: number) => handleBatchDeleteChannelsRef.current(routeId),
     [],
   );
   const handleCreateTokenRef = useRef(handleCreateTokenForMissingAccount);
@@ -1852,11 +2109,18 @@ export default function TokenRoutes() {
                     channelTokenDraft={channelTokenDraft}
                     updatingChannel={updatingChannel}
                     savingPriority={!!savingPriorityByRoute[route.id]}
+                    selectedChannelIds={selectedChannelIdsByRoute[route.id] || []}
+                    batchModeEnabled={batchSelectMode}
                     onTokenDraftChange={stableTokenDraftChange}
                     onSaveToken={stableChannelTokenSave}
                     onDeleteChannel={stableDeleteChannel}
                     onToggleChannelEnabled={stableToggleChannelEnabled}
                     onChannelDragEnd={stableChannelDragEnd}
+                    onToggleChannelSelection={stableToggleChannelSelection}
+                    onClearChannelSelection={stableClearChannelSelection}
+                    onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
+                    onBatchDisableChannels={stableBatchDisableChannels}
+                    onBatchDeleteChannels={stableBatchDeleteChannels}
                     missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
                     missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
                     onCreateTokenForMissing={stableCreateTokenForMissing}
@@ -1892,11 +2156,18 @@ export default function TokenRoutes() {
               channelTokenDraft={channelTokenDraft}
               updatingChannel={updatingChannel}
               savingPriority={!!savingPriorityByRoute[route.id]}
+              selectedChannelIds={selectedChannelIdsByRoute[route.id] || []}
+              batchModeEnabled={batchSelectMode}
               onTokenDraftChange={stableTokenDraftChange}
               onSaveToken={stableChannelTokenSave}
               onDeleteChannel={stableDeleteChannel}
               onToggleChannelEnabled={stableToggleChannelEnabled}
               onChannelDragEnd={stableChannelDragEnd}
+              onToggleChannelSelection={stableToggleChannelSelection}
+              onClearChannelSelection={stableClearChannelSelection}
+              onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
+              onBatchDisableChannels={stableBatchDisableChannels}
+              onBatchDeleteChannels={stableBatchDeleteChannels}
               missingTokenSiteItems={EMPTY_MISSING_ITEMS}
               missingTokenGroupItems={EMPTY_MISSING_GROUP_ITEMS}
               onCreateTokenForMissing={stableCreateTokenForMissing}
@@ -1931,11 +2202,18 @@ export default function TokenRoutes() {
                   channelTokenDraft={channelTokenDraft}
                   updatingChannel={updatingChannel}
                   savingPriority={!!savingPriorityByRoute[route.id]}
+                  selectedChannelIds={selectedChannelIdsByRoute[route.id] || []}
+                  batchModeEnabled={batchSelectMode}
                   onTokenDraftChange={stableTokenDraftChange}
                   onSaveToken={stableChannelTokenSave}
                   onDeleteChannel={stableDeleteChannel}
                   onToggleChannelEnabled={stableToggleChannelEnabled}
                   onChannelDragEnd={stableChannelDragEnd}
+                  onToggleChannelSelection={stableToggleChannelSelection}
+                  onClearChannelSelection={stableClearChannelSelection}
+                  onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
+                  onBatchDisableChannels={stableBatchDisableChannels}
+                  onBatchDeleteChannels={stableBatchDeleteChannels}
                   missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
                   missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
                   onCreateTokenForMissing={stableCreateTokenForMissing}

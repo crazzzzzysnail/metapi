@@ -29,6 +29,28 @@ export type RouteChannelRouteUnit = {
   members?: RouteChannelRouteUnitMember[];
 };
 
+export type RouteChannelBilling = {
+  status: 'ready' | 'refreshing' | 'unavailable';
+  groupName: string | null;
+  modelName: string | null;
+  pricing: {
+    quotaType: number;
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    perCallInput?: number;
+    perCallOutput?: number;
+    perCallTotal?: number;
+  } | null;
+  refreshTaskId?: string | null;
+  message: string;
+} | null;
+
+export type RouteChannelHealth = {
+  status: 'healthy' | 'degraded' | 'cooling' | 'unavailable' | 'disabled';
+  label: string;
+  reason: string;
+} | null;
+
 export type RouteChannel = {
   id: number;
   routeId?: number;
@@ -38,12 +60,14 @@ export type RouteChannel = {
   priority: number;
   weight: number;
   enabled: boolean;
+  sourceUnavailable?: boolean;
   manualOverride: boolean;
   successCount: number;
   failCount: number;
   cooldownUntil?: string | null;
   account?: {
     username: string | null;
+    balance?: number | null;
     accessToken?: string | null;
     extraConfig?: string | null;
     credentialMode?: string | null;
@@ -52,6 +76,7 @@ export type RouteChannel = {
     id: number;
     name: string | null;
     platform: string | null;
+    globalWeight?: number | null;
   };
   token?: {
     id: number;
@@ -59,7 +84,19 @@ export type RouteChannel = {
     accountId: number;
     enabled: boolean;
     isDefault: boolean;
+    tokenGroup?: string | null;
   } | null;
+  effectiveToken?: {
+    id: number;
+    name: string;
+    accountId: number;
+    enabled: boolean;
+    isDefault: boolean;
+    tokenGroup?: string | null;
+    groupName?: string | null;
+  } | null;
+  billing?: RouteChannelBilling;
+  health?: RouteChannelHealth;
   oauthRouteUnitId?: number | null;
   routeUnit?: RouteChannelRouteUnit | null;
 };
@@ -145,6 +182,7 @@ export type SortableChannelRowProps = {
   displayPriority?: number;
   showPriorityBadge?: boolean;
   dragging?: boolean;
+  selected?: boolean;
   dragHandleProps?: ButtonHTMLAttributes<HTMLButtonElement>;
   dragHandleRef?: RefCallback<HTMLButtonElement>;
   decisionCandidate?: RouteDecisionCandidate;
@@ -162,6 +200,7 @@ export type SortableChannelRowProps = {
   onSaveToken: () => void;
   onDeleteChannel: () => void;
   onToggleEnabled: (enabled: boolean) => void;
+  onToggleSelected?: () => void;
   onSiteBlockModel?: () => void;
 };
 
@@ -184,6 +223,11 @@ export type PriorityRailSection = {
 export type PriorityRailDragTarget =
   | {
     kind: 'existing_layer';
+    priority: number;
+    highlighted: boolean;
+  }
+  | {
+    kind: 'new_top_layer';
     priority: number;
     highlighted: boolean;
   }

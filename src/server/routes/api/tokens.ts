@@ -7,6 +7,7 @@ import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
   isUsableAccountToken,
+  normalizeTokenGroup,
 } from '../../services/accountTokenService.js';
 import {
   DEFAULT_ROUTE_ROUTING_STRATEGY,
@@ -14,7 +15,15 @@ import {
   type RouteRoutingStrategy,
 } from '../../services/routeRoutingStrategy.js';
 import { invalidateTokenRouterCache, matchesModelPattern, tokenRouter } from '../../services/tokenRouter.js';
-import { appendBackgroundTaskLog, startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { appendBackgroundTaskLog, getRunningTaskByDedupeKey, startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { getCredentialModeFromExtraConfig, hasOauthProvider } from '../../services/accountExtraConfig.js';
+import {
+  getCachedModelPricingCatalog,
+  refreshModelPricingCatalog,
+  type EstimateProxyCostInput,
+  type ModelGroupPricing,
+  type ModelPricingCatalog,
+} from '../../services/modelPricingService.js';
 import {
   clearRouteDecisionSnapshot,
   clearRouteDecisionSnapshots,
@@ -91,6 +100,10 @@ function normalizeRouteMode(routeMode: unknown): RouteMode {
 
 function isExplicitGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof schema.tokenRoutes.$inferSelect, 'routeMode'>): boolean {
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
+}
+
+function isAutoManagedExactRoute(route: Pick<typeof schema.tokenRoutes.$inferSelect, 'modelPattern' | 'routeMode'>): boolean {
+  return !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern);
 }
 
 function normalizeSourceRouteIdsInput(input: unknown): number[] {
@@ -509,14 +522,305 @@ type RouteChannelSummary = {
   siteNames: Set<string>;
 };
 
+type AccountTokenLite = Pick<typeof schema.accountTokens.$inferSelect, 'id' | 'accountId' | 'name' | 'tokenGroup' | 'enabled' | 'isDefault' | 'token' | 'valueStatus'>;
+
+type RouteChannelHealthStatus = 'healthy' | 'degraded' | 'cooling' | 'unavailable' | 'disabled';
+
+type RouteChannelBilling = {
+  status: 'ready' | 'refreshing' | 'unavailable';
+  groupName: string | null;
+  modelName: string | null;
+  pricing: ModelGroupPricing | null;
+  refreshTaskId?: string | null;
+  message: string;
+};
+
+const PRICING_CATALOG_PLATFORMS = new Set([
+  'new-api',
+  'one-api',
+  'veloera',
+  'one-hub',
+  'done-hub',
+  'sub2api',
+  'anyrouter',
+]);
+
+function buildRouteChannelHealth(channel: typeof schema.routeChannels.$inferSelect): {
+  status: RouteChannelHealthStatus;
+  label: string;
+  reason: string;
+} {
+  if (channel.enabled === false) {
+    return {
+      status: 'disabled',
+      label: '禁用',
+      reason: '通道已被手动禁用',
+    };
+  }
+
+  if (channel.sourceUnavailable === true) {
+    return {
+      status: 'unavailable',
+      label: '不可用',
+      reason: '模型刷新后发现该来源暂不可用',
+    };
+  }
+
+  const cooldownUntil = (channel.cooldownUntil || '').trim();
+  if (cooldownUntil) {
+    const cooldownMs = Date.parse(cooldownUntil);
+    if (Number.isFinite(cooldownMs) && cooldownMs > Date.now()) {
+      return {
+        status: 'cooling',
+        label: '冷却中',
+        reason: `通道冷却至 ${cooldownUntil}`,
+      };
+    }
+  }
+
+  const successCount = Math.max(0, Number(channel.successCount || 0));
+  const failCount = Math.max(0, Number(channel.failCount || 0));
+  const total = successCount + failCount;
+  if (failCount > 0 && total > 0 && successCount / total < 0.8) {
+    return {
+      status: 'degraded',
+      label: '降级',
+      reason: `近期成功 ${successCount} 次，失败 ${failCount} 次`,
+    };
+  }
+
+  return {
+    status: 'healthy',
+    label: '健康',
+    reason: total > 0
+      ? `近期成功 ${successCount} 次，失败 ${failCount} 次`
+      : '暂无失败记录',
+  };
+}
+
+function resolvePricingInput(row: {
+  accounts: typeof schema.accounts.$inferSelect;
+  sites: typeof schema.sites.$inferSelect;
+  modelName: string | null;
+}): EstimateProxyCostInput | null {
+  if (!row.modelName) return null;
+  return {
+    site: {
+      id: row.sites.id,
+      url: row.sites.url,
+      platform: row.sites.platform,
+      apiKey: row.sites.apiKey,
+    },
+    account: {
+      id: row.accounts.id,
+      accessToken: row.accounts.accessToken,
+      apiToken: row.accounts.apiToken,
+    },
+    modelName: row.modelName,
+    totalTokens: 0,
+  };
+}
+
+function hasCredentialValue(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function normalizeLifecycleStatus(value: string | null | undefined): string {
+  return (value || 'active').trim().toLowerCase() || 'active';
+}
+
+function getRouteChannelPricingRefreshBlockReason(row: {
+  routeChannels: typeof schema.routeChannels.$inferSelect;
+  accounts: typeof schema.accounts.$inferSelect;
+  sites: typeof schema.sites.$inferSelect;
+  token: AccountTokenLite | null;
+  pricingInput: EstimateProxyCostInput | null;
+}): string | null {
+  if (!row.pricingInput) return '缺少模型信息，无法匹配分组计费';
+  if (row.routeChannels.enabled === false) return '通道已禁用，跳过计费刷新';
+  if (row.routeChannels.sourceUnavailable === true) return '来源不可用，跳过计费刷新';
+  if (normalizeLifecycleStatus(row.sites.status) !== 'active') return '站点未启用，跳过计费刷新';
+  if (normalizeLifecycleStatus(row.accounts.status) !== 'active') return '账号未启用，跳过计费刷新';
+  if (row.routeChannels.tokenId && !isUsableAccountToken(row.token)) {
+    return '固定令牌不可用，跳过计费刷新';
+  }
+
+  const platform = (row.sites.platform || '').trim().toLowerCase();
+  if (!PRICING_CATALOG_PLATFORMS.has(platform)) {
+    return '当前连接不支持计费目录';
+  }
+
+  if (hasOauthProvider(row.accounts)) {
+    return hasCredentialValue(row.accounts.accessToken) || hasCredentialValue(row.accounts.apiToken)
+      ? null
+      : 'OAuth 连接缺少可用凭据，跳过计费刷新';
+  }
+
+  const credentialMode = getCredentialModeFromExtraConfig(row.accounts.extraConfig);
+  if (credentialMode === 'apikey') {
+    return hasCredentialValue(row.accounts.apiToken)
+      ? null
+      : 'API Key 连接缺少可用凭据，跳过计费刷新';
+  }
+  if (credentialMode === 'session') {
+    return hasCredentialValue(row.accounts.accessToken)
+      ? null
+      : '账号连接缺少可用凭据，跳过计费刷新';
+  }
+
+  if (hasCredentialValue(row.accounts.apiToken) || hasCredentialValue(row.accounts.accessToken)) {
+    return null;
+  }
+  return '连接缺少可用凭据，跳过计费刷新';
+}
+
+function findCatalogModel(catalog: ModelPricingCatalog, modelName: string) {
+  const normalized = modelName.trim().toLowerCase();
+  return catalog.models.find((model) => model.modelName.trim().toLowerCase() === normalized) || null;
+}
+
+function startRouteChannelPricingRefresh(input: EstimateProxyCostInput): string | null {
+  const dedupeKey = `route-channel-pricing:${input.site.id}:${input.account.id}`;
+  const runningTask = getRunningTaskByDedupeKey(dedupeKey);
+  if (runningTask) return runningTask.id;
+
+  const { task } = startBackgroundTask(
+    {
+      type: 'model-pricing',
+      title: '刷新路由通道计费',
+      dedupeKey,
+      keepMs: 10 * 60 * 1000,
+      silentEvents: true,
+      notifyOnFailure: false,
+      successMessage: '路由通道计费刷新完成',
+      failureMessage: (currentTask) => `路由通道计费刷新失败：${currentTask.error || 'unknown error'}`,
+    },
+    async () => {
+      const catalog = await refreshModelPricingCatalog(input);
+      return { modelCount: catalog?.models.length ?? 0 };
+    },
+  );
+  return task.id;
+}
+
+function buildRouteChannelBilling(input: {
+  pricingInput: EstimateProxyCostInput | null;
+  effectiveGroupName: string | null;
+  refreshBlockReason: string | null;
+  triggerRefresh: boolean;
+}): RouteChannelBilling {
+  const modelName = input.pricingInput?.modelName?.trim() || null;
+  const groupName = input.effectiveGroupName?.trim() || null;
+  if (!input.pricingInput || !modelName) {
+    return {
+      status: 'unavailable',
+      groupName,
+      modelName,
+      pricing: null,
+      message: '缺少模型信息，无法匹配分组计费',
+    };
+  }
+
+  if (!groupName) {
+    return {
+      status: 'unavailable',
+      groupName: null,
+      modelName,
+      pricing: null,
+      message: '当前令牌分组未知',
+    };
+  }
+
+  const catalog = getCachedModelPricingCatalog(input.pricingInput);
+  if (!catalog) {
+    if (input.refreshBlockReason) {
+      return {
+        status: 'unavailable',
+        groupName,
+        modelName,
+        pricing: null,
+        message: input.refreshBlockReason,
+      };
+    }
+
+    const refreshTaskId = input.triggerRefresh
+      ? startRouteChannelPricingRefresh(input.pricingInput)
+      : null;
+    return {
+      status: 'refreshing',
+      groupName,
+      modelName,
+      pricing: null,
+      refreshTaskId,
+      message: refreshTaskId ? '计费缓存刷新中' : '计费缓存未命中',
+    };
+  }
+
+  const model = findCatalogModel(catalog, modelName);
+  if (!model) {
+    return {
+      status: 'unavailable',
+      groupName,
+      modelName,
+      pricing: null,
+      message: '上游计费目录未提供该模型',
+    };
+  }
+
+  const pricingEntry = Object.entries(model.groupPricing || {}).find(([group]) => (
+    group.trim().toLowerCase() === groupName.toLowerCase()
+  ));
+  if (!pricingEntry) {
+    return {
+      status: 'unavailable',
+      groupName,
+      modelName,
+      pricing: null,
+      message: `上游计费目录未提供 ${groupName} 分组`,
+    };
+  }
+
+  return {
+    status: 'ready',
+    groupName: pricingEntry[0],
+    modelName,
+    pricing: pricingEntry[1],
+    message: '来自模型广场计费缓存',
+  };
+}
+
+async function loadDefaultTokensByAccountId(accountIds: number[]): Promise<Map<number, AccountTokenLite>> {
+  const normalizedAccountIds = Array.from(new Set(accountIds.filter((id) => Number.isFinite(id) && id > 0)));
+  if (normalizedAccountIds.length === 0) return new Map();
+  const rows = await db.select().from(schema.accountTokens)
+    .where(and(
+      inArray(schema.accountTokens.accountId, normalizedAccountIds),
+      eq(schema.accountTokens.enabled, true),
+      eq(schema.accountTokens.isDefault, true),
+      eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+    ))
+    .all();
+
+  const defaultsByAccountId = new Map<number, AccountTokenLite>();
+  for (const row of rows) {
+    if (!isUsableAccountToken(row)) continue;
+    if (!defaultsByAccountId.has(row.accountId)) {
+      defaultsByAccountId.set(row.accountId, row);
+    }
+  }
+  return defaultsByAccountId;
+}
+
 async function fetchChannelsForRouteRows(
   routes: RouteRow[],
   options: {
     includeRouteUnitDetails?: boolean;
+    includePresentationDetails?: boolean;
   } = {},
 ): Promise<Map<number, any[]>> {
   if (routes.length === 0) return new Map();
   const includeRouteUnitDetails = options.includeRouteUnitDetails !== false;
+  const includePresentationDetails = options.includePresentationDetails !== false;
 
   const explicitSourceRouteIds = Array.from(new Set(routes
     .filter((route) => isExplicitGroupRoute(route))
@@ -568,6 +872,9 @@ async function fetchChannelsForRouteRows(
   const routeUnitMembersByUnitId = includeRouteUnitDetails
     ? await listOauthRouteUnitMembersByUnitIds(oauthRouteUnitIds)
     : new Map();
+  const defaultTokensByAccountId = includePresentationDetails
+    ? await loadDefaultTokensByAccountId(channelRows.map((row) => row.accounts.id))
+    : new Map<number, AccountTokenLite>();
 
   const channelsByActualRouteId = new Map<number, any[]>();
 
@@ -582,11 +889,26 @@ async function fetchChannelsForRouteRows(
     const routeUnit = row.route_channels.oauthRouteUnitId
       ? routeUnitSummaries.get(row.route_channels.oauthRouteUnitId) || null
       : null;
+    const boundToken = row.account_tokens as AccountTokenLite | null;
+    const effectiveToken = boundToken || defaultTokensByAccountId.get(row.accounts.id) || null;
+    const effectiveGroupName = effectiveToken
+      ? normalizeTokenGroup(effectiveToken.tokenGroup, effectiveToken.name)
+      : null;
+    const pricingInput = includePresentationDetails
+      ? resolvePricingInput({
+        accounts: row.accounts,
+        sites: row.sites,
+        modelName: resolvedSourceModel || null,
+      })
+      : null;
     channelsByActualRouteId.get(routeId)!.push({
       ...row.route_channels,
       sourceModel: resolvedSourceModel || null,
       account: row.accounts,
-      site: row.sites,
+      site: {
+        ...row.sites,
+        globalWeight: row.sites.globalWeight ?? 1,
+      },
       token: row.account_tokens
         ? {
           id: row.account_tokens.id,
@@ -594,8 +916,35 @@ async function fetchChannelsForRouteRows(
           accountId: row.account_tokens.accountId,
           enabled: row.account_tokens.enabled,
           isDefault: row.account_tokens.isDefault,
+          tokenGroup: row.account_tokens.tokenGroup,
         }
         : null,
+      effectiveToken: includePresentationDetails && effectiveToken
+        ? {
+          id: effectiveToken.id,
+          name: effectiveToken.name,
+          accountId: effectiveToken.accountId,
+          enabled: effectiveToken.enabled,
+          isDefault: effectiveToken.isDefault,
+          tokenGroup: effectiveToken.tokenGroup,
+          groupName: effectiveGroupName,
+        }
+        : null,
+      billing: includePresentationDetails
+        ? buildRouteChannelBilling({
+          pricingInput,
+          effectiveGroupName,
+          refreshBlockReason: getRouteChannelPricingRefreshBlockReason({
+            routeChannels: row.route_channels,
+            accounts: row.accounts,
+            sites: row.sites,
+            token: boundToken,
+            pricingInput,
+          }),
+          triggerRefresh: true,
+        })
+        : null,
+      health: includePresentationDetails ? buildRouteChannelHealth(row.route_channels) : null,
       routeUnit: includeRouteUnitDetails && routeUnit
         ? {
           id: routeUnit.id,
@@ -626,7 +975,9 @@ async function fetchChannelsForRouteRows(
 
 async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, any[]>> {
   if (routeIds.length === 0) return new Map();
-  return await fetchChannelsForRouteRows(await listRoutesWithSources()).then((channelsByRoute) => {
+  const routeIdSet = new Set(routeIds);
+  const routes = (await listRoutesWithSources()).filter((route) => routeIdSet.has(route.id));
+  return await fetchChannelsForRouteRows(routes).then((channelsByRoute) => {
     const filtered = new Map<number, any[]>();
     for (const routeId of routeIds) {
       filtered.set(routeId, channelsByRoute.get(routeId) || []);
@@ -636,14 +987,17 @@ async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, a
 }
 
 async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
-  const channelsByRoute = await fetchChannelsForRouteRows(routes, { includeRouteUnitDetails: false });
+  const channelsByRoute = await fetchChannelsForRouteRows(routes, {
+    includeRouteUnitDetails: false,
+    includePresentationDetails: false,
+  });
   const summaryByRoute = new Map<number, RouteChannelSummary>();
   for (const route of routes) {
     const channels = channelsByRoute.get(route.id) || [];
     const siteNames = new Set<string>();
     let enabledChannelCount = 0;
     for (const channel of channels) {
-      if (channel.enabled) enabledChannelCount += 1;
+      if (channel.enabled && !channel.sourceUnavailable) enabledChannelCount += 1;
       if (channel.site?.name) siteNames.add(channel.site.name);
     }
     summaryByRoute.set(route.id, {
@@ -782,6 +1136,7 @@ export async function tokensRoutes(app: FastifyInstance) {
           sourceModel: sourceModel || null,
           priority: 0,
           weight: 10,
+          sourceUnavailable: false,
           manualOverride: true,
         }).run();
         existingPairs.add(pairKey);
@@ -1241,6 +1596,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       sourceModel: sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
+      sourceUnavailable: false,
     }).run();
     const channelId = requireInsertedRowId(insertedChannel, '创建通道失败');
     const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
@@ -1352,16 +1708,39 @@ export async function tokensRoutes(app: FastifyInstance) {
   app.delete<{ Params: { channelId: string } }>('/api/channels/:channelId', async (request) => {
     const channelId = parseInt(request.params.channelId, 10);
     const channel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+    const route = channel
+      ? await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, channel.routeId)).get()
+      : null;
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
+    let removedRoute: { modelPattern: string; routeMode?: string | null } | null = null;
     if (channel) {
-      await clearRouteDecisionSnapshot(channel.routeId);
-      await clearDependentExplicitGroupSnapshotsBySourceRouteIds([channel.routeId]);
+      if (route && isAutoManagedExactRoute(route)) {
+        const remainingChannel = await db.select({ id: schema.routeChannels.id })
+          .from(schema.routeChannels)
+          .where(eq(schema.routeChannels.routeId, route.id))
+          .limit(1)
+          .get();
+        if (!remainingChannel) {
+          await clearDependentExplicitGroupSnapshotsBySourceRouteIds([route.id]);
+          await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run();
+          removedRoute = {
+            modelPattern: route.modelPattern,
+            routeMode: route.routeMode,
+          };
+        }
+      }
+
+      if (!removedRoute) {
+        await clearRouteDecisionSnapshot(channel.routeId);
+        await clearDependentExplicitGroupSnapshotsBySourceRouteIds([channel.routeId]);
+      }
       await syncPatternRouteChannelsAfterAffectedRouteChanges({
-        affectedRouteIds: [channel.routeId],
+        affectedRouteIds: removedRoute ? [] : [channel.routeId],
+        removedRoutes: removedRoute ? [removedRoute] : [],
       });
     }
     invalidateTokenRouterCache();
-    return { success: true };
+    return { success: true, removedRoute: !!removedRoute };
   });
 
   // Rebuild routes/channels from model availability.

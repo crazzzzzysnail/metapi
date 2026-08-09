@@ -40,11 +40,31 @@ export function useRouteChannels() {
     setChannelsByRouteId((prev) => ({ ...prev, [routeId]: channels }));
   }, []);
 
+  const refreshChannelBilling = useCallback(async (routeId: number) => {
+    const channels = await api.getRouteChannels(routeId);
+    const billingByChannelId = new Map(
+      normalizeChannels(channels || []).map((channel) => [channel.id, channel.billing]),
+    );
+    setChannelsByRouteId((prev) => {
+      const currentChannels = prev[routeId];
+      if (!currentChannels) return prev;
+      return {
+        ...prev,
+        [routeId]: currentChannels.map((channel) => (
+          billingByChannelId.has(channel.id)
+            ? { ...channel, billing: billingByChannelId.get(channel.id) }
+            : channel
+        )),
+      };
+    });
+  }, []);
+
   return {
     channelsByRouteId,
     loadingChannelsByRouteId,
     loadChannels,
     invalidateChannels,
     setChannels,
+    refreshChannelBilling,
   };
 }

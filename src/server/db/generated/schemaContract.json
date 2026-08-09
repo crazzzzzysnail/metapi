@@ -1589,6 +1589,12 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "source_unavailable": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": "false",
+          "primaryKey": false
         }
       }
     },

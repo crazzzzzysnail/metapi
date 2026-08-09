@@ -130,12 +130,14 @@ export function isMaskedPendingAccountToken(token: Pick<AccountTokenRow, 'token'
   return resolveAccountTokenValueStatus(token) === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING;
 }
 
-export function isUsableAccountToken(token: AccountTokenRow | null | undefined): boolean {
+export function isUsableAccountToken(
+  token: Pick<AccountTokenRow, 'enabled' | 'token' | 'valueStatus'> | null | undefined,
+): boolean {
   if (!token) return false;
   return token.enabled === true && isReadyAccountToken(token);
 }
 
-function normalizeTokenGroup(value: string | null | undefined, tokenName?: string | null): string | null {
+export function normalizeTokenGroup(value: string | null | undefined, tokenName?: string | null): string | null {
   const explicit = (value || '').trim();
   if (explicit.length > 0) return explicit;
 

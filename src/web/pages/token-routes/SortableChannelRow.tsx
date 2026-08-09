@@ -8,6 +8,7 @@ import {
   resolveTokenBindingConnectionMode,
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
+import { renderGroupPricingValue } from '../helpers/modelPricingPresentation.js';
 
 function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
   return strategy === 'stick_until_unavailable' ? '单个用到不可用再切' : '轮询';
@@ -19,11 +20,97 @@ function formatRouteUnitMemberLabel(member: { accountId: number; username: strin
   return siteLabel ? `${accountLabel} @ ${siteLabel}` : accountLabel;
 }
 
+function formatBalance(value: number | null | undefined): string {
+  const balance = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return `$${balance.toFixed(2)}`;
+}
+
+function formatSiteWeight(value: number | null | undefined): string {
+  const weight = typeof value === 'number' && Number.isFinite(value) ? value : 1;
+  return Number.isInteger(weight) ? String(weight) : weight.toFixed(2);
+}
+
+function getHealthBadgeClass(status: string | undefined): string {
+  if (status === 'healthy') return 'badge-success';
+  if (status === 'degraded' || status === 'cooling') return 'badge-warning';
+  if (status === 'unavailable') return 'badge-error';
+  return 'badge-muted';
+}
+
+function buildBillingLabel(channel: SortableChannelRowProps['channel']): string {
+  const billing = channel.billing;
+  if (!billing) return '计费不可用';
+  const groupName = billing.groupName?.trim() || '未知分组';
+  if (billing.status === 'refreshing') return `${groupName} · 刷新中`;
+  if (billing.status !== 'ready' || !billing.pricing) return `${groupName} · 计费不可用`;
+  return `${groupName} · ${renderGroupPricingValue(billing.pricing)}`;
+}
+
+function buildBillingTooltip(channel: SortableChannelRowProps['channel'], label: string): string {
+  const message = channel.billing?.message?.trim();
+  return message ? `${label}；${message}` : label;
+}
+
+function renderChannelInsightBadges(
+  channel: SortableChannelRowProps['channel'],
+  suppressTooltips: boolean,
+) {
+  const routeUnit = channel.routeUnit ?? null;
+  const health = channel.health;
+  const billing = channel.billing;
+  const shouldShowHealth = !!health && health.status !== 'unavailable' && channel.enabled !== false;
+  const billingLabel = buildBillingLabel(channel);
+
+  return (
+    <>
+      {shouldShowHealth ? (
+        <span
+          className={`badge ${getHealthBadgeClass(health.status)}`}
+          style={{ fontSize: 10 }}
+          data-tooltip={suppressTooltips ? undefined : (health.reason || '通道健康状态')}
+        >
+          {health.label || '未知'}
+        </span>
+      ) : null}
+      <span
+        className="badge badge-muted"
+        style={{ fontSize: 10 }}
+        data-tooltip={suppressTooltips ? undefined : '站点全局权重'}
+      >
+        权重：{formatSiteWeight(channel.site?.globalWeight)}
+      </span>
+      {!routeUnit ? (
+        <span
+          className="badge badge-muted"
+          style={{ fontSize: 10 }}
+          data-tooltip={suppressTooltips ? undefined : '当前账号余额'}
+        >
+          余额：{formatBalance(channel.account?.balance)}
+        </span>
+      ) : null}
+      <span
+        className={billing?.status === 'ready' ? 'badge badge-info' : 'badge badge-muted'}
+        style={{
+          fontSize: 10,
+          maxWidth: 280,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+        data-tooltip={suppressTooltips ? undefined : buildBillingTooltip(channel, billingLabel)}
+      >
+        {billingLabel}
+      </span>
+    </>
+  );
+}
+
 export function SortableChannelRow({
   channel,
   displayPriority,
   showPriorityBadge = true,
   dragging = false,
+  selected = false,
   dragHandleProps,
   dragHandleRef,
   decisionCandidate,
@@ -41,11 +128,14 @@ export function SortableChannelRow({
   onSaveToken,
   onDeleteChannel,
   onToggleEnabled,
+  onToggleSelected,
   onSiteBlockModel,
 }: SortableChannelRowProps) {
   const resolvedPriority = displayPriority ?? channel.priority ?? 0;
   const managementLocked = readOnly || channelManagementDisabled;
   const suppressTooltips = dragInProgress || dragging;
+  const sourceUnavailable = channel.sourceUnavailable === true;
+  const visuallyUnavailable = channel.enabled === false || sourceUnavailable;
   const rowTransition = [
     'box-shadow 180ms ease',
     'background-color 180ms ease',
@@ -71,7 +161,7 @@ export function SortableChannelRow({
 
   const rowStyle: CSSProperties = {
     transition: rowTransition || undefined,
-    opacity: dragging ? 0.92 : channel.enabled === false ? 0.56 : 1,
+    opacity: dragging ? 0.92 : visuallyUnavailable ? 0.56 : 1,
     display: 'grid',
     gridTemplateColumns: managementLocked || mobile ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) auto auto auto',
     alignItems: mobile ? 'stretch' : 'center',
@@ -81,6 +171,8 @@ export function SortableChannelRow({
     borderRadius: 14,
     backgroundColor: dragging
       ? 'color-mix(in srgb, var(--color-bg-card) 82%, var(--color-info) 18%)'
+      : selected
+        ? 'color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-card))'
       : 'color-mix(in srgb, var(--color-bg-card) 96%, white 4%)',
     boxShadow: dragging
       ? '0 18px 34px rgba(15, 23, 42, 0.12)'
@@ -111,6 +203,25 @@ export function SortableChannelRow({
     return (
       <div data-layer-root style={{ ...rowStyle, display: 'block' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          {onToggleSelected ? (
+            <button
+              type="button"
+              onClick={onToggleSelected}
+              className={`btn btn-ghost ${selected ? 'btn-primary' : ''}`}
+              style={{
+                width: 22,
+                minWidth: 22,
+                height: 22,
+                padding: 0,
+                border: '1px solid var(--color-border-light)',
+                borderRadius: 8,
+                marginTop: 2,
+              }}
+              aria-label={selected ? '取消选择通道' : '选择通道'}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700 }}>{selected ? '✓' : '+'}</span>
+            </button>
+          ) : null}
           <button
             type="button"
             ref={dragHandleRef}
@@ -210,6 +321,18 @@ export function SortableChannelRow({
                   手动配置
                 </span>
               ) : null}
+
+              {sourceUnavailable ? (
+                <span
+                  className="badge badge-muted"
+                  style={{ fontSize: 10 }}
+                  data-tooltip={suppressTooltips ? undefined : '模型刷新后发现该来源暂不可用，恢复后会自动重新参与路由'}
+                >
+                  来源不可用
+                </span>
+              ) : null}
+
+              {renderChannelInsightBadges(channel, suppressTooltips)}
 
               {routeUnit ? (
                 <>
@@ -358,6 +481,25 @@ export function SortableChannelRow({
   return (
     <div data-layer-root style={rowStyle}>
       <div style={{ display: 'flex', alignItems: mobile ? 'stretch' : 'center', flexDirection: mobile ? 'column' : 'row', gap: 6, fontSize: 12, flexWrap: 'wrap', minWidth: 0 }}>
+        {onToggleSelected ? (
+          <button
+            type="button"
+            onClick={onToggleSelected}
+            className={`btn btn-ghost ${selected ? 'btn-primary' : ''}`}
+            style={{
+              width: 22,
+              minWidth: 22,
+              height: 22,
+              padding: 0,
+              border: '1px solid var(--color-border-light)',
+              borderRadius: 8,
+              alignSelf: mobile ? 'flex-start' : undefined,
+            }}
+            aria-label={selected ? '取消选择通道' : '选择通道'}
+          >
+            <span style={{ fontSize: 11, fontWeight: 700 }}>{selected ? '✓' : '+'}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           ref={dragHandleRef}
@@ -445,9 +587,21 @@ export function SortableChannelRow({
           </span>
         ) : null}
 
-        {channel.enabled === false ? (
-          <span className="badge badge-muted" style={{ fontSize: 10 }}>已禁用</span>
+        {sourceUnavailable ? (
+          <span
+            className="badge badge-muted"
+            style={{ fontSize: 10 }}
+            data-tooltip={suppressTooltips ? undefined : '模型刷新后发现该来源暂不可用，恢复后会自动重新参与路由'}
+          >
+            来源不可用
+          </span>
         ) : null}
+
+        {channel.enabled === false ? (
+          <span className="badge badge-muted" style={{ fontSize: 10 }}>禁用</span>
+        ) : null}
+
+        {renderChannelInsightBadges(channel, suppressTooltips)}
 
         {routeUnit ? (
           <>

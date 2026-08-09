@@ -138,6 +138,45 @@ describe('TokenRouter selection scoring', () => {
     }).returning().get();
   }
 
+  it('excludes source-unavailable channels from selection and explains the reason', async () => {
+    const route = await createRoute('gpt-5-source-unavailable');
+    const site = await createSite('source-unavailable-site');
+    const account = await createAccount(site.id, 'source-unavailable-user');
+    const unavailableToken = await createToken(account.id, 'unavailable');
+    const availableToken = await createToken(account.id, 'available');
+
+    const unavailableChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: unavailableToken.id,
+      priority: 0,
+      weight: 100,
+      enabled: true,
+      sourceUnavailable: true,
+    }).returning().get();
+
+    const availableChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: availableToken.id,
+      priority: 1,
+      weight: 1,
+      enabled: true,
+      sourceUnavailable: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('gpt-5-source-unavailable');
+    expect(selected?.channel.id).toBe(availableChannel.id);
+
+    const explanation = await router.explainSelection('gpt-5-source-unavailable');
+    const unavailableDecision = explanation.candidates.find((candidate) => candidate.channelId === unavailableChannel.id);
+    expect(unavailableDecision).toMatchObject({
+      eligible: false,
+      reason: '来源不可用',
+    });
+  });
+
   it('reuses a preferred channel only while it remains healthy', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
