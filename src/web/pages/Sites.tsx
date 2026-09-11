@@ -485,13 +485,6 @@ export default function Sites() {
     setSelectedInitializationPresetId(null);
   };
 
-  const scrollToEditorTop = () => {
-    const scrollTo = (globalThis as { scrollTo?: (options?: ScrollToOptions) => void }).scrollTo;
-    if (typeof scrollTo === 'function') {
-      scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
   const openAdd = () => {
     if (isAdding) {
       closeEditor();
@@ -500,14 +493,12 @@ export default function Sites() {
     setEditor({ mode: 'add' });
     setForm(createEmptySiteForm());
     setSelectedInitializationPresetId(null);
-    scrollToEditorTop();
   };
 
   const openEdit = (site: SiteRow) => {
     setEditor({ mode: 'edit', editingSiteId: site.id });
     setForm(hydrateSiteForm(siteFormFromSite(site)));
     setSelectedInitializationPresetId(detectSiteInitializationPreset(site.url, site.platform)?.id || null);
-    scrollToEditorTop();
     // Load disabled models and discovered models independently so a best-effort
     // availability fetch cannot wipe the existing disabled-model state.
     const loadSiteId = site.id;

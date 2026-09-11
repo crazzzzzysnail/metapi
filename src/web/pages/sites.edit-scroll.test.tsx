@@ -40,54 +40,6 @@ describe('Sites edit behavior', () => {
     vi.clearAllMocks();
   });
 
-  it('scrolls to page top when entering edit mode', async () => {
-    apiMock.getSites.mockResolvedValue([
-      {
-        id: 1,
-        name: 'Demo Site',
-        url: 'https://example.com',
-        platform: 'new-api',
-        status: 'active',
-      },
-    ]);
-
-    const scrollToMock = vi.fn();
-    Object.defineProperty(globalThis, 'scrollTo', {
-      configurable: true,
-      writable: true,
-      value: scrollToMock,
-    });
-
-    let root!: WebTestRenderer;
-    try {
-      await act(async () => {
-        root = create(
-          <MemoryRouter initialEntries={['/sites']}>
-            <ToastProvider>
-              <Sites />
-            </ToastProvider>
-          </MemoryRouter>,
-        );
-      });
-      await flushMicrotasks();
-
-      const editButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).trim() === '编辑'
-      ));
-
-      await act(async () => {
-        editButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(scrollToMock).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
-    } finally {
-      root?.unmount();
-    }
-  });
-
   it('restores header add button label after closing add modal', async () => {
     apiMock.getSites.mockResolvedValue([]);
 
