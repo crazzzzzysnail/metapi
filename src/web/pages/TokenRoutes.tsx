@@ -1381,38 +1381,31 @@ export default function TokenRoutes() {
     }
   };
 
-  const handleBatchDeleteChannels = async (routeId: number) => {
-    const selectedIds = selectedChannelIdsByRoute[routeId] || [];
-    if (selectedIds.length === 0) {
-      toast.info('请先选择要删除的通道');
-      return;
-    }
-
+  // 移除主体：供“按勾选移除”与“按状态（来源不可用）移除”共用，目标通道由参数显式传入
+  const deleteChannelsInternal = async (routeId: number, targetChannels: RouteChannel[], confirmText: string) => {
+    if (targetChannels.length === 0) return;
     const route = routeSummaries.find((item) => item.id === routeId);
-    const channels = channelsByRouteId[routeId] || [];
-    const selectedChannels = channels.filter((channel) => selectedIds.includes(channel.id));
-    if (selectedChannels.length === 0) return;
-    if (route && !confirmExplicitGroupChannelBatchWrite(route, selectedChannels, '删除')) {
+    if (route && !confirmExplicitGroupChannelBatchWrite(route, targetChannels, '移除')) {
       return;
     }
 
     const confirmed = typeof globalThis.confirm !== 'function'
-      || globalThis.confirm(`确认批量删除 ${selectedChannels.length} 个通道？如果删除最后一个通道，对应的自动精确路由也会被删除。`);
+      || globalThis.confirm(confirmText);
     if (!confirmed) return;
 
     setUpdatingChannel((prev) => {
       const next = { ...prev };
-      for (const channel of selectedChannels) next[channel.id] = true;
+      for (const channel of targetChannels) next[channel.id] = true;
       return next;
     });
 
     try {
       let removedRoute = false;
-      for (const channel of selectedChannels) {
+      for (const channel of targetChannels) {
         const result = await api.deleteChannel(channel.id);
         if (result?.removedRoute) removedRoute = true;
       }
-      toast.success(`已批量删除 ${selectedChannels.length} 个通道`);
+      toast.success(`已批量移除 ${targetChannels.length} 个通道`);
       if (removedRoute) {
         invalidateChannels(routeId);
       } else {
@@ -1421,16 +1414,47 @@ export default function TokenRoutes() {
       await load();
       setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
     } catch (e: any) {
-      toast.error(e.message || '批量删除通道失败');
+      toast.error(e.message || '批量移除通道失败');
       await loadChannels(routeId, true).catch(() => undefined);
       await load().catch(() => undefined);
     } finally {
       setUpdatingChannel((prev) => {
         const next = { ...prev };
-        for (const channel of selectedChannels) delete next[channel.id];
+        for (const channel of targetChannels) delete next[channel.id];
         return next;
       });
     }
+  };
+
+  const handleBatchDeleteChannels = async (routeId: number) => {
+    const selectedIds = selectedChannelIdsByRoute[routeId] || [];
+    if (selectedIds.length === 0) {
+      toast.info('请先选择要移除的通道');
+      return;
+    }
+
+    const channels = channelsByRouteId[routeId] || [];
+    const selectedChannels = channels.filter((channel) => selectedIds.includes(channel.id));
+    if (selectedChannels.length === 0) return;
+    await deleteChannelsInternal(
+      routeId,
+      selectedChannels,
+      `确认批量移除 ${selectedChannels.length} 个通道？如果移除最后一个通道，对应的自动精确路由也会被删除。`,
+    );
+  };
+
+  const handleBatchRemoveUnavailableChannels = async (routeId: number) => {
+    const channels = channelsByRouteId[routeId] || [];
+    const targets = channels.filter((channel) => channel.sourceUnavailable === true);
+    if (targets.length === 0) {
+      toast.info('没有来源不可用的通道');
+      return;
+    }
+    await deleteChannelsInternal(
+      routeId,
+      targets,
+      `确认移除 ${targets.length} 个来源不可用的通道？若某条自动精确路由因此不再有任何通道，会被一并删除。`,
+    );
   };
 
   const handleSiteBlockModel = async (channelId: number, routeId: number) => {
@@ -1736,6 +1760,12 @@ export default function TokenRoutes() {
   handleBatchDeleteChannelsRef.current = handleBatchDeleteChannels;
   const stableBatchDeleteChannels = useCallback(
     (routeId: number) => handleBatchDeleteChannelsRef.current(routeId),
+    [],
+  );
+  const handleBatchRemoveUnavailableRef = useRef(handleBatchRemoveUnavailableChannels);
+  handleBatchRemoveUnavailableRef.current = handleBatchRemoveUnavailableChannels;
+  const stableBatchRemoveUnavailable = useCallback(
+    (routeId: number) => handleBatchRemoveUnavailableRef.current(routeId),
     [],
   );
   const handleCreateTokenRef = useRef(handleCreateTokenForMissingAccount);
@@ -2121,6 +2151,7 @@ export default function TokenRoutes() {
                     onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
                     onBatchDisableChannels={stableBatchDisableChannels}
                     onBatchDeleteChannels={stableBatchDeleteChannels}
+                    onBatchRemoveUnavailableChannels={stableBatchRemoveUnavailable}
                     missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
                     missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
                     onCreateTokenForMissing={stableCreateTokenForMissing}
@@ -2168,6 +2199,7 @@ export default function TokenRoutes() {
               onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
               onBatchDisableChannels={stableBatchDisableChannels}
               onBatchDeleteChannels={stableBatchDeleteChannels}
+              onBatchRemoveUnavailableChannels={stableBatchRemoveUnavailable}
               missingTokenSiteItems={EMPTY_MISSING_ITEMS}
               missingTokenGroupItems={EMPTY_MISSING_GROUP_ITEMS}
               onCreateTokenForMissing={stableCreateTokenForMissing}
@@ -2214,6 +2246,7 @@ export default function TokenRoutes() {
                   onApplyBatchPriorityAction={stableApplyBatchPriorityAction}
                   onBatchDisableChannels={stableBatchDisableChannels}
                   onBatchDeleteChannels={stableBatchDeleteChannels}
+                  onBatchRemoveUnavailableChannels={stableBatchRemoveUnavailable}
                   missingTokenSiteItems={getMissingTokenSiteItems(route.id)}
                   missingTokenGroupItems={getMissingTokenGroupItems(route.id)}
                   onCreateTokenForMissing={stableCreateTokenForMissing}

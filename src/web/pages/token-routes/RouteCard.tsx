@@ -95,6 +95,7 @@ type RouteCardProps = {
   onApplyBatchPriorityAction?: (routeId: number, action: 'set_p0' | 'move_down_one_layer') => void;
   onBatchDisableChannels?: (routeId: number) => void;
   onBatchDeleteChannels?: (routeId: number) => void;
+  onBatchRemoveUnavailableChannels?: (routeId: number) => void;
   // Missing token hints
   missingTokenSiteItems: MissingTokenRouteSiteActionItem[];
   missingTokenGroupItems: MissingTokenGroupRouteSiteActionItem[];
@@ -585,6 +586,7 @@ function RouteCardInner({
   onApplyBatchPriorityAction,
   onBatchDisableChannels,
   onBatchDeleteChannels,
+  onBatchRemoveUnavailableChannels,
   missingTokenSiteItems,
   missingTokenGroupItems,
   onCreateTokenForMissing,
@@ -597,6 +599,7 @@ function RouteCardInner({
   const exactRoute = isRouteExactModel(route);
   const explicitGroupRoute = isExplicitGroupRoute(route);
   const explicitGroupSourceCount = Array.isArray(route.sourceRouteIds) ? route.sourceRouteIds.length : 0;
+  const sourceUnavailableChannelCount = (channels || []).filter((channel) => channel.sourceUnavailable === true).length;
   const readOnlyRoute = route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true;
   const channelManagementDisabled = explicitGroupRoute;
   const title = resolveRouteTitle(route);
@@ -1220,6 +1223,16 @@ function RouteCardInner({
               >
                 批量移除
               </button>
+              {route.enabled && sourceUnavailableChannelCount > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-link-danger"
+                  style={{ padding: '4px 10px', fontSize: 12 }}
+                  onClick={() => onBatchRemoveUnavailableChannels?.(route.id)}
+                >
+                  {`${tr('移除来源不可用')} (${sourceUnavailableChannelCount})`}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -1384,6 +1397,7 @@ function areRouteCardPropsEqual(prev: RouteCardProps, next: RouteCardProps): boo
     || prev.onApplyBatchPriorityAction !== next.onApplyBatchPriorityAction
     || prev.onBatchDisableChannels !== next.onBatchDisableChannels
     || prev.onBatchDeleteChannels !== next.onBatchDeleteChannels
+    || prev.onBatchRemoveUnavailableChannels !== next.onBatchRemoveUnavailableChannels
     || prev.onCreateTokenForMissing !== next.onCreateTokenForMissing
     || prev.onAddChannel !== next.onAddChannel
     || prev.onSiteBlockModel !== next.onSiteBlockModel
