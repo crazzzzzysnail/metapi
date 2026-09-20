@@ -132,6 +132,103 @@ describe('upstreamRequestBuilder', () => {
     expect(request.headers['x-test-header']).toBeUndefined();
   });
 
+  it('moves system messages to the front while keeping the rest in order', () => {
+    // 保留对入参数组的引用，用于断言「不修改原始 messages」
+    const originalMessages = [
+      { role: 'user', content: 'u1' },
+      { role: 'system', content: 's1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'system', content: 's2' },
+      { role: 'user', content: 'u2' },
+    ];
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: { model: 'gpt-5.2', messages: originalMessages },
+      downstreamFormat: 'openai',
+    });
+
+    // 两条 system 按原相对顺序（s1→s2）提到最前，其余保持 u1→a1→u2
+    expect(request.body.messages).toEqual([
+      { role: 'system', content: 's1' },
+      { role: 'system', content: 's2' },
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+    ]);
+    // 返回新数组，且未修改调用方传入的原始数组
+    expect(request.body.messages).not.toBe(originalMessages);
+    expect(originalMessages).toEqual([
+      { role: 'user', content: 'u1' },
+      { role: 'system', content: 's1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'system', content: 's2' },
+      { role: 'user', content: 'u2' },
+    ]);
+  });
+
+  it('moves developer messages to the front together with system messages', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          { role: 'user', content: 'u1' },
+          { role: 'developer', content: 'd1' },
+          { role: 'system', content: 's1' },
+          { role: 'user', content: 'u2' },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    // developer 与 system 同等前置，且保持彼此原相对顺序（d1 在 s1 前）
+    expect(request.body.messages).toEqual([
+      { role: 'developer', content: 'd1' },
+      { role: 'system', content: 's1' },
+      { role: 'user', content: 'u1' },
+      { role: 'user', content: 'u2' },
+    ]);
+  });
+
+  it('leaves tool and assistant ordering untouched when no system message exists', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          { role: 'user', content: 'u1' },
+          { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function' }] },
+          { role: 'tool', tool_call_id: 'call_1', content: 'result' },
+          { role: 'user', content: 'u2' },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    // 无 system/developer 时，消息顺序（含 assistant→tool 相邻结构）完全保持不变
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', type: 'function' }] },
+      { role: 'tool', tool_call_id: 'call_1', content: 'result' },
+      { role: 'user', content: 'u2' },
+    ]);
+  });
+
   it('drops responses-style continuation fields before proxying Claude count_tokens upstream', () => {
     const request = buildClaudeCountTokensUpstreamRequest({
       modelName: 'claude-opus-4-6',
