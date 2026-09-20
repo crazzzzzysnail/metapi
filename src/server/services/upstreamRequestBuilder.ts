@@ -386,6 +386,28 @@ function sanitizeResponsesFallbackChatBody(
   return next;
 }
 
+/**
+ * 将 role 为 system/developer 的消息稳定地移动到数组最前面，
+ * 其余消息（含 tool/assistant/user）保持原有相对顺序不变。
+ * 多条 system 保留为多条独立消息（不合并：合并需要解析多模态 content
+ * 数组，容易破坏图片/文件块；且多数上游只要求「首条是 system」）。
+ * 返回新数组，不修改入参；与 anthropic/gemini/responses 转换器
+ * 「system 与 developer 同等前置」的判据保持一致。
+ */
+function reorderSystemMessagesFirst(
+  messages: Array<unknown>,
+): Array<unknown> {
+  const isSystemLike = (message: unknown): boolean => {
+    if (!isRecord(message)) return false;
+    const role = asTrimmedString(message.role).toLowerCase();
+    return role === 'system' || role === 'developer';
+  };
+  return [
+    ...messages.filter(isSystemLike),
+    ...messages.filter((message) => !isSystemLike(message)),
+  ];
+}
+
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -721,6 +743,11 @@ export function buildUpstreamEndpointRequest(input: {
     ...openaiBody,
     model: input.modelName,
     stream: input.stream,
+    // 部分上游（多为国产模型/中转站）强约束 system 必须位于 messages 首位，
+    // 转发前统一稳定重排，避免客户端传入顺序不当导致 HTTP 400。
+    ...(Array.isArray(openaiBody.messages)
+      ? { messages: reorderSystemMessagesFirst(openaiBody.messages) }
+      : {}),
   };
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
