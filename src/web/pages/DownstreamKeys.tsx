@@ -27,6 +27,7 @@ import {
   type Range,
   type SummaryItem,
 } from './downstream-keys/shared.js';
+import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
 
 type Status = 'all' | 'enabled' | 'disabled';
 
@@ -1082,7 +1083,7 @@ export default function DownstreamKeys() {
       {selectedIds.length > 0 ? (
         <ResponsiveBatchActionBar
           isMobile={isMobile}
-          info={`已选 ${selectedIds.length} 个密钥`}
+          info={buildBatchSelectionInfo(selectedIds.length, selectedVisibleCount, '个密钥')}
           infoStyle={{ color: 'var(--color-text-primary)' }}
         >
           <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={openBatchMetadata} disabled={batchActionLoading}>{isMobile ? '归类/标签' : '批量归类/标签'}</button>
@@ -1090,6 +1091,17 @@ export default function DownstreamKeys() {
           <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void batchRun('批量禁用', selectedIds)} disabled={batchActionLoading}>{isMobile ? '禁用' : '批量禁用'}</button>
           <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void batchRun('批量清零用量', selectedIds)} disabled={batchActionLoading}>{isMobile ? '清零' : '批量清零用量'}</button>
           <button className="btn btn-link btn-link-danger" onClick={() => setDeleteConfirm({ mode: 'batch', ids: [...selectedIds] })} disabled={batchActionLoading}>{isMobile ? '删除' : '批量删除'}</button>
+          {selectedIds.length > selectedVisibleCount && (
+            <button
+              type="button"
+              data-testid="dk-batch-keep-visible"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setSelectedIds((prev) => prev.filter((id) => visibleIds.includes(id)))}
+            >
+              {tr('只保留可见项')}
+            </button>
+          )}
         </ResponsiveBatchActionBar>
       ) : null}
 
@@ -1193,7 +1205,16 @@ export default function DownstreamKeys() {
               <thead>
                 <tr>
                   <th style={{ width: 42 }}>
-                    <input type="checkbox" checked={allVisibleSelected} onChange={(e) => toggleSelectAllVisible(e.target.checked)} />
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      ref={(el) => {
+                        if (!el) return;
+                        // 三态纯可见集口径：部分勾选 → indeterminate（复用现成 selectedVisibleCount）
+                        el.indeterminate = selectedVisibleCount > 0 && !allVisibleSelected;
+                      }}
+                      onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                    />
                   </th>
                   <th>密钥信息</th>
                   <th>授权范围</th>

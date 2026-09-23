@@ -9,6 +9,9 @@ import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
+import { confirmOrThrow } from '../helpers/confirmDialog.js';
+import { pruneStaleChannelSelections } from './helpers/channelSelectionPrune.js';
+import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { ROUTE_DECISION_REFRESH_TASK_TYPE } from '../../shared/tokenRouteContract.js';
 import {
   buildRouteModelCandidatesIndex,
@@ -114,10 +117,6 @@ function getRouteRoutingStrategySuccessMessage(value: RouteRoutingStrategy): str
   return '已切换为权重随机策略';
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 export function DesktopDetailPanelPresence({
   open,
   children,
@@ -214,6 +213,13 @@ export default function TokenRoutes() {
   const [batchSelectMode, setBatchSelectMode] = useState(false);
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<number>>(new Set());
   const [selectedChannelIdsByRoute, setSelectedChannelIdsByRoute] = useState<Record<number, number[]>>({});
+  // 通道批量移除的组件档确认（B4.3）：ids 为待移除通道；reason 决定模态描述文案
+  const [channelBatchDeleteConfirm, setChannelBatchDeleteConfirm] = useState<{ routeId: number; ids: number[]; reason: 'selection' | 'unavailable' } | null>(null);
+  const [channelBatchDeleteLoading, setChannelBatchDeleteLoading] = useState(false);
+  // 关闭动画期间 state 已被置 null，保留最后一次非空快照供渲染，避免模态描述闪烁为空
+  const channelBatchDeleteSnapshotRef = useRef<{ routeId: number; ids: number[]; reason: 'selection' | 'unavailable' } | null>(null);
+  if (channelBatchDeleteConfirm) channelBatchDeleteSnapshotRef.current = channelBatchDeleteConfirm;
+  const channelBatchDeleteView = channelBatchDeleteConfirm ?? channelBatchDeleteSnapshotRef.current;
 
   const [channelTokenDraft, setChannelTokenDraft] = useState<Record<number, number>>({});
   const [updatingChannel, setUpdatingChannel] = useState<Record<number, boolean>>({});
@@ -242,6 +248,17 @@ export default function TokenRoutes() {
   } = useRouteChannels();
 
   const toast = useToast();
+
+  // 通道选择与现存通道求交集（B3.5）：被删除/重建的通道 id 永不复用（AUTOINCREMENT），
+  // 交集缩小即"所选通道已不存在"，提示一次。被筛选隐藏的勾选不受此规则影响（方案 A 契约）。
+  // 该 effect 幂等：next 与 prev 内容一致时不 setState，无循环；主动清空选择的路径见 deleteChannelsInternal。
+  useEffect(() => {
+    const { next, changed } = pruneStaleChannelSelections(selectedChannelIdsByRoute, channelsByRouteId);
+    if (changed) {
+      setSelectedChannelIdsByRoute(next);
+      toast.info(tr('所选通道已变更，请重新勾选'));
+    }
+  }, [channelsByRouteId, selectedChannelIdsByRoute, toast]);
 
   const candidatesLoadedRef = useRef(false);
   const candidatesPromiseRef = useRef<Promise<void> | null>(null);
@@ -962,19 +979,27 @@ export default function TokenRoutes() {
   };
 
   const handleBatchUpdateRoutes = async (action: 'enable' | 'disable') => {
-    const ids = Array.from(selectedRouteIds).filter((id) => selectableRouteIds.has(id));
+    // 方案 A 契约：勾选即执行，筛选变化不收缩选择集（原 filter(id => selectableRouteIds.has(id)) 移除）
+    const ids = Array.from(selectedRouteIds);
     if (ids.length === 0) {
-      toast.info('请先选择要操作的路由');
+      toast.info(tr('请先选择要操作的路由'));
       return;
     }
     const actionLabel = action === 'disable' ? '禁用' : '启用';
-    const confirmed = window.confirm(`确认批量${actionLabel} ${ids.length} 条路由？`);
-    if (!confirmed) return;
+    // B4 fail-closed：环境无 confirm 时拒绝执行（原裸 window.confirm 在该环境下会抛 TypeError）
+    if (!confirmOrThrow(`确认批量${actionLabel} ${ids.length} 条路由？`)) return;
 
     setBatchUpdatingRoutes(true);
     try {
-      await api.batchUpdateRoutes({ ids, action });
-      toast.success(`已批量${actionLabel} ${ids.length} 条路由`);
+      const result = await api.batchUpdateRoutes({ ids, action });
+      const updatedCount = Number.isFinite(result?.updatedCount) ? Number(result.updatedCount) : ids.length;
+      const missingCount = ids.length - updatedCount;
+      if (missingCount > 0) {
+        // 差额典型成因：路由被自动重建删除（精确路由通道清空时连带删除）
+        toast.info(`已批量${actionLabel} ${updatedCount} 条路由，${missingCount} 条已不存在或状态未变化`);
+      } else {
+        toast.success(`已批量${actionLabel} ${updatedCount} 条路由`);
+      }
       setSelectedRouteIds(new Set());
       setBatchSelectMode(false);
       await load();
@@ -1012,6 +1037,12 @@ export default function TokenRoutes() {
     () => filteredRoutes.slice(0, visibleRouteCount),
     [filteredRoutes, visibleRouteCount],
   );
+
+  // 已勾选但尚未渲染（懒加载分块之外）的路由数：>0 时在批量栏显式提示（方案 A 契约的提示层）
+  const unrenderedSelectedCount = useMemo(() => {
+    const renderedIds = new Set(visibleRoutes.map((route) => route.id));
+    return [...selectedRouteIds].filter((id) => !renderedIds.has(id)).length;
+  }, [selectedRouteIds, visibleRoutes]);
 
   // Lazy per-route candidate index — only computes for routes actually accessed
   const candidateIndexCacheRef = useRef<{ key: string; cache: Map<number, RouteCandidateView> }>({ key: '', cache: new Map() });
@@ -1103,40 +1134,13 @@ export default function TokenRoutes() {
 
   const handleDeleteChannel = async (channelId: number, routeId: number) => {
     const dismissedKey = 'metapi:channel-delete-warning-dismissed';
-    const dismissed = localStorage.getItem(dismissedKey) === 'true';
-    if (!dismissed) {
-      const dontAskAgain = { checked: false };
-      const confirmed = await new Promise<boolean>((resolve) => {
-        const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center';
-        const dialog = document.createElement('div');
-        dialog.style.cssText = 'background:var(--color-bg-card,#fff);border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)';
-        dialog.innerHTML = `
-          <div style="font-weight:600;font-size:15px;margin-bottom:12px">确认移除通道</div>
-          <div style="font-size:13px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:16px">
-            移除的通道会在定时模型刷新时被自动重建恢复。<br/>如果只是想临时停用通道，建议使用<b>禁用开关</b>。
-          </div>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--color-text-muted);margin-bottom:16px;cursor:pointer">
-            <input type="checkbox" id="__ch_del_dismiss" /> 以后不再提示
-          </label>
-          <div style="display:flex;justify-content:flex-end;gap:8px">
-            <button id="__ch_del_cancel" class="btn btn-ghost" style="padding:6px 16px">取消</button>
-            <button id="__ch_del_confirm" class="btn btn-danger" style="padding:6px 16px">确认移除</button>
-          </div>
-        `;
-        overlay.appendChild(dialog);
-        document.body.appendChild(overlay);
-        dialog.querySelector('#__ch_del_cancel')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(false); });
-        dialog.querySelector('#__ch_del_confirm')!.addEventListener('click', () => {
-          dontAskAgain.checked = (dialog.querySelector('#__ch_del_dismiss') as HTMLInputElement).checked;
-          document.body.removeChild(overlay);
-          resolve(true);
-        });
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(false); } });
-      });
-      if (!confirmed) return;
-      if (dontAskAgain.checked) localStorage.setItem(dismissedKey, 'true');
-    }
+    const dismissed = typeof localStorage !== 'undefined' && localStorage.getItem(dismissedKey) === 'true';
+    // B4.3 单条移除降级为 confirm 档（原手搓 DOM 弹层删除；localStorage 静默键与语义保留）
+    const confirmed = dismissed
+      ? confirmOrThrow(tr('确认移除该通道？'))
+      : confirmOrThrow(tr('移除的通道会在定时模型刷新时被自动重建恢复。如果只是临时停用，建议使用禁用开关。确认移除该通道？（确认后不再显示此提醒；如需恢复，请清除浏览器本地存储项 metapi:channel-delete-warning-dismissed）'));
+    if (!confirmed) return;
+    if (!dismissed && typeof localStorage !== 'undefined') localStorage.setItem(dismissedKey, 'true');
     try {
       const result = await api.deleteChannel(channelId);
       toast.success('通道已移除');
@@ -1186,18 +1190,19 @@ export default function TokenRoutes() {
     }
   };
 
-  const saveChannelPriorities = async (routeId: number, reordered: RouteChannel[]) => {
-    if (savingPriorityByRoute[routeId]) return false;
+  // 'saved' 已保存 | 'noop' 无变化（空操作） | 'cancelled' 用户取消回写确认 | 'blocked' 前置条件不满足或接口失败
+  const saveChannelPriorities = async (routeId: number, reordered: RouteChannel[]): Promise<'saved' | 'noop' | 'cancelled' | 'blocked'> => {
+    if (savingPriorityByRoute[routeId]) return 'blocked';
 
     const route = routeSummaries.find((item) => item.id === routeId);
-    if (!route) return false;
+    if (!route) return 'blocked';
 
     const channels = channelsByRouteId[routeId] || [];
     const changedChannels = reordered.filter((channel) => {
       const previous = channels.find((item) => item.id === channel.id);
       return (previous?.priority ?? 0) !== channel.priority;
     });
-    if (changedChannels.length === 0) return false;
+    if (changedChannels.length === 0) return 'noop';
 
     if (isExplicitGroupRoute(route)) {
       const changedSourceRouteIds = Array.from(new Set(
@@ -1213,10 +1218,10 @@ export default function TokenRoutes() {
         ));
         if (affectedGroups.length > 0) {
           const affectedNames = affectedGroups.map((candidate) => resolveRouteTitle(candidate));
-          const confirmFn = typeof globalThis.confirm === 'function' ? globalThis.confirm : null;
-          const confirmed = !confirmFn
-            || confirmFn(`当前群组的优先级调整会直接回写来源通道，并同步影响：${affectedNames.join('、')}。是否继续？`);
-          if (!confirmed) return false;
+          // B4 fail-closed：环境无 confirm 时拒绝回写（原兜底为放行）
+          if (!confirmOrThrow(`当前群组的优先级调整会直接回写来源通道，并同步影响：${affectedNames.join('、')}。是否继续？`)) {
+            return 'cancelled';
+          }
         }
       }
     }
@@ -1245,11 +1250,11 @@ export default function TokenRoutes() {
           // ignore route decision refresh failures after reorder
         }
       }
-      return true;
+      return 'saved';
     } catch (e: any) {
       setChannels(routeId, previousChannels);
       toast.error(e.message || '保存通道优先级失败，已回滚');
-      return false;
+      return 'blocked';
     } finally {
       setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: false }));
     }
@@ -1315,9 +1320,8 @@ export default function TokenRoutes() {
     const affectedSuffix = affectedGroups.length > 0
       ? `，并同步影响：${affectedGroups.map((candidate) => resolveRouteTitle(candidate)).join('、')}`
       : '';
-    const confirmFn = typeof globalThis.confirm === 'function' ? globalThis.confirm : null;
-    return !confirmFn
-      || confirmFn(`当前群组的通道${actionLabel}会直接回写来源通道${affectedSuffix}。是否继续？`);
+    // B4 fail-closed：环境无 confirm 时拒绝回写（原兜底为放行）
+    return confirmOrThrow(`当前群组的通道${actionLabel}会直接回写来源通道${affectedSuffix}。是否继续？`);
   };
 
   const handleApplyBatchPriorityAction = async (routeId: number, action: PriorityRailBatchAction) => {
@@ -1329,10 +1333,13 @@ export default function TokenRoutes() {
 
     const channels = channelsByRouteId[routeId] || [];
     const reordered = applyPriorityRailBatchAction(channels, selectedIds, action);
-    const saved = await saveChannelPriorities(routeId, reordered);
-    if (saved) {
+    const outcome = await saveChannelPriorities(routeId, reordered);
+    if (outcome === 'saved') {
       setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+    } else if (outcome === 'noop') {
+      toast.info(tr('所选通道优先级未发生变化'));
     }
+    // 'cancelled'：用户主动取消，尊重决定不再提示；'blocked'：已有各自错误提示
   };
 
   const handleBatchDisableChannels = async (routeId: number) => {
@@ -1354,9 +1361,8 @@ export default function TokenRoutes() {
       return;
     }
 
-    const confirmed = typeof globalThis.confirm !== 'function'
-      || globalThis.confirm(`确认批量禁用 ${targetChannels.length} 个通道？`);
-    if (!confirmed) return;
+    // B4 fail-closed：环境无 confirm 时拒绝执行（原兜底为放行）
+    if (!confirmOrThrow(`确认批量禁用 ${targetChannels.length} 个通道？`)) return;
 
     setUpdatingChannel((prev) => {
       const next = { ...prev };
@@ -1381,17 +1387,15 @@ export default function TokenRoutes() {
     }
   };
 
-  // 移除主体：供“按勾选移除”与“按状态（来源不可用）移除”共用，目标通道由参数显式传入
-  const deleteChannelsInternal = async (routeId: number, targetChannels: RouteChannel[], confirmText: string) => {
-    if (targetChannels.length === 0) return;
+  // 移除主体：由 DeleteConfirmModal 确认后调用（组件档确认已在模态完成）。
+  // 群组路由的通道回写仍走 confirmExplicitGroupChannelBatchWrite 做二次影响确认。
+  // 返回 false 表示二次确认被取消（此时模态保持打开，待移除集合不丢失）。
+  const deleteChannelsInternal = async (routeId: number, targetChannels: RouteChannel[]): Promise<boolean> => {
+    if (targetChannels.length === 0) return false;
     const route = routeSummaries.find((item) => item.id === routeId);
     if (route && !confirmExplicitGroupChannelBatchWrite(route, targetChannels, '移除')) {
-      return;
+      return false;
     }
-
-    const confirmed = typeof globalThis.confirm !== 'function'
-      || globalThis.confirm(confirmText);
-    if (!confirmed) return;
 
     setUpdatingChannel((prev) => {
       const next = { ...prev };
@@ -1406,17 +1410,21 @@ export default function TokenRoutes() {
         if (result?.removedRoute) removedRoute = true;
       }
       toast.success(`已批量移除 ${targetChannels.length} 个通道`);
+      // 先清空该路由的通道选择，再重载：避免裁剪 effect 在"已删 id 仍留在选择集"时误报"通道已变更"
+      setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
       if (removedRoute) {
         invalidateChannels(routeId);
       } else {
         await loadChannels(routeId, true);
       }
       await load();
-      setSelectedChannelIdsByRoute((prev) => ({ ...prev, [routeId]: [] }));
+      return true;
     } catch (e: any) {
       toast.error(e.message || '批量移除通道失败');
       await loadChannels(routeId, true).catch(() => undefined);
       await load().catch(() => undefined);
+      // 已进入执行阶段（二次确认通过且发起过请求），失败也关闭模态，避免用户重复触发
+      return true;
     } finally {
       setUpdatingChannel((prev) => {
         const next = { ...prev };
@@ -1426,35 +1434,49 @@ export default function TokenRoutes() {
     }
   };
 
-  const handleBatchDeleteChannels = async (routeId: number) => {
+  // 模态确认回调：按 reason 计算目标通道后执行移除；二次确认被取消时保持模态打开
+  const handleChannelBatchDeleteConfirm = async () => {
+    const pending = channelBatchDeleteConfirm;
+    if (!pending) return;
+    const channels = channelsByRouteId[pending.routeId] || [];
+    const targetChannels = pending.reason === 'unavailable'
+      ? channels.filter((channel) => pending.ids.includes(channel.id) && channel.sourceUnavailable === true)
+      : channels.filter((channel) => pending.ids.includes(channel.id));
+    // 模态打开期间通道已被删除/重建（ids 全部失效）：无可移除项，直接收口，避免模态空挂
+    if (targetChannels.length === 0) {
+      setChannelBatchDeleteConfirm(null);
+      toast.info(tr('所选通道已变更，请重新勾选'));
+      return;
+    }
+    setChannelBatchDeleteLoading(true);
+    try {
+      const executed = await deleteChannelsInternal(pending.routeId, targetChannels);
+      if (executed) setChannelBatchDeleteConfirm(null);
+    } finally {
+      setChannelBatchDeleteLoading(false);
+    }
+  };
+
+  const handleBatchDeleteChannels = (routeId: number) => {
     const selectedIds = selectedChannelIdsByRoute[routeId] || [];
     if (selectedIds.length === 0) {
       toast.info('请先选择要移除的通道');
       return;
     }
-
     const channels = channelsByRouteId[routeId] || [];
     const selectedChannels = channels.filter((channel) => selectedIds.includes(channel.id));
     if (selectedChannels.length === 0) return;
-    await deleteChannelsInternal(
-      routeId,
-      selectedChannels,
-      `确认批量移除 ${selectedChannels.length} 个通道？如果移除最后一个通道，对应的自动精确路由也会被删除。`,
-    );
+    setChannelBatchDeleteConfirm({ routeId, ids: selectedChannels.map((channel) => channel.id), reason: 'selection' });
   };
 
-  const handleBatchRemoveUnavailableChannels = async (routeId: number) => {
+  const handleBatchRemoveUnavailableChannels = (routeId: number) => {
     const channels = channelsByRouteId[routeId] || [];
     const targets = channels.filter((channel) => channel.sourceUnavailable === true);
     if (targets.length === 0) {
       toast.info('没有来源不可用的通道');
       return;
     }
-    await deleteChannelsInternal(
-      routeId,
-      targets,
-      `确认移除 ${targets.length} 个来源不可用的通道？若某条自动精确路由因此不再有任何通道，会被一并删除。`,
-    );
+    setChannelBatchDeleteConfirm({ routeId, ids: targets.map((channel) => channel.id), reason: 'unavailable' });
   };
 
   const handleSiteBlockModel = async (channelId: number, routeId: number) => {
@@ -1471,28 +1493,8 @@ export default function TokenRoutes() {
       return;
     }
     const siteName = channel.site.name || '未知站点';
-    const confirmed = await new Promise<boolean>((resolve) => {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center';
-      const dialog = document.createElement('div');
-      dialog.style.cssText = 'background:var(--color-bg-card,#fff);border-radius:12px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2)';
-      dialog.innerHTML = `
-        <div style="font-weight:600;font-size:15px;margin-bottom:12px">确认站点屏蔽</div>
-        <div style="font-size:13px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:16px">
-          将模型「<b>${escapeHtml(modelName)}</b>」加入站点「<b>${escapeHtml(siteName)}</b>」的禁用列表。<br/>执行后将自动触发路由重建，该站点下此模型的通道将不再生成。
-        </div>
-        <div style="display:flex;justify-content:flex-end;gap:8px">
-          <button id="__sb_cancel" class="btn btn-ghost" style="padding:6px 16px">取消</button>
-          <button id="__sb_confirm" class="btn btn-warning" style="padding:6px 16px">确认屏蔽</button>
-        </div>
-      `;
-      overlay.appendChild(dialog);
-      document.body.appendChild(overlay);
-      dialog.querySelector('#__sb_cancel')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(false); });
-      dialog.querySelector('#__sb_confirm')!.addEventListener('click', () => { document.body.removeChild(overlay); resolve(true); });
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(false); } });
-    });
-    if (!confirmed) return;
+    // B4.3 站点屏蔽降级 confirm 档（可逆配置类；原手搓弹层 innerHTML 转义问题随之消失）
+    if (!confirmOrThrow(`将模型「${modelName}」加入站点「${siteName}」的禁用列表，并将自动触发路由重建。确认执行？`)) return;
 
     try {
       const siteId = channel.site.id;
@@ -2003,6 +2005,11 @@ export default function TokenRoutes() {
         <div className="route-batch-bar">
           <span style={{ fontSize: 13, fontWeight: 500 }}>
             {tr('已选择')} <b>{selectedRouteIds.size}</b> / {selectableRouteIds.size} {tr('条路由')}
+            {unrenderedSelectedCount > 0 && (
+              <span style={{ color: 'var(--color-warning, #b45309)' }}>
+                {' '}{tr(`（其中 ${unrenderedSelectedCount} 条尚未渲染）`)}
+              </span>
+            )}
           </span>
           <button className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 12 }} onClick={selectAllRoutes}>{tr('全选')}</button>
           <button className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 12 }} onClick={deselectAllRoutes}>{tr('取消全选')}</button>
@@ -2347,6 +2354,32 @@ export default function TokenRoutes() {
           existingChannelAccountIds={new Set((channelsByRouteId[addChannelModalRoute.id] || []).map((c) => c.accountId))}
         />
       )}
+
+      {/* 通道批量移除的组件档确认模态（B4.3） */}
+      <DeleteConfirmModal
+        open={!!channelBatchDeleteConfirm}
+        title={tr('确认批量移除通道')}
+        confirmText={tr('确认移除')}
+        loadingText={tr('移除中...')}
+        loading={channelBatchDeleteLoading}
+        description={channelBatchDeleteView ? (
+          channelBatchDeleteView.reason === 'unavailable' ? (
+            <>
+              {tr(`确认移除 ${channelBatchDeleteView.ids.length} 个来源不可用的通道？`)}
+              <br />
+              <strong>{tr('若某条自动精确路由因此不再有任何通道，会被一并删除')}</strong>
+            </>
+          ) : (
+            <>
+              {tr(`确认批量移除 ${channelBatchDeleteView.ids.length} 个通道？`)}
+              <br />
+              <strong>{tr('如果移除最后一个通道，对应的自动精确路由也会被删除')}</strong>
+            </>
+          )
+        ) : null}
+        onConfirm={() => { void handleChannelBatchDeleteConfirm(); }}
+        onClose={() => { if (!channelBatchDeleteLoading) setChannelBatchDeleteConfirm(null); }}
+      />
     </div>
   );
 }

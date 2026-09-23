@@ -18,6 +18,7 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { clearFocusParams, readFocusTokenId } from './helpers/navigationFocus.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
+import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
 import { tr } from '../i18n.js';
 
 type SyncStatus = 'success' | 'skipped' | 'failed';
@@ -313,6 +314,11 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   }, [tokens]);
   const allVisibleTokensSelected = accountClusteredTokens.length > 0
     && accountClusteredTokens.every((token) => selectedTokenIds.includes(token.id));
+  // 已选 ∩ 可见：令牌页当前可见集恒等于全量，故后缀恒不出现；保留该派生以统一模式并防未来引入筛选时分叉。
+  const selectedVisibleTokenIds = useMemo(
+    () => selectedTokenIds.filter((id) => accountClusteredTokens.some((token) => token.id === id)),
+    [selectedTokenIds, accountClusteredTokens],
+  );
 
   const activeAccounts = useMemo(() => accounts.filter(isAccountSyncable), [accounts]);
   const activeAccountSelectOptions = useMemo(() => (
@@ -1036,18 +1042,29 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       {selectedTokenIds.length > 0 && (
         <ResponsiveBatchActionBar
           isMobile={isMobile}
-          info={`已选 ${selectedTokenIds.length} 项`}
+          info={buildBatchSelectionInfo(selectedTokenIds.length, selectedVisibleTokenIds.length, '项')}
           desktopStyle={{ marginBottom: 12 }}
         >
           <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-            批量启用
+            {isMobile ? tr('启用') : tr('批量启用')}
           </button>
           <button onClick={() => runBatchTokenAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-            批量禁用
+            {isMobile ? tr('禁用') : tr('批量禁用')}
           </button>
           <button data-testid="tokens-batch-delete" onClick={() => runBatchTokenAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
-            批量删除
+            {isMobile ? tr('删除') : tr('批量删除')}
           </button>
+          {selectedTokenIds.length > selectedVisibleTokenIds.length && (
+            <button
+              type="button"
+              data-testid="tokens-batch-keep-visible"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setSelectedTokenIds((prev) => prev.filter((id) => accountClusteredTokens.some((token) => token.id === id)))}
+            >
+              {tr('只保留可见项')}
+            </button>
+          )}
         </ResponsiveBatchActionBar>
       )}
 
@@ -1313,6 +1330,11 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                   <input
                     type="checkbox"
                     checked={allVisibleTokensSelected}
+                    ref={(el) => {
+                      if (!el) return;
+                      // 三态纯可见集口径：令牌页当前可见集恒等于全量，加此逻辑防未来引入筛选时分叉
+                      el.indeterminate = selectedVisibleTokenIds.length > 0 && !allVisibleTokensSelected;
+                    }}
                     onChange={(e) => toggleSelectAllTokens(e.target.checked)}
                   />
                 </th>

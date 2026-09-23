@@ -34,6 +34,7 @@ import {
   type SortMode,
 } from "./helpers/listSorting.js";
 import { shouldIgnoreRowSelectionClick } from "./helpers/rowSelection.js";
+import { buildBatchSelectionInfo } from "./helpers/batchSelectionInfo.js";
 import { SITE_DOCS_URL } from "../docsLink.js";
 import { getSiteInitializationPreset } from "../../shared/siteInitializationPresets.js";
 import { parseBatchApiKeys } from "../../shared/apiKeyBatch.js";
@@ -325,6 +326,11 @@ export default function Accounts() {
   const allVisibleAccountsSelected =
     visibleAccounts.length > 0 &&
     visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
+  // 已选 ∩ 可见：跨分段残留勾选时由计数后缀显式表达（方案 A 契约：筛选/分段永不自动收缩选择集）
+  const selectedVisibleAccountIds = useMemo(
+    () => selectedAccountIds.filter((id) => visibleAccounts.some((account) => account.id === id)),
+    [selectedAccountIds, visibleAccounts],
+  );
   const verifyFailureHint = buildVerifyFailureHint(verifyResult);
   const addAccountPrereqHint = buildAddAccountPrereqHint(verifyResult);
 
@@ -1563,7 +1569,7 @@ export default function Accounts() {
       {activeSegment !== "tokens" && selectedAccountIds.length > 0 && (
         <ResponsiveBatchActionBar
           isMobile={isMobile}
-          info={`已选 ${selectedAccountIds.length} 项`}
+          info={buildBatchSelectionInfo(selectedAccountIds.length, selectedVisibleAccountIds.length, "项")}
           desktopStyle={{ marginBottom: 12 }}
         >
           <button
@@ -1573,7 +1579,7 @@ export default function Accounts() {
             className="btn btn-ghost"
             style={{ border: "1px solid var(--color-border)" }}
           >
-            批量刷新余额
+            {isMobile ? tr('刷新') : tr('批量刷新余额')}
           </button>
           <button
             onClick={() => runBatchAccountAction("enable")}
@@ -1581,7 +1587,7 @@ export default function Accounts() {
             className="btn btn-ghost"
             style={{ border: "1px solid var(--color-border)" }}
           >
-            批量启用
+            {isMobile ? tr('启用') : tr('批量启用')}
           </button>
           <button
             onClick={() => runBatchAccountAction("disable")}
@@ -1589,15 +1595,27 @@ export default function Accounts() {
             className="btn btn-ghost"
             style={{ border: "1px solid var(--color-border)" }}
           >
-            批量禁用
+            {isMobile ? tr('禁用') : tr('批量禁用')}
           </button>
           <button
             onClick={() => runBatchAccountAction("delete")}
             disabled={batchActionLoading}
             className="btn btn-link btn-link-danger"
           >
-            批量删除
+            {isMobile ? tr('删除') : tr('批量删除')}
           </button>
+          {selectedAccountIds.length > selectedVisibleAccountIds.length && (
+            <button
+              type="button"
+              data-testid="accounts-batch-keep-visible"
+              onClick={() => setSelectedAccountIds((prev) => prev.filter((id) => visibleAccounts.some((account) => account.id === id)))}
+              disabled={batchActionLoading}
+              className="btn btn-ghost"
+              style={{ border: "1px solid var(--color-border)" }}
+            >
+              {tr('只保留可见项')}
+            </button>
+          )}
         </ResponsiveBatchActionBar>
       )}
 
@@ -3156,6 +3174,11 @@ export default function Accounts() {
                         <input
                           type="checkbox"
                           checked={allVisibleAccountsSelected}
+                          ref={(el) => {
+                            if (!el) return;
+                            // 三态纯可见集口径：当前分段部分勾选 → indeterminate
+                            el.indeterminate = selectedVisibleAccountIds.length > 0 && !allVisibleAccountsSelected;
+                          }}
                           onChange={(e) =>
                             toggleSelectAllVisibleAccounts(e.target.checked)
                           }

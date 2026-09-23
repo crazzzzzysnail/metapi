@@ -23,6 +23,7 @@ import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js'
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
+import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   buildSiteSaveAction,
@@ -83,16 +84,41 @@ type SiteRow = {
   }>;
 };
 
+type BatchProxyMode = 'system' | 'custom' | 'clear';
+
 type BatchSiteSettingsForm = {
   applyGlobalWeight: boolean;
   globalWeight: string;
-  applyProxyUrl: boolean;
+  /** 是否应用代理批量设置；未勾选=保持现状（不下发代理字段） */
+  applyProxy: boolean;
+  /** 代理生效模式单选；勾选代理开关后默认"使用系统代理"；草稿地址跨模式切换保留不清空（访谈决策 12） */
+  proxyMode: BatchProxyMode;
   proxyUrl: string;
-  useSystemProxy: boolean;
 };
+
+/** 校验自定义代理地址：协议需与服务端 SUPPORTED_PROXY_PROTOCOLS 一致（http/https/socks 系列） */
+function isValidSiteProxyUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']
+      .includes(parsed.protocol.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 
 function getSiteRuntimeStatusRank(site: SiteRow): number {
   return site.status === 'disabled' ? 3 : 0;
+}
+
+/**
+ * 站点代理生效三态。优先级与运行时 resolveProxyUrlFromExtraConfig 一致：
+ * proxyUrl 非空即自定义优先，其次看系统代理开关（修复此前仅按 useSystemProxy 显示导致的误报）。
+ */
+function resolveSiteProxyMode(site: Pick<SiteRow, 'proxyUrl' | 'useSystemProxy'>): 'custom' | 'system' | 'none' {
+  if (site.proxyUrl?.trim()) return 'custom';
+  if (site.useSystemProxy) return 'system';
+  return 'none';
 }
 
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
@@ -316,9 +342,9 @@ export default function Sites() {
   const [batchSettingsForm, setBatchSettingsForm] = useState<BatchSiteSettingsForm>({
     applyGlobalWeight: false,
     globalWeight: '',
-    applyProxyUrl: false,
+    applyProxy: false,
+    proxyMode: 'system',
     proxyUrl: '',
-    useSystemProxy: false,
   });
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
@@ -449,6 +475,12 @@ export default function Sites() {
     [sites, sortMode],
   );
   const allVisibleSitesSelected = sortedSites.length > 0 && sortedSites.every((site) => selectedSiteIds.includes(site.id));
+  // 已选 ∩ 可见：批量栏计数后缀与「只保留可见项」按钮共用（方案 A 契约的提示层）。
+  // 站点页当前可见集恒等于全量，故后缀恒不出现、按钮恒不渲染；保留该派生以统一模式并防未来引入筛选时分叉。
+  const selectedVisibleSiteIds = useMemo(
+    () => selectedSiteIds.filter((id) => sortedSites.some((site) => site.id === id)),
+    [selectedSiteIds, sortedSites],
+  );
 
   const platformOptions = useMemo(() => {
     const current = form.platform.trim();
@@ -1101,7 +1133,9 @@ export default function Sites() {
     ));
   };
 
-  const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy', skipDeleteConfirm = false) => {
+  // 服务端仍保留 enableSystemProxy / disableSystemProxy action（契约测试在案），前端不再调用；
+  // 系统代理的开/关统一走"批量设置 → 勾选站点代理 → 使用系统代理 / 清除代理"。
+  const runBatchAction = async (action: 'enable' | 'disable' | 'delete', skipDeleteConfirm = false) => {
     if (selectedSiteIds.length === 0) return;
     if (action === 'delete' && !skipDeleteConfirm) {
       setDeleteConfirm({ mode: 'batch', count: selectedSiteIds.length });
@@ -1134,17 +1168,17 @@ export default function Sites() {
     setBatchSettingsForm({
       applyGlobalWeight: false,
       globalWeight: '',
-      applyProxyUrl: false,
+      applyProxy: false,
+      proxyMode: 'system',
       proxyUrl: '',
-      useSystemProxy: false,
     });
     setBatchSettingsOpen(true);
   };
 
   const runBatchSettings = async () => {
     if (selectedSiteIds.length === 0) return;
-    if (!batchSettingsForm.applyGlobalWeight && !batchSettingsForm.applyProxyUrl) {
-      toast.info('请至少选择一个批量设置项');
+    if (!batchSettingsForm.applyGlobalWeight && !batchSettingsForm.applyProxy) {
+      toast.info(tr('请至少选择一个批量设置项'));
       return;
     }
 
@@ -1162,9 +1196,27 @@ export default function Sites() {
       payload.globalWeight = Number(parsedWeight.toFixed(3));
     }
 
-    if (batchSettingsForm.applyProxyUrl) {
-      payload.proxyUrl = batchSettingsForm.proxyUrl.trim();
-      payload.useSystemProxy = batchSettingsForm.useSystemProxy;
+    // 未勾选"批量设置站点代理"即为保持现状（不下发代理字段）；勾选后三值单选 → 服务端字段映射（后端零改动）：
+    // custom -> 校验地址后下发 proxyUrl + useSystemProxy=false
+    // system -> 下发 useSystemProxy=true + proxyUrl=''（清空自定义地址，避免运行时"自定义优先"架空系统代理）
+    // clear  -> 下发 proxyUrl=''（服务端解析为清空）+ useSystemProxy=false
+    // 说明：运行优先级为"站点自定义地址非空即用，否则才走系统代理/直连"，故凡不选用自定义地址（system/clear）都需清空 proxyUrl 才能与优先级一致。
+    if (batchSettingsForm.applyProxy) {
+      if (batchSettingsForm.proxyMode === 'custom') {
+        const trimmed = batchSettingsForm.proxyUrl.trim();
+        if (!trimmed || !isValidSiteProxyUrl(trimmed)) {
+          toast.error(tr('请填写合法的代理地址（支持 http(s)://、socks4://、socks5://）'));
+          return;
+        }
+        payload.proxyUrl = trimmed;
+        payload.useSystemProxy = false;
+      } else if (batchSettingsForm.proxyMode === 'system') {
+        payload.proxyUrl = '';
+        payload.useSystemProxy = true;
+      } else if (batchSettingsForm.proxyMode === 'clear') {
+        payload.proxyUrl = '';
+        payload.useSystemProxy = false;
+      }
     }
 
     setBatchActionLoading(true);
@@ -1301,26 +1353,9 @@ export default function Sites() {
       {selectedSiteIds.length > 0 && (
         <ResponsiveBatchActionBar
           isMobile={isMobile}
-          info={`已选 ${selectedSiteIds.length} 项`}
+          info={buildBatchSelectionInfo(selectedSiteIds.length, selectedVisibleSiteIds.length, '项')}
           desktopStyle={{ marginBottom: 12 }}
         >
-          <button
-            data-testid="sites-batch-enable-system-proxy"
-            onClick={() => runBatchAction('enableSystemProxy')}
-            disabled={batchActionLoading}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-          >
-            批量开启系统代理
-          </button>
-          <button
-            onClick={() => runBatchAction('disableSystemProxy')}
-            disabled={batchActionLoading}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-          >
-            批量关闭系统代理
-          </button>
           <button
             data-testid="sites-batch-settings"
             onClick={openBatchSettings}
@@ -1328,17 +1363,28 @@ export default function Sites() {
             className="btn btn-ghost"
             style={{ border: '1px solid var(--color-border)' }}
           >
-            批量设置
+            {isMobile ? tr('设置') : tr('批量设置')}
           </button>
           <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-            批量启用
+            {isMobile ? tr('启用') : tr('批量启用')}
           </button>
           <button onClick={() => runBatchAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-            批量禁用
+            {isMobile ? tr('禁用') : tr('批量禁用')}
           </button>
           <button onClick={() => runBatchAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
-            批量删除
+            {isMobile ? tr('删除') : tr('批量删除')}
           </button>
+          {selectedSiteIds.length > selectedVisibleSiteIds.length && (
+            <button
+              type="button"
+              data-testid="sites-batch-keep-visible"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setSelectedSiteIds((prev) => prev.filter((id) => sortedSites.some((site) => site.id === id)))}
+            >
+              {tr('只保留可见项')}
+            </button>
+          )}
         </ResponsiveBatchActionBar>
       )}
 
@@ -1390,38 +1436,35 @@ export default function Sites() {
           <input
             type="checkbox"
             aria-label="启用批量设置站点代理"
-            checked={batchSettingsForm.applyProxyUrl}
-            onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, applyProxyUrl: event.target.checked }))}
+            checked={batchSettingsForm.applyProxy}
+            onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, applyProxy: event.target.checked }))}
             style={{ marginTop: 10 }}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 6 }}>批量设置站点代理</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 6 }}>{tr('批量设置站点代理')}</div>
+            <div style={{ marginBottom: 8 }}>
+              <ModernSelect
+                data-testid="sites-batch-proxy-mode"
+                value={batchSettingsForm.proxyMode}
+                disabled={!batchSettingsForm.applyProxy}
+                onChange={(value) => setBatchSettingsForm((prev) => ({ ...prev, proxyMode: value as BatchProxyMode }))}
+                options={[
+                  { value: 'system', label: tr('使用系统代理') },
+                  { value: 'custom', label: tr('自定义代理') },
+                  { value: 'clear', label: tr('清除代理') },
+                ]}
+              />
+            </div>
+            {/* 地址输入框：勾选且自定义模式才可编辑；其余状态保留但禁用，切换选项不清空草稿（决策 12） */}
             <input
               style={formInputStyle}
               value={batchSettingsForm.proxyUrl}
               onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, proxyUrl: event.target.value }))}
-              placeholder="站点代理（留空并勾选表示清空）"
-              disabled={!batchSettingsForm.applyProxyUrl}
+              placeholder={tr('自定义代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）')}
+              disabled={!batchSettingsForm.applyProxy || batchSettingsForm.proxyMode !== 'custom'}
             />
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              marginTop: 8,
-              fontSize: 13,
-              color: batchSettingsForm.applyProxyUrl ? 'var(--color-text-primary)' : 'var(--color-text-muted)',
-              cursor: batchSettingsForm.applyProxyUrl ? 'pointer' : 'not-allowed',
-            }}>
-              <input
-                type="checkbox"
-                checked={batchSettingsForm.useSystemProxy}
-                onChange={(event) => setBatchSettingsForm((prev) => ({ ...prev, useSystemProxy: event.target.checked }))}
-                disabled={!batchSettingsForm.applyProxyUrl}
-              />
-              使用系统代理
-            </label>
             <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
-              支持 http(s)://、socks4://、socks5:// 代理地址；开启系统代理时会复用设置页中的系统代理。
+              {tr('未勾选"批量设置站点代理"则保持各站点现状；支持 http(s)://、socks4://、socks5://；"使用系统代理"复用设置页中的系统代理；"清除代理"会同时清空自定义地址与系统代理开关。')}
             </div>
           </div>
         </div>
@@ -2252,12 +2295,15 @@ export default function Sites() {
                           )}
                         />
                         <MobileField
-                          label="系统代理"
-                          value={(
-                            <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
-                              {site.useSystemProxy ? '已开启' : '未开启'}
-                            </span>
-                          )}
+                          label="代理"
+                          value={(() => {
+                            const mode = resolveSiteProxyMode(site);
+                            return (
+                              <span className={`badge ${mode === 'none' ? 'badge-muted' : 'badge-info'}`} style={{ fontSize: 11 }}>
+                                {mode === 'custom' ? tr('自定义代理') : mode === 'system' ? tr('系统代理') : tr('无代理')}
+                              </span>
+                            );
+                          })()}
                         />
                         <MobileField
                           label="外部签到站URL"
@@ -2336,6 +2382,11 @@ export default function Sites() {
                     <input
                       type="checkbox"
                       checked={allVisibleSitesSelected}
+                      ref={(el) => {
+                        if (!el) return;
+                        // 三态纯可见集口径：部分勾选 → indeterminate；不可见勾选项不参与（由计数后缀表达）
+                        el.indeterminate = selectedVisibleSiteIds.length > 0 && !allVisibleSitesSelected;
+                      }}
                       onChange={(e) => toggleSelectAllVisible(e.target.checked)}
                     />
                   </th>
@@ -2343,7 +2394,7 @@ export default function Sites() {
                   <th>外部签到站URL</th>
                   <th>总余额</th>
                   <th>状态</th>
-                  <th>系统代理</th>
+                  <th>代理</th>
                   <th>权重</th>
                   <th>平台</th>
                   <th>创建时间</th>
@@ -2424,9 +2475,14 @@ export default function Sites() {
                       </span>
                     </td>
                     <td>
-                      <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
-                        {site.useSystemProxy ? '已开启' : '未开启'}
-                      </span>
+                      {(() => {
+                        const mode = resolveSiteProxyMode(site);
+                        return (
+                          <span className={`badge ${mode === 'none' ? 'badge-muted' : 'badge-info'}`} style={{ fontSize: 11 }}>
+                            {mode === 'custom' ? tr('自定义代理') : mode === 'system' ? tr('系统代理') : tr('无代理')}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                       {(site.globalWeight || 1).toFixed(2)}

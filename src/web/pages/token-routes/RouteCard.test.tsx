@@ -969,7 +969,7 @@ describe('RouteCard', () => {
 
     const batchButtons = root.root.findAll((node) => node.type === 'button');
     const disableButton = batchButtons.find((node) => collectText(node).includes('批量禁用'));
-    const deleteButton = batchButtons.find((node) => collectText(node).includes('批量删除'));
+    const deleteButton = batchButtons.find((node) => collectText(node).includes('批量移除'));
     expect(disableButton).toBeDefined();
     expect(deleteButton).toBeDefined();
     disableButton!.props.onClick();

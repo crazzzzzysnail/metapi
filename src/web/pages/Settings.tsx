@@ -28,6 +28,7 @@ import {
 import { clearAuthSession } from '../authSession.js';
 import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
+import { confirmOrThrow } from '../helpers/confirmDialog.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
@@ -1144,7 +1145,7 @@ export default function Settings() {
 
 
   const handleClearCache = async () => {
-    if (!window.confirm('确认清理模型缓存并重建路由？')) return;
+    if (!confirmOrThrow('确认清理模型缓存并重建路由？')) return;
     setClearingCache(true);
     try {
       const res = await api.clearRuntimeCache();
@@ -1239,7 +1240,7 @@ export default function Settings() {
     const warning = migrationOverwrite
       ? 'Confirm migration and overwrite existing data in target database?'
       : 'Confirm migration to target database? If target has data, migration may fail.';
-    if (!window.confirm(warning)) return;
+    if (!confirmOrThrow(warning)) return;
 
     setMigratingDatabase(true);
     try {

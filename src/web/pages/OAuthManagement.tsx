@@ -29,6 +29,8 @@ import {
   type OAuthQuotaWindowInfo,
   type OAuthStartInstructions,
 } from '../api.js';
+import { tr } from '../i18n.js';
+import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
 
 const POLL_INTERVAL_MS = 1500;
 const CONNECTION_PAGE_LIMIT = 200;
@@ -936,6 +938,12 @@ export default function OAuthManagement() {
   const allVisibleSelected = filteredConnections.length > 0
     && filteredConnections.every((connection) => selectedConnectionIds.includes(connection.accountId));
 
+  // 已选 ∩ 可见：被筛选隐藏的勾选由计数后缀显式表达（方案 A 契约：筛选永不收缩选择集）
+  const selectedVisibleConnectionIds = useMemo(
+    () => selectedConnectionIds.filter((accountId) => filteredConnections.some((connection) => connection.accountId === accountId)),
+    [selectedConnectionIds, filteredConnections],
+  );
+
   const selectedConnections = useMemo(
     () => connections.filter((connection) => selectedConnectionIds.includes(connection.accountId)),
     [connections, selectedConnectionIds],
@@ -1194,6 +1202,10 @@ export default function OAuthManagement() {
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
       const confirmed = window.confirm('确定要删除这个 OAuth 连接吗？');
       if (!confirmed) return;
+    } else {
+      // B4 fail-closed：环境无法弹出确认时拒绝执行（原兜底为放行）
+      setSessionError(tr('当前环境无法弹出确认，操作已中止'));
+      return;
     }
     const actionKey = `delete:${accountId}`;
     setActionLoadingKey(actionKey);
@@ -1214,6 +1226,10 @@ export default function OAuthManagement() {
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
       const confirmed = window.confirm(`确定要删除选中的 ${selectedConnectionIds.length} 个 OAuth 连接吗？`);
       if (!confirmed) return;
+    } else {
+      // B4 fail-closed：环境无法弹出确认时拒绝执行（原兜底为放行）
+      setSessionError(tr('当前环境无法弹出确认，操作已中止'));
+      return;
     }
     setActionLoadingKey('delete:selected');
     try {
@@ -2094,7 +2110,7 @@ export default function OAuthManagement() {
         </div>
 
         {selectedConnectionIds.length > 0 ? (
-          <ResponsiveBatchActionBar isMobile={isMobile} info={`已选 ${selectedConnectionIds.length} 项`} desktopStyle={{ marginBottom: 12 }}>
+          <ResponsiveBatchActionBar isMobile={isMobile} info={buildBatchSelectionInfo(selectedConnectionIds.length, selectedVisibleConnectionIds.length, '项')} desktopStyle={{ marginBottom: 12 }}>
             <button
               type="button"
               className="btn btn-ghost oauth-outline-button"
@@ -2130,6 +2146,16 @@ export default function OAuthManagement() {
             >
               {actionLoadingKey === 'delete:selected' ? '删除中...' : '批量删除'}
             </button>
+            {selectedConnectionIds.length > selectedVisibleConnectionIds.length ? (
+              <button
+                type="button"
+                data-testid="oauth-batch-keep-visible"
+                className="btn btn-ghost oauth-outline-button"
+                onClick={() => setSelectedConnectionIds((prev) => prev.filter((accountId) => filteredConnections.some((connection) => connection.accountId === accountId)))}
+              >
+                {tr('只保留可见项')}
+              </button>
+            ) : null}
           </ResponsiveBatchActionBar>
         ) : null}
 
