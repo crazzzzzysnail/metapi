@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
+import { confirmOrThrow, isConfirmAvailable } from '../helpers/confirmDialog.js';
 
 type BackupType = 'all' | 'accounts' | 'preferences';
 
@@ -425,10 +426,9 @@ export default function ImportExport() {
       toast.error('当前 JSON 结构无法识别');
       return;
     }
-    const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function'
-      ? true
-      : window.confirm('导入会覆盖备份中的连接/路由/策略配置或系统设置，但会保留本机日志、公告、缓存和统计，确认继续？');
-    if (!confirmed) {
+    // B4 fail-closed：环境无 confirm 时中止（原兜底放行）。用户主动取消时静默返回。
+    if (!confirmOrThrow('导入会覆盖备份中的连接/路由/策略配置或系统设置，但会保留本机日志、公告、缓存和统计，确认继续？')) {
+      if (!isConfirmAvailable()) toast.error(tr('当前环境无法弹出确认，操作已中止'));
       return;
     }
 
@@ -487,10 +487,11 @@ export default function ImportExport() {
   };
 
   const handleImportFromWebdav = async () => {
-    const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function'
-      ? true
-      : window.confirm('从 WebDAV 导入会覆盖备份中的连接/路由/策略配置或系统设置，但会保留本机日志、公告、缓存和统计，确认继续？');
-    if (!confirmed) return;
+    // B4 fail-closed：环境无 confirm 时中止（原兜底放行）。用户主动取消时静默返回。
+    if (!confirmOrThrow('从 WebDAV 导入会覆盖备份中的连接/路由/策略配置或系统设置，但会保留本机日志、公告、缓存和统计，确认继续？')) {
+      if (!isConfirmAvailable()) toast.error(tr('当前环境无法弹出确认，操作已中止'));
+      return;
+    }
     setWebdavAction('import');
     try {
       const result = await api.importBackupFromWebdav();

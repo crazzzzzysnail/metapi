@@ -5774,7 +5774,9 @@ textarea {
 
   .main-content {
     padding: 14px;
-    padding-bottom: 96px;
+    /* 移动端悬浮批量栏避让：info 行(~18px) + 最多两行按钮(2*36+6px) + 栏上下 padding(24px)
+       + bottom 偏移(12px) + 余量。若批量栏改为单行亦不需要回调此值（栏是 fixed，不占文档流）。 */
+    padding-bottom: 140px;
   }
 
   .page-header {

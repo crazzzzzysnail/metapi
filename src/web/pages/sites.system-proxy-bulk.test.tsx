@@ -62,43 +62,6 @@ describe('Sites system proxy bulk actions', () => {
     vi.clearAllMocks();
   });
 
-  it('sends selected site ids to enable system proxy', async () => {
-    let root!: WebTestRenderer;
-    try {
-      await act(async () => {
-        root = create(
-          <MemoryRouter initialEntries={['/sites']}>
-            <ToastProvider>
-              <Sites />
-            </ToastProvider>
-          </MemoryRouter>,
-        );
-      });
-      await flushMicrotasks();
-
-      const checkboxA = root.root.find((node) => node.props['data-testid'] === 'site-select-1');
-      const checkboxB = root.root.find((node) => node.props['data-testid'] === 'site-select-2');
-
-      await act(async () => {
-        checkboxA.props.onChange({ target: { checked: true } });
-        checkboxB.props.onChange({ target: { checked: true } });
-      });
-
-      const batchButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-enable-system-proxy');
-      await act(async () => {
-        batchButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.batchUpdateSites).toHaveBeenCalledWith({
-        ids: [1, 2],
-        action: 'enableSystemProxy',
-      });
-    } finally {
-      root?.unmount();
-    }
-  });
-
   it('selects a site when clicking the row instead of only the checkbox', async () => {
     let root!: WebTestRenderer;
     try {
@@ -126,7 +89,116 @@ describe('Sites system proxy bulk actions', () => {
     }
   });
 
-  it('submits batch weight and site proxy settings for selected sites', async () => {
+  // B5.1（勾选制改版）：勾选"批量设置站点代理"后默认即"使用系统代理"，验证 payload 形态
+  // system 模式同时下发 proxyUrl=''：运行优先级为"自定义地址非空即用"，必须清空才能避免旧地址架空系统代理
+  it('submits "use system proxy" via the batch settings modal and clears any custom proxyUrl', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const checkboxA = root.root.find((node) => node.props['data-testid'] === 'site-select-1');
+      const checkboxB = root.root.find((node) => node.props['data-testid'] === 'site-select-2');
+      await act(async () => {
+        checkboxA.props.onChange({ target: { checked: true } });
+        checkboxB.props.onChange({ target: { checked: true } });
+      });
+
+      const batchSettingsButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-settings');
+      await act(async () => {
+        batchSettingsButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      // 勾选代理开关；proxyMode 默认即 system，不再点选项
+      const proxyApplyCheckbox = root.root.findAllByType('input')
+        .find((node) => node.props['aria-label'] === '启用批量设置站点代理');
+      await act(async () => {
+        proxyApplyCheckbox!.props.onChange({ target: { checked: true } });
+      });
+      await flushMicrotasks();
+
+      const applyButton = root.root.findAll((node) => node.type === 'button' && collectText(node).includes('应用到所选站点'))[0];
+      await act(async () => {
+        applyButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.batchUpdateSites.mock.calls.at(-1)?.[0];
+      expect(payload).toEqual({
+        ids: [1, 2],
+        action: 'updateSettings',
+        proxyUrl: '',
+        useSystemProxy: true,
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  // 未勾选代理开关：仅权重下发，不含任何代理字段（"保持现状"由开关承担）
+  it('omits proxy fields entirely when the proxy checkbox is unchecked', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const checkboxA = root.root.find((node) => node.props['data-testid'] === 'site-select-1');
+      await act(async () => {
+        checkboxA.props.onChange({ target: { checked: true } });
+      });
+
+      const batchSettingsButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-settings');
+      await act(async () => {
+        batchSettingsButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const inputs = root.root.findAllByType('input');
+      const weightApplyCheckbox = inputs.find((node) => node.props['aria-label'] === '启用批量设置权重');
+      const weightInput = inputs.find((node) => node.props.placeholder === '站点全局权重（默认 1）');
+      await act(async () => {
+        weightApplyCheckbox!.props.onChange({ target: { checked: true } });
+        weightInput!.props.onChange({ target: { value: '1.5' } });
+      });
+
+      const applyButton = root.root.findAll((node) => node.type === 'button' && collectText(node).includes('应用到所选站点'))[0];
+      await act(async () => {
+        applyButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.batchUpdateSites.mock.calls.at(-1)?.[0];
+      expect(payload).toEqual({
+        ids: [1],
+        action: 'updateSettings',
+        globalWeight: 1.5,
+      });
+      expect(payload).not.toHaveProperty('proxyUrl');
+      expect(payload).not.toHaveProperty('useSystemProxy');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  // B5.2（勾选制改版）：自定义代理模式 → 校验后下发 proxyUrl + useSystemProxy=false；权重同批下发
+  it('submits batch weight and custom proxy settings for selected sites', async () => {
     let root!: WebTestRenderer;
     try {
       await act(async () => {
@@ -156,19 +228,29 @@ describe('Sites system proxy bulk actions', () => {
       const inputs = root.root.findAllByType('input');
       const weightApplyCheckbox = inputs.find((node) => node.props['aria-label'] === '启用批量设置权重');
       const weightInput = inputs.find((node) => node.props.placeholder === '站点全局权重（默认 1）');
-      const proxyCheckbox = inputs.find((node) => node.props['aria-label'] === '启用批量设置站点代理');
-      const proxyInput = inputs.find((node) => node.props.placeholder === '站点代理（留空并勾选表示清空）');
+      const proxyApplyCheckbox = inputs.find((node) => node.props['aria-label'] === '启用批量设置站点代理');
       await act(async () => {
         weightApplyCheckbox!.props.onChange({ target: { checked: true } });
         weightInput!.props.onChange({ target: { value: '2.5' } });
-        proxyCheckbox!.props.onChange({ target: { checked: true } });
-        proxyInput!.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
+        proxyApplyCheckbox!.props.onChange({ target: { checked: true } });
       });
+      await flushMicrotasks();
 
-      const systemProxyLabel = root.root.findAll((node) => node.type === 'label' && collectText(node).includes('使用系统代理'))[0];
-      const systemProxyCheckbox = systemProxyLabel.findByType('input');
+      const modeSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-mode');
+      const customOption = modeSelect.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('modern-select-option')
+        && collectText(node).includes('自定义代理')
+      ))[0];
       await act(async () => {
-        systemProxyCheckbox!.props.onChange({ target: { checked: true } });
+        customOption.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const proxyInput = root.root.findAllByType('input').find((node) => String(node.props.placeholder || '').includes('socks5'));
+      await act(async () => {
+        proxyInput!.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
       });
 
       const applyButton = root.root.findAll((node) => node.type === 'button' && collectText(node).includes('应用到所选站点'))[0];
@@ -182,8 +264,70 @@ describe('Sites system proxy bulk actions', () => {
         action: 'updateSettings',
         globalWeight: 2.5,
         proxyUrl: 'http://127.0.0.1:7890',
-        useSystemProxy: true,
+        useSystemProxy: false,
       });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  // B5.2：非法自定义地址被前端校验拦截，不发出请求
+  it('rejects an invalid custom proxy address before submitting', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const checkboxA = root.root.find((node) => node.props['data-testid'] === 'site-select-1');
+      await act(async () => {
+        checkboxA.props.onChange({ target: { checked: true } });
+      });
+
+      const batchSettingsButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-settings');
+      await act(async () => {
+        batchSettingsButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const proxyApplyCheckbox = root.root.findAllByType('input')
+        .find((node) => node.props['aria-label'] === '启用批量设置站点代理');
+      await act(async () => {
+        proxyApplyCheckbox!.props.onChange({ target: { checked: true } });
+      });
+      await flushMicrotasks();
+
+      const modeSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-mode');
+      const customOption = modeSelect.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('modern-select-option')
+        && collectText(node).includes('自定义代理')
+      ))[0];
+      await act(async () => {
+        customOption.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const proxyInput = root.root.findAllByType('input').find((node) => String(node.props.placeholder || '').includes('socks5'));
+      await act(async () => {
+        proxyInput!.props.onChange({ target: { value: 'not-a-proxy-url' } });
+      });
+
+      const applyButton = root.root.findAll((node) => node.type === 'button' && collectText(node).includes('应用到所选站点'))[0];
+      await act(async () => {
+        applyButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.batchUpdateSites).not.toHaveBeenCalled();
     } finally {
       root?.unmount();
     }

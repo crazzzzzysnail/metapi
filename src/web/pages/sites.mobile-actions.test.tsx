@@ -92,16 +92,17 @@ describe('Sites mobile actions', () => {
       });
       await flushMicrotasks();
 
-      const batchButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-enable-system-proxy');
+      // B5.1：一键开关系统代理按钮已删除，批量栏主入口改为"批量设置"弹窗
+      const batchButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-settings');
       await act(async () => {
         batchButton.props.onClick();
       });
       await flushMicrotasks();
 
-      expect(apiMock.batchUpdateSites).toHaveBeenCalledWith({
-        ids: [1, 2],
-        action: 'enableSystemProxy',
-      });
+      // 弹窗打开：出现代理模式单选与提交按钮
+      const modeSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-mode');
+      expect(modeSelect).toBeTruthy();
+      expect(root.root.findAll((node) => node.type === 'button' && (node.children || []).join('').includes('应用到所选站点')).length).toBeGreaterThan(0);
 
       const primaryLink = root.root.find((node) => node.type === 'a' && node.props.href === 'https://a.example.com');
       expect(primaryLink.props.target).toBe('_blank');
