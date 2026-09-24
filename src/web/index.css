@@ -33,6 +33,9 @@
   --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.08), 0 4px 10px rgba(0, 0, 0, 0.04);
   --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.04);
   --topbar-height: 56px;
+  /* 批量操作栏吸顶锚点：顶栏下方 8px；二级 z 供通道栏浮起时压住内容 */
+  --batch-bar-sticky-top: calc(var(--topbar-height) + 8px);
+  --z-batch-bar: 50;
   --sidebar-width: 220px;
   --sidebar-collapsed-width: 64px;
   --z-topbar: 100;
@@ -1408,7 +1411,7 @@ body {
   position: fixed;
   left: 16px;
   right: 16px;
-  bottom: 16px;
+  top: var(--batch-bar-sticky-top);
   z-index: var(--z-mobile-batch-bar);
   display: flex;
   flex-wrap: wrap;
@@ -5481,8 +5484,8 @@ textarea {
 
 .route-batch-bar {
   position: sticky;
-  top: calc(var(--topbar-height) + 8px);
-  z-index: 50;
+  top: var(--batch-bar-sticky-top);
+  z-index: var(--z-batch-bar);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -5495,6 +5498,41 @@ textarea {
     linear-gradient(180deg, color-mix(in srgb, var(--color-bg-card) 94%, white 6%), color-mix(in srgb, var(--color-bg-card) 98%, white 2%));
   box-shadow: 0 10px 20px rgba(15, 23, 42, 0.04);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+/* 通道栏浮起时路由栏让出吸顶槽位：退回文档流原位（static 与 sticky 流内盒等尺寸，切换零跳动），
+   随内容自然滚出视口；z-index: auto 防父级为 flex 时 static 元素的 z-index 仍参与层叠 */
+.route-batch-bar.is-inflow {
+  position: static;
+  z-index: auto;
+}
+
+/* 路由卡片内的通道级批量栏：默认随卡片流式；勾选存在时加 .is-floating 原地吸顶到同一顶栏锚点 */
+.channel-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.channel-batch-bar.is-floating {
+  position: sticky;
+  top: var(--batch-bar-sticky-top);
+  z-index: var(--z-batch-bar);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  border-radius: 14px;
+  /* 不透明底，滚动内容从其下方穿过时不透字 */
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-bg-card) 94%, white 6%), color-mix(in srgb, var(--color-bg-card) 98%, white 2%));
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.06);
+}
+
+/* 通用桌面批量栏吸顶（五页 ResponsiveBatchActionBar 桌面档）：.card 自带不透明底色，无需再补背景 */
+.batch-bar-sticky {
+  position: sticky;
+  top: var(--batch-bar-sticky-top);
+  z-index: var(--z-batch-bar);
 }
 
 .proxy-logs-filter-select {
@@ -5774,9 +5812,8 @@ textarea {
 
   .main-content {
     padding: 14px;
-    /* 移动端悬浮批量栏避让：info 行(~18px) + 最多两行按钮(2*36+6px) + 栏上下 padding(24px)
-       + bottom 偏移(12px) + 余量。若批量栏改为单行亦不需要回调此值（栏是 fixed，不占文档流）。 */
-    padding-bottom: 140px;
+    /* 批量栏已改顶部吸顶（fixed 浮于内容之上，不占文档流），无需再留底部避让空白 */
+    padding-bottom: 14px;
   }
 
   .page-header {
@@ -5961,7 +5998,7 @@ textarea {
   .mobile-actions-bar {
     left: 12px;
     right: 12px;
-    bottom: 12px;
+    top: var(--batch-bar-sticky-top);
     padding: 12px 14px;
     border-radius: var(--radius-lg);
     backdrop-filter: blur(16px);
@@ -6822,6 +6859,11 @@ textarea {
 }
 
 [data-theme="dark"] .route-batch-bar {
+  background: color-mix(in srgb, var(--color-bg-card) 92%, #0b1220 8%);
+  box-shadow: none;
+}
+
+[data-theme="dark"] .channel-batch-bar.is-floating {
   background: color-mix(in srgb, var(--color-bg-card) 92%, #0b1220 8%);
   box-shadow: none;
 }

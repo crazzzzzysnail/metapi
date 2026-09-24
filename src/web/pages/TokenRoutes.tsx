@@ -1044,6 +1044,17 @@ export default function TokenRoutes() {
     return [...selectedRouteIds].filter((id) => !renderedIds.has(id)).length;
   }, [selectedRouteIds, visibleRoutes]);
 
+  // 通道栏与路由栏共用同一吸顶槽位（--batch-bar-sticky-top），通道栏浮起时路由栏让位：
+  // 任一"实际渲染中的展开卡"存在勾选（其通道栏处于 is-floating 吸顶态）时，路由栏摘掉 sticky（is-inflow）
+  // 退回文档流原位、随内容滚出视口；勾选清空/卡片收起/卡被筛选卸载时谓词转 false，路由栏恢复吸顶。
+  const channelBarOverlapped = useMemo(() => {
+    if (!batchSelectMode) return false;
+    return visibleRoutes.some((route) => (
+      expandedRouteIds.includes(route.id)
+      && (selectedChannelIdsByRoute[route.id]?.length ?? 0) > 0
+    ));
+  }, [batchSelectMode, visibleRoutes, expandedRouteIds, selectedChannelIdsByRoute]);
+
   // Lazy per-route candidate index — only computes for routes actually accessed
   const candidateIndexCacheRef = useRef<{ key: string; cache: Map<number, RouteCandidateView> }>({ key: '', cache: new Map() });
   const candidateIndexCacheKey = `${routePatternsKey}|${Object.keys(modelCandidates).length}|${candidatesVersionRef.current}`;
@@ -2002,7 +2013,7 @@ export default function TokenRoutes() {
       {/* Route card grid */}
       {/* Batch selection floating bar */}
       {batchSelectMode && (
-        <div className="route-batch-bar">
+        <div className={`route-batch-bar${channelBarOverlapped ? ' is-inflow' : ''}`}>
           <span style={{ fontSize: 13, fontWeight: 500 }}>
             {tr('已选择')} <b>{selectedRouteIds.size}</b> / {selectableRouteIds.size} {tr('条路由')}
             {unrenderedSelectedCount > 0 && (

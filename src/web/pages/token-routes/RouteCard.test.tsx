@@ -978,6 +978,67 @@ describe('RouteCard', () => {
     expect(onBatchDeleteChannels).toHaveBeenCalledWith(42);
   });
 
+  it('floats the channel batch bar with a route-name prefix only when channels are selected', () => {
+    const renderWithSelection = (selectedChannelIds: number[]) => create(
+      <RouteCard
+        route={buildRoute()}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[buildChannel({ id: 11, priority: 0 })]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        selectedChannelIds={selectedChannelIds}
+        batchModeEnabled
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        onToggleChannelSelection={vi.fn()}
+        onClearChannelSelection={vi.fn()}
+        onApplyBatchPriorityAction={vi.fn()}
+        onBatchDisableChannels={vi.fn()}
+        onBatchDeleteChannels={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    // 有勾选：整栏浮起（is-floating 吸顶），信息前显示所属路由名
+    const floating = renderWithSelection([11]);
+    const floatingBar = floating.root.findByProps({ 'data-testid': 'channel-batch-bar-42' });
+    expect(floatingBar.props.className).toBe('channel-batch-bar is-floating');
+    expect(floatingBar.props['data-floating']).toBe('true');
+    expect(collectText(floatingBar)).toContain('m.');
+    expect(collectText(floatingBar)).toContain('已选择 1 个通道');
+
+    // 无勾选：栏保持流式（不吸顶），且不重复显示路由名
+    const resting = renderWithSelection([]);
+    const restingBar = resting.root.findByProps({ 'data-testid': 'channel-batch-bar-42' });
+    expect(restingBar.props.className).toBe('channel-batch-bar');
+    expect(restingBar.props['data-floating']).toBe('false');
+    expect(collectText(restingBar)).not.toContain('m.');
+    expect(collectText(restingBar)).toContain('已选择 0 个通道');
+  });
+
   it('omits long explanatory copy in compact detail panels', () => {
     const root = create(
       <RouteCard

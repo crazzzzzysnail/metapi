@@ -1183,8 +1183,20 @@ function RouteCardInner({
       ) : channels && channels.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           {batchModeEnabled ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+            // 勾选存在时整栏原地吸顶（sticky 锚到顶栏下方）；卡片滚出视口被面板裁剪即自动归位，
+            // 路由级批量栏的槽位移交由 TokenRoutes 的 is-inflow 控制（其退回文档流、不抢顶槽）
+            <div
+              className={`channel-batch-bar${selectedChannelIds.length > 0 ? ' is-floating' : ''}`}
+              data-testid={`channel-batch-bar-${route.id}`}
+              data-floating={selectedChannelIds.length > 0 ? 'true' : 'false'}
+            >
               <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                {selectedChannelIds.length > 0 ? (
+                  <>
+                    <b style={{ fontWeight: 600 }}>{title}</b>
+                    {' · '}
+                  </>
+                ) : null}
                 已选择 {selectedChannelIds.length} 个通道
               </span>
               <button
