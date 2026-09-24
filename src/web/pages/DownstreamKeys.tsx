@@ -1085,6 +1085,7 @@ export default function DownstreamKeys() {
           isMobile={isMobile}
           info={buildBatchSelectionInfo(selectedIds.length, selectedVisibleCount, '个密钥')}
           infoStyle={{ color: 'var(--color-text-primary)' }}
+          sticky
         >
           <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={openBatchMetadata} disabled={batchActionLoading}>{isMobile ? '归类/标签' : '批量归类/标签'}</button>
           <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void batchRun('批量启用', selectedIds)} disabled={batchActionLoading}>{isMobile ? '启用' : '批量启用'}</button>

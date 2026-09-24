@@ -1044,6 +1044,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
           isMobile={isMobile}
           info={buildBatchSelectionInfo(selectedTokenIds.length, selectedVisibleTokenIds.length, '项')}
           desktopStyle={{ marginBottom: 12 }}
+          sticky
         >
           <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             {isMobile ? tr('启用') : tr('批量启用')}

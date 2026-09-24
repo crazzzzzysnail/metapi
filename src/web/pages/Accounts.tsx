@@ -1571,6 +1571,7 @@ export default function Accounts() {
           isMobile={isMobile}
           info={buildBatchSelectionInfo(selectedAccountIds.length, selectedVisibleAccountIds.length, "项")}
           desktopStyle={{ marginBottom: 12 }}
+          sticky
         >
           <button
             data-testid="accounts-batch-refresh-balance"

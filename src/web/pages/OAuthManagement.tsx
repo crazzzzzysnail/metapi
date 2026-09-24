@@ -2110,7 +2110,7 @@ export default function OAuthManagement() {
         </div>
 
         {selectedConnectionIds.length > 0 ? (
-          <ResponsiveBatchActionBar isMobile={isMobile} info={buildBatchSelectionInfo(selectedConnectionIds.length, selectedVisibleConnectionIds.length, '项')} desktopStyle={{ marginBottom: 12 }}>
+          <ResponsiveBatchActionBar isMobile={isMobile} info={buildBatchSelectionInfo(selectedConnectionIds.length, selectedVisibleConnectionIds.length, '项')} desktopStyle={{ marginBottom: 12 }} sticky>
             <button
               type="button"
               className="btn btn-ghost oauth-outline-button"

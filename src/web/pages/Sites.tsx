@@ -1355,6 +1355,7 @@ export default function Sites() {
           isMobile={isMobile}
           info={buildBatchSelectionInfo(selectedSiteIds.length, selectedVisibleSiteIds.length, '项')}
           desktopStyle={{ marginBottom: 12 }}
+          sticky
         >
           <button
             data-testid="sites-batch-settings"
