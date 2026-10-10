@@ -14,6 +14,7 @@ import {
   repairDefaultToken,
   resolveAccountTokenValueStatus,
   setDefaultToken,
+  type TokenSyncUndistinguishable,
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
@@ -52,6 +53,10 @@ type SyncExecutionResult = {
   updated: number;
   maskedPending?: number;
   pendingTokenIds?: number[];
+  // 决策 12：不可区分上报。类型直接复用服务层导出（one source of truth）。
+  // 上游 syncTokensFromUpstream 恒带该数组（无歧义时为空数组），但本类型的
+  // skipped / failed / legacy_restored 分支不带，故声明为可选以保持向后兼容。
+  undistinguishable?: TokenSyncUndistinguishable[];
   total: number;
   defaultTokenId?: number | null;
 };
@@ -99,7 +104,11 @@ function buildTokenSyncTaskDetailMessage(results: SyncExecutionResult[]): string
   const renderRows = (rows: SyncExecutionResult[], withReason = false) => {
     const sliced = rows.slice(0, 12).map((item) => {
       const base = buildSyncAccountLabel(item);
-      if (!withReason) return base;
+      if (!withReason) {
+        // 决策 12：成功分组在账号标签后追加歧义计数，让 sync-all 后台任务通知可见。
+        const ambiguousCount = Array.isArray(item.undistinguishable) ? item.undistinguishable.length : 0;
+        return ambiguousCount > 0 ? `${base}（${ambiguousCount} 组无法区分）` : base;
+      }
       const reason = buildSyncReason(item);
       return reason ? `${base}(${reason})` : base;
     });
@@ -371,12 +380,19 @@ async function appendTokenSyncEvent(result: SyncExecutionResult) {
   const title = result.status === 'synced'
     ? '令牌同步成功'
     : (result.status === 'skipped' ? '令牌同步跳过' : '令牌同步失败');
-  const level = result.status === 'synced'
+  let level = result.status === 'synced'
     ? 'info'
     : (result.status === 'skipped' ? 'warning' : 'error');
-  const detail = result.status === 'synced'
+  let detail = result.status === 'synced'
     ? `新增 ${result.created}，更新 ${result.updated}，待补全 ${result.maskedPending || 0}，总数 ${result.total}`
     : (result.message || result.reason || 'sync skipped');
+
+  // 决策 12：存在不可区分组时，事件级别升为 warning，并在 detail 末尾追加人工查验提示。
+  const ambiguousCount = Array.isArray(result.undistinguishable) ? result.undistinguishable.length : 0;
+  if (ambiguousCount > 0) {
+    if (result.status === 'synced') level = 'warning';
+    detail = `${detail}；${ambiguousCount} 组令牌无法区分，请人工查验`;
+  }
 
   try {
     await db.insert(schema.events).values({

@@ -37,6 +37,13 @@ type AccountTokenSyncResult = {
   updated?: number;
   maskedPending?: number;
   pendingTokenIds?: number[];
+  // 决策 12：不可区分上报，与服务端 SyncExecutionResult 同名可选字段保持一致。
+  undistinguishable?: Array<{
+    maskedValue: string;
+    candidateTokenIds: number[];
+    upstreamName: string | null;
+    kind: 'ready-ambiguous' | 'pending-duplicate' | 'upstream-collapse';
+  }>;
   accountId?: number;
   accountName?: string;
   account?: {
@@ -640,6 +647,14 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     try {
       const res = await api.syncAccountTokens(syncingAccountId) as AccountTokenSyncResult;
       const status = resolveSyncStatus(res);
+      // 决策 12：歧义提示必须排在 isMaskedPendingSyncResult 判断之前——歧义几乎总与
+      // maskedPending > 0 同时出现，排在后面会被该分支的 return 吞掉。
+      // 此处只提示、不 return，让补全引导照常走完。
+      const ambiguousGroups = Array.isArray(res.undistinguishable) ? res.undistinguishable : [];
+      const ambiguityCount = ambiguousGroups.length;
+      if (ambiguityCount > 0) {
+        toast.error(`检测到 ${ambiguityCount} 组令牌脱敏后完全相同，系统无法区分，请人工核对名称与分组`);
+      }
       if (status === 'failed') {
         toast.error(`同步失败：${resolveSyncMessage(res, '请检查账号令牌或站点状态')}`);
       } else if (isMaskedPendingSyncResult(res)) {
@@ -659,6 +674,18 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
           }
         } else if (pendingIds.length > 1) {
           focusTokenRow(pendingIds[0]!);
+        }
+        return;
+      } else if (ambiguityCount > 0) {
+        // 有歧义但 maskedPending 为 0（无需补全引导）：单独定位首个冲突项的第一个候选行；
+        // 定位前必须先 await load()，否则行未渲染、focusTokenRow 找不到 rowRefs 会落空。
+        const firstGroupIds = ambiguousGroups[0]?.candidateTokenIds;
+        const firstCandidateIds = (Array.isArray(firstGroupIds) ? firstGroupIds : [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id) && id > 0);
+        await load();
+        if (firstCandidateIds.length > 0) {
+          focusTokenRow(firstCandidateIds[0]!);
         }
         return;
       } else if (status === 'skipped') {
