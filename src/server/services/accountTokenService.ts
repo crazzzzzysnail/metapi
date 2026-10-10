@@ -148,7 +148,12 @@ export function normalizeTokenGroup(value: string | null | undefined, tokenName?
     return 'default';
   }
   if (/^token-\d+$/.test(normalized)) return null;
-  return name;
+  // 决策 6：上游/本地没给分组字段时返回 null（= 分组未知）。
+  // 此前这里 return name，等于拿令牌名编造一个分组，是同步失配的根因之一：
+  // 站点不返回 group 字段时，本地任何显式分组都必然与「令牌名」不等，同步永远命中不了 ready 行。
+  // 已知下游影响（均已在计划 6.1 核查）：tokens.ts 分组计费转为「当前令牌分组未知」，
+  // stats.ts 归入 groupCoverageUncertain，覆盖提示不会失效。
+  return null;
 }
 
 function sameTokenGroup(
@@ -295,6 +300,263 @@ export async function repairDefaultToken(accountId: number) {
   return currentDefault;
 }
 
+export type TokenSyncUndistinguishableKind =
+  | 'ready-ambiguous'
+  | 'pending-duplicate'
+  | 'upstream-collapse';
+
+/**
+ * 决策 12：系统无法区分时的上报项。
+ * 脱敏后同值的令牌在信息层面不可区分（`sk-abcAAAxyz` 与 `sk-abcBBBxyz` 都脱敏成 `sk-abc***xyz`），
+ * 修复只能保证它们互不污染，不能判定谁是谁，因此改为上报请用户人工查验。
+ */
+export type TokenSyncUndistinguishable = {
+  /** 冲突的脱敏值（即本轮上游 key）。 */
+  maskedValue: string;
+  /** 涉及的本地行 id。 */
+  candidateTokenIds: number[];
+  /** 本轮上游项名称；上游没给名称时为 null。 */
+  upstreamName: string | null;
+  kind: TokenSyncUndistinguishableKind;
+};
+
+/**
+ * 上游本轮可用元数据（决策 2/3）。
+ * 「缺字段」与「读到空值」都视为该字段不可用，直接不返回该键，
+ * 由调用方按「有值才写」落库；禁止用令牌名或 `token-N` 冒充上游真值。
+ */
+export type TokenSyncMeta = {
+  name?: string;
+  tokenGroup?: string;
+};
+
+/**
+ * 决策 2/3 的唯一实现：从上游项提取可写字段。
+ * 四个写分支（刷新 ready、判孤儿后刷新 ready、复用 pending、insert）全部共用，
+ * 任何一处都不得自行拼回退值（AGENTS.md：one source of truth）。
+ */
+export function resolveIncomingTokenMeta(upstream: UpstreamApiToken): TokenSyncMeta {
+  const meta: TokenSyncMeta = {};
+
+  const name = (upstream.name || '').trim();
+  if (name) meta.name = name;
+
+  const explicitGroup = (upstream.tokenGroup || '').trim();
+  if (explicitGroup) {
+    // 刻意不传第二个参数 tokenName：传了就等于拿令牌名编造分组，是本次缺陷的根因之一。
+    const group = normalizeTokenGroup(explicitGroup);
+    if (group) meta.tokenGroup = group;
+  }
+
+  return meta;
+}
+
+/** 「有值才写」的落库补丁：只包含 meta 中真实存在的键。 */
+function buildTokenMetaPatch(meta: TokenSyncMeta): { name?: string; tokenGroup?: string } {
+  const patch: { name?: string; tokenGroup?: string } = {};
+  if (meta.name !== undefined) patch.name = meta.name;
+  if (meta.tokenGroup !== undefined) patch.tokenGroup = meta.tokenGroup;
+  return patch;
+}
+
+/** 单条上游项的同步动作计划（纯数据，便于单测覆盖整棵决策树）。 */
+export type TokenSyncPlan = {
+  action: 'skip' | 'refresh-ready' | 'reuse-pending' | 'insert';
+  /** refresh-ready / reuse-pending 的目标行 id。 */
+  targetId?: number;
+  /** 仅决策 8 判孤儿时非空：需要删除的 masked_pending 行 id。 */
+  orphanIds?: number[];
+  tokenValue: string;
+  nextValueStatus: AccountTokenValueStatus;
+  meta: TokenSyncMeta;
+  enabled: boolean;
+  skipReason?: 'empty_token_value' | 'missing_upstream_name' | 'duplicate_value_row';
+  ambiguities: TokenSyncUndistinguishable[];
+};
+
+type TokenSyncCandidateRow = Pick<
+  AccountTokenRow,
+  'id' | 'name' | 'token' | 'tokenGroup' | 'valueStatus'
+>;
+
+/**
+ * 决策顺序的唯一实现（无 DB 依赖）。顺序严格照 docs/plans/2026-10-09-token-sync-authority-fix.md 第 3 节。
+ *
+ * 身份判据只有两种：`row.token === tv`（值全等）与 `matchesMaskedTokenValue(row.token, tv)`（掩码匹配）。
+ * `row.name` / `row.tokenGroup` 是命中后**要写的字段**，一律不作为身份前提——把它们当匹配前提是本次缺陷的根因。
+ *
+ * @param alreadySeenInThisRound 本轮是否已有另一条上游项使用同一个值（类型 C 判据）。
+ */
+export function planTokenSyncAction(input: {
+  upstream: UpstreamApiToken;
+  rows: TokenSyncCandidateRow[];
+  alreadySeenInThisRound: boolean;
+}): TokenSyncPlan {
+  const tokenValue = normalizeTokenValue(input.upstream.key) || '';
+  const meta = resolveIncomingTokenMeta(input.upstream);
+  const enabled = input.upstream.enabled ?? true;
+  const nextValueStatus: AccountTokenValueStatus = isMaskedTokenValue(tokenValue)
+    ? ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
+    : ACCOUNT_TOKEN_VALUE_STATUS_READY;
+  const base = {
+    tokenValue,
+    nextValueStatus,
+    meta,
+    enabled,
+    ambiguities: [] as TokenSyncUndistinguishable[],
+  };
+
+  if (!tokenValue) {
+    return { ...base, action: 'skip', skipReason: 'empty_token_value' };
+  }
+
+  const upstreamName = meta.name ?? null;
+  const rowsWithSameValue = input.rows.filter((row) => row.token === tokenValue);
+
+  // 类型 C：上游同一轮返回两条脱敏同值项，会塌缩到同一本地行，必须上报。
+  if (input.alreadySeenInThisRound) {
+    base.ambiguities.push({
+      maskedValue: tokenValue,
+      candidateTokenIds: rowsWithSameValue.map((row) => row.id),
+      upstreamName,
+      kind: 'upstream-collapse',
+    });
+  }
+
+  // 1) 明文值全等命中 ready 行：最确定的身份，直接刷新。
+  const byToken = rowsWithSameValue
+    .find((row) => resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY);
+  if (byToken) {
+    return { ...base, action: 'refresh-ready', targetId: byToken.id };
+  }
+
+  // 2) 脱敏值命中 ready 行：仅在上游返回的是脱敏值时进行。
+  if (nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING) {
+    let cands = input.rows.filter((row) => (
+      resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY
+      && matchesMaskedTokenValue(row.token, tokenValue)
+    ));
+
+    // 名称只做 tie-break，不做前提。
+    if (cands.length > 1 && upstreamName) {
+      const narrowed = cands.filter((row) => row.name === upstreamName);
+      if (narrowed.length === 1) cands = narrowed;
+    }
+
+    if (cands.length === 1) {
+      const ready = cands[0];
+      const sameValuePendingRows = rowsWithSameValue.filter((row) => (
+        resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
+      ));
+
+      if (sameValuePendingRows.length > 1) {
+        // 类型 B：值全等命中多条 pending，只复用第一条，不删其余。
+        base.ambiguities.push({
+          maskedValue: tokenValue,
+          candidateTokenIds: sameValuePendingRows.map((row) => row.id),
+          upstreamName,
+          kind: 'pending-duplicate',
+        });
+      }
+
+      if (sameValuePendingRows.length > 0 && ready.token !== tokenValue) {
+        // 决策 8 + 决策 10：判孤儿必须四条同时成立，且同值 pending **只有一条**时才删。
+        // 多条同值 pending 全满足名称/分组也不删（计划类型 B：只复用第一条，不删其余）——
+        // 此时它们彼此不可区分，「哪条是残留」没有证据，删两条就是拿猜测当证据。
+        // 这是本函数唯一会减少数据行的路径，前提不可放宽（计划第 8 节遗留风险 3）。
+        const isOrphan = sameValuePendingRows.length === 1
+          && upstreamName !== null
+          && sameValuePendingRows.every((row) => row.name === ready.name)
+          && sameValuePendingRows.every((row) => (
+            sameTokenGroup(row.tokenGroup, row.name, ready.tokenGroup, ready.name)
+          ));
+
+        if (isOrphan) {
+          return {
+            ...base,
+            action: 'refresh-ready',
+            targetId: ready.id,
+            orphanIds: sameValuePendingRows.map((row) => row.id),
+          };
+        }
+
+        // 不成立 → ready 行一行不动，只复用该 pending（宁留孤儿，不误删）。
+        return {
+          ...base,
+          action: 'reuse-pending',
+          targetId: sameValuePendingRows[0].id,
+        };
+      }
+
+      return { ...base, action: 'refresh-ready', targetId: ready.id };
+    }
+
+    if (cands.length > 1) {
+      // 决策 4 + 决策 12 类型 A：名称 tie-break 后仍多候选 → 不写任何 ready，
+      // 继续往下走，让待补全行保留，并登记歧义请人工查验。
+      base.ambiguities.push({
+        maskedValue: tokenValue,
+        candidateTokenIds: cands.map((row) => row.id),
+        upstreamName,
+        kind: 'ready-ambiguous',
+      });
+    }
+  }
+
+  // 3) pending 复用。先按值全等（确定身份）。
+  const pendingSameValue = rowsWithSameValue.filter(isMaskedPendingAccountToken);
+  if (pendingSameValue.length > 1) {
+    base.ambiguities.push({
+      maskedValue: tokenValue,
+      candidateTokenIds: pendingSameValue.map((row) => row.id),
+      upstreamName,
+      kind: 'pending-duplicate',
+    });
+  }
+  if (pendingSameValue.length > 0) {
+    return { ...base, action: 'reuse-pending', targetId: pendingSameValue[0].id };
+  }
+
+  // 上游后来返回明文时，pending 只能靠名称升级（决策 3：值全等与掩码此时都无信息量）。
+  // 分组在此**不参与判定**当上游没给 group 字段时：一个不可用的字段既不能拿来写值，
+  // 也不能拿来否决身份，否则会新造出重复行。
+  // 注意第 2 步的孤儿判定刻意仍要求分组一致——那里不一致的后果是「不删」（保守方向正确），
+  // 这里不一致的后果是「多插一行」（伤害）。两处风险方向相反，故规则不同，勿「优化」成一致。
+  if (nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY && upstreamName) {
+    const pendingByName = input.rows.filter((row) => (
+      isMaskedPendingAccountToken(row)
+      && row.name === upstreamName
+      && (meta.tokenGroup === undefined
+        || sameTokenGroup(row.tokenGroup, row.name, meta.tokenGroup, upstreamName))
+    ));
+    if (pendingByName.length > 1) {
+      base.ambiguities.push({
+        maskedValue: tokenValue,
+        candidateTokenIds: pendingByName.map((row) => row.id),
+        upstreamName,
+        kind: 'pending-duplicate',
+      });
+    }
+    if (pendingByName.length > 0) {
+      return { ...base, action: 'reuse-pending', targetId: pendingByName[0].id };
+    }
+  }
+
+  // 4) insert：本地已存在同值行时绝不插入（决策 5：杜绝重复）。
+  // 正常流程走不到这里（同值行必在第 1 步或第 3 步被命中），保留为防御性底线。
+  if (rowsWithSameValue.length > 0) {
+    return { ...base, action: 'skip', skipReason: 'duplicate_value_row' };
+  }
+
+  // 用户决策（2026-10-10 访谈确认）：上游没给名称时**跳过该上游项**，
+  // 既不建 `default`/`token-N` 回退名，也不插一条无名行。勿改成自动补名。
+  if (!meta.name) {
+    return { ...base, action: 'skip', skipReason: 'missing_upstream_name' };
+  }
+
+  return { ...base, action: 'insert' };
+}
+
 export async function syncTokensFromUpstream(accountId: number, upstreamTokens: UpstreamApiToken[]) {
   const now = new Date().toISOString();
   const existing = await db.select()
@@ -306,146 +568,114 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
   let updated = 0;
   let maskedPending = 0;
   const pendingTokenIds: number[] = [];
-  let index = existing.length + 1;
+  const undistinguishable: TokenSyncUndistinguishable[] = [];
+  const seenUpstreamValues = new Set<string>();
 
   for (const upstream of upstreamTokens) {
-    const tokenValue = normalizeTokenValue(upstream.key);
-    if (!tokenValue) continue;
-    const tokenName = normalizeTokenName(upstream.name, index);
-    const enabled = upstream.enabled ?? true;
-    const tokenGroup = normalizeTokenGroup(upstream.tokenGroup, tokenName);
-    const nextValueStatus = isMaskedTokenValue(tokenValue)
-      ? ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
-      : ACCOUNT_TOKEN_VALUE_STATUS_READY;
+    const rawTokenValue = normalizeTokenValue(upstream.key);
+    const alreadySeenInThisRound = !!rawTokenValue && seenUpstreamValues.has(rawTokenValue);
+    if (rawTokenValue) seenUpstreamValues.add(rawTokenValue);
 
-    const byToken = existing.find((row) => (
-      row.token === tokenValue
-      && resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY
-    ));
-    if (byToken) {
+    // 规划（纯函数）与落库分离：决策树可单测，落库只负责执行。
+    const plan = planTokenSyncAction({
+      upstream,
+      rows: existing,
+      alreadySeenInThisRound,
+    });
+    undistinguishable.push(...plan.ambiguities);
+    if (plan.action === 'skip') continue;
+
+    const metaPatch = buildTokenMetaPatch(plan.meta);
+
+    if (plan.action === 'refresh-ready') {
+      // 决策 9/A1：命中 ready 行后 name 一律上游优先，不受 source 影响；
+      // 上游缺字段则不写该字段（metaPatch 里就没有该键）。
       await db.update(schema.accountTokens)
         .set({
-          name: tokenName,
-          tokenGroup,
+          ...metaPatch,
           valueStatus: ACCOUNT_TOKEN_VALUE_STATUS_READY,
           source: 'sync',
-          enabled,
+          enabled: plan.enabled,
           updatedAt: now,
         })
-        .where(eq(schema.accountTokens.id, byToken.id))
+        .where(eq(schema.accountTokens.id, plan.targetId!))
         .run();
-      byToken.name = tokenName;
-      byToken.tokenGroup = tokenGroup;
-      byToken.valueStatus = ACCOUNT_TOKEN_VALUE_STATUS_READY;
-      byToken.enabled = enabled;
-      byToken.source = 'sync';
-      byToken.updatedAt = now;
-      updated++;
-      continue;
-    }
 
-    const matchingReadyByMaskedValue = nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
-      ? existing.filter((row) => (
-        resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY
-        && matchesMaskedTokenValue(row.token, tokenValue)
-        && row.name === tokenName
-        && sameTokenGroup(row.tokenGroup, row.name, tokenGroup, tokenName)
-      ))
-      : [];
-    const readyMaskedMatch = matchingReadyByMaskedValue.length === 1
-      ? matchingReadyByMaskedValue[0]
-      : null;
-    if (readyMaskedMatch) {
-      const staleMaskedPlaceholders = existing.filter((row) => (
-        row.id !== readyMaskedMatch.id
-        && resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
-        && matchesMaskedTokenValue(row.token, tokenValue)
-        && row.name === tokenName
-        && sameTokenGroup(row.tokenGroup, row.name, tokenGroup, tokenName)
-      ));
+      const target = existing.find((row) => row.id === plan.targetId);
+      if (target) {
+        if (metaPatch.name !== undefined) target.name = metaPatch.name;
+        if (metaPatch.tokenGroup !== undefined) target.tokenGroup = metaPatch.tokenGroup;
+        target.valueStatus = ACCOUNT_TOKEN_VALUE_STATUS_READY;
+        target.enabled = plan.enabled;
+        target.source = 'sync';
+        target.updatedAt = now;
+      }
 
-      await db.update(schema.accountTokens)
-        .set({
-          name: tokenName,
-          tokenGroup,
-          valueStatus: ACCOUNT_TOKEN_VALUE_STATUS_READY,
-          source: 'sync',
-          enabled,
-          updatedAt: now,
-        })
-        .where(eq(schema.accountTokens.id, readyMaskedMatch.id))
-        .run();
-      readyMaskedMatch.name = tokenName;
-      readyMaskedMatch.tokenGroup = tokenGroup;
-      readyMaskedMatch.valueStatus = ACCOUNT_TOKEN_VALUE_STATUS_READY;
-      readyMaskedMatch.enabled = enabled;
-      readyMaskedMatch.source = 'sync';
-      readyMaskedMatch.updatedAt = now;
-
-      if (staleMaskedPlaceholders.length > 0) {
-        for (const placeholder of staleMaskedPlaceholders) {
-          await db.delete(schema.accountTokens)
-            .where(eq(schema.accountTokens.id, placeholder.id))
-            .run();
-        }
-        for (const placeholder of staleMaskedPlaceholders) {
-          const placeholderIndex = existing.findIndex((row) => row.id === placeholder.id);
-          if (placeholderIndex >= 0) {
-            existing.splice(placeholderIndex, 1);
-          }
-        }
+      // 决策 8：唯一减少数据行的路径。删除前先落库刷新 ready 行，保持与旧实现一致的两步顺序。
+      for (const orphanId of plan.orphanIds || []) {
+        await db.delete(schema.accountTokens)
+          .where(eq(schema.accountTokens.id, orphanId))
+          .run();
+      }
+      for (const orphanId of plan.orphanIds || []) {
+        const orphanIndex = existing.findIndex((row) => row.id === orphanId);
+        if (orphanIndex >= 0) existing.splice(orphanIndex, 1);
       }
 
       updated++;
       continue;
     }
 
-    const matchingPlaceholder = existing.find((row) => (
-      isMaskedPendingAccountToken(row)
-      && row.name === tokenName
-      && sameTokenGroup(row.tokenGroup, row.name, tokenGroup, tokenName)
-    ));
-
-    if (matchingPlaceholder) {
-      const nextEnabled = nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY ? enabled : false;
+    if (plan.action === 'reuse-pending') {
+      const nextEnabled = plan.nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY
+        ? plan.enabled
+        : false;
       await db.update(schema.accountTokens)
         .set({
-          name: tokenName,
-          token: tokenValue,
-          tokenGroup,
-          valueStatus: nextValueStatus,
+          ...metaPatch,
+          token: plan.tokenValue,
+          valueStatus: plan.nextValueStatus,
           source: 'sync',
           enabled: nextEnabled,
           isDefault: false,
           updatedAt: now,
         })
-        .where(eq(schema.accountTokens.id, matchingPlaceholder.id))
+        .where(eq(schema.accountTokens.id, plan.targetId!))
         .run();
-      matchingPlaceholder.name = tokenName;
-      matchingPlaceholder.token = tokenValue;
-      matchingPlaceholder.tokenGroup = tokenGroup;
-      matchingPlaceholder.valueStatus = nextValueStatus;
-      matchingPlaceholder.source = 'sync';
-      matchingPlaceholder.enabled = nextEnabled;
-      matchingPlaceholder.isDefault = false;
-      matchingPlaceholder.updatedAt = now;
+
+      const target = existing.find((row) => row.id === plan.targetId);
+      if (target) {
+        if (metaPatch.name !== undefined) target.name = metaPatch.name;
+        if (metaPatch.tokenGroup !== undefined) target.tokenGroup = metaPatch.tokenGroup;
+        target.token = plan.tokenValue;
+        target.valueStatus = plan.nextValueStatus;
+        target.source = 'sync';
+        target.enabled = nextEnabled;
+        target.isDefault = false;
+        target.updatedAt = now;
+      }
       updated++;
-      if (nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING) {
+      // 复用即一次写入，maskedPending 与 pendingTokenIds 都按**行**去重：
+      // 同一行被本轮多条上游项命中时不重复计数、不重复 push（否则前端计数与 id 列表自相矛盾）。
+      if (plan.nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
+        && !pendingTokenIds.includes(plan.targetId!)
+      ) {
         maskedPending++;
-        pendingTokenIds.push(matchingPlaceholder.id);
+        pendingTokenIds.push(plan.targetId!);
       }
       continue;
     }
 
+    // insert：只写上游真实给出的字段，不建回退名、不编造分组。
     const inserted = await db.insert(schema.accountTokens)
       .values({
         accountId,
-        name: tokenName,
-        token: tokenValue,
-        tokenGroup,
-        valueStatus: nextValueStatus,
+        name: plan.meta.name!,
+        token: plan.tokenValue,
+        ...(plan.meta.tokenGroup !== undefined ? { tokenGroup: plan.meta.tokenGroup } : {}),
+        valueStatus: plan.nextValueStatus,
         source: 'sync',
-        enabled: nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY ? enabled : false,
+        enabled: plan.nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY ? plan.enabled : false,
         isDefault: false,
         createdAt: now,
         updatedAt: now,
@@ -453,13 +683,17 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
       .run();
     const insertedId = getInsertedRowId(inserted);
     if (insertedId == null) continue;
-    const createdRow = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, insertedId)).get();
+    const createdRow = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.id, insertedId))
+      .get();
     if (!createdRow) continue;
 
     existing.push(createdRow);
     created++;
-    index++;
-    if (nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING) {
+    if (plan.nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
+      && !pendingTokenIds.includes(createdRow.id)
+    ) {
       maskedPending++;
       pendingTokenIds.push(createdRow.id);
     }
@@ -472,6 +706,7 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
     updated,
     maskedPending,
     pendingTokenIds,
+    undistinguishable,
     total: existing.length,
     defaultTokenId: repaired?.id || null,
   };

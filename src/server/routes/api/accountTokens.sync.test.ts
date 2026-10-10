@@ -31,6 +31,7 @@ describe('account tokens sync routes with site status', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let maskToken: AccountTokenServiceModule['maskToken'];
+  let normalizeTokenGroup: AccountTokenServiceModule['normalizeTokenGroup'];
   let dataDir = '';
   let previousDataDir: string | undefined;
   let seedId = 0;
@@ -75,6 +76,7 @@ describe('account tokens sync routes with site status', () => {
     db = dbModule.db;
     schema = dbModule.schema;
     maskToken = accountTokenServiceModule.maskToken;
+    normalizeTokenGroup = accountTokenServiceModule.normalizeTokenGroup;
 
     app = Fastify();
     await app.register(routesModule.accountTokensRoutes);
@@ -1054,5 +1056,503 @@ describe('account tokens sync routes with site status', () => {
     expect(deleteApiTokenMock).not.toHaveBeenCalled();
     const removed = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
     expect(removed).toBeUndefined();
+  });
+
+  // ============================================================================
+  // 以下为 docs/plans/2026-10-09-token-sync-authority-fix.md 第 6.2 节要求的新增用例。
+  // 核心不变式：身份判据只有「值全等」与「掩码匹配」两种，name/tokenGroup 是命中后要写的字段，
+  // 绝不再作为匹配前提；上游缺字段则该字段不可用，一律不写。
+  // ============================================================================
+
+  it('refreshes ready token name when upstream renames it', async () => {
+    // 本次缺陷的主症状：已补全（ready）令牌在上游改名后永不刷新，反而多插一条待补全行。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'old-name',
+      token: fullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'new-name', key: fullToken, enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 0,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'new-name',
+      token: fullToken,
+      tokenGroup: 'default',
+    });
+  });
+
+  it('does not overwrite local group when upstream omits the group field', async () => {
+    // 决策 2：上游没给 group 字段 = 该字段不可用 = 不写，禁止拿令牌名编造分组。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-only',
+      token: fullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'vip',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: maskToken(fullToken), enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    // 分组保持本地值，不被编造成令牌名。
+    expect(tokenRows[0]).toMatchObject({ token: fullToken, tokenGroup: 'vip' });
+  });
+
+  it('keeps local name when upstream returns an empty name', async () => {
+    // 决策 3 + 用户 2026-10-10 拍板：上游 name 为空时不覆盖本地 name；
+    // 全新令牌且上游无 name 时**跳过**，既不建 default/token-N 回退名，也不插无名行。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'local-name',
+      token: fullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: '', key: fullToken, enabled: true },
+      { name: '   ', key: 'sk-brand-new-token', enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]!.name).toBe('local-name');
+    expect(tokenRows.map((row) => row.name)).not.toContain('default');
+    expect(tokenRows.map((row) => row.name)).not.toContain('token-1');
+    expect(tokenRows.map((row) => row.token)).not.toContain('sk-brand-new-token');
+  });
+
+  it('does not accumulate placeholders across repeated syncs', async () => {
+    // 反证计划 1.2 节：失配插入的 pending 行会被后续每轮自行更新走，ready 行永无机会命中。
+    // 新规则下同值 pending 走「值全等 = 确定身份」复用，行数必须恒定（幂等）。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: 'sk-rea***1234', enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const totals: number[] = [];
+    const createds: number[] = [];
+    for (let round = 0; round < 3; round++) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/account-tokens/sync/${account.id}`,
+      });
+      expect(response.statusCode).toBe(200);
+      createds.push((response.json() as any).created);
+      const tokenRows = await db.select()
+        .from(schema.accountTokens)
+        .where(eq(schema.accountTokens.accountId, account.id))
+        .all();
+      totals.push(tokenRows.length);
+    }
+
+    expect(totals).toEqual([1, 1, 1]);
+    expect(createds).toEqual([1, 0, 0]);
+  });
+
+  it('keeps two masked tokens that share the same name', async () => {
+    // 两条上游项 name 相同、脱敏值不同。旧实现会在 matchingPlaceholder（只看 name+group、完全不看值）
+    // 上命中第一条，把它的 token 覆写成第二条的值 —— 第一条令牌的掩码信息就此丢失。
+    // 新规则身份判据是值全等，两条各自成行。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'same-name', key: 'sk-abc***xyz', enabled: true },
+      { name: 'same-name', key: 'sk-def***uvw', enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as any;
+    expect(body).toMatchObject({ status: 'synced', created: 2, total: 2, maskedPending: 2 });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(2);
+    expect(tokenRows.map((row) => row.token).sort()).toEqual(['sk-abc***xyz', 'sk-def***uvw']);
+
+    // maskedPending / pendingTokenIds 按行去重，两者必须一致且无重复 id。
+    const pendingIds = body.pendingTokenIds as number[];
+    expect(pendingIds).toHaveLength(2);
+    expect(new Set(pendingIds).size).toBe(2);
+    expect(body.maskedPending).toBe(pendingIds.length);
+  });
+
+  it('does not treat pending as orphan when upstream has no name', async () => {
+    // 决策 10：上游无名称信息时不判孤儿、不删 pending，只复用。
+    // 删除是整个实现里唯一减少数据行的路径，前提四条必须同时成立，不可放宽。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    const maskedToken = maskToken(fullToken);
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'ready-key',
+      token: fullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'ready-key',
+      token: maskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    // 名称相同、分组相同，只差上游没给 name —— 孤儿判定必须不成立。
+    getApiTokensMock.mockResolvedValue([
+      { name: '', key: maskedToken, enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 1,
+      total: 2,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(2);
+    expect(tokenRows.find((row) => row.token === maskedToken)).toBeDefined();
+    // 种子 source 刻意用 'manual'：若不判孤儿的分支误刷新了 ready 行，source 会被写成 'sync'，
+    // 这条断言就能抓到「ready 行一行不动」。
+    expect(tokenRows.find((row) => row.token === fullToken)).toMatchObject({
+      name: 'ready-key',
+      source: 'manual',
+    });
+  });
+
+  it('reports undistinguishable group when two ready tokens share one mask', async () => {
+    // 决策 4 + 决策 12 类型 A：ready 掩码命中多条、名称 tie-break 后仍 >1 → 不写任何 ready。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const firstFullToken = 'sk-real-token-1234';
+    const secondFullToken = 'sk-real-zzzzz-1234';
+    const sharedMask = maskToken(firstFullToken);
+    expect(maskToken(secondFullToken)).toBe(sharedMask);
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'first-token',
+      token: firstFullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'second-token',
+      token: secondFullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'unknown-name', key: sharedMask, enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as any;
+    expect(body).toMatchObject({ status: 'synced', updated: 0, created: 1, maskedPending: 1 });
+
+    expect(Array.isArray(body.undistinguishable)).toBe(true);
+    expect(body.undistinguishable).toHaveLength(1);
+    expect(body.undistinguishable[0]).toMatchObject({
+      maskedValue: sharedMask,
+      kind: 'ready-ambiguous',
+      upstreamName: 'unknown-name',
+    });
+    expect(body.undistinguishable[0].candidateTokenIds).toHaveLength(2);
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(3);
+    // 两条 ready 行的名称/分组都未被改写（不猜、不写到错误的令牌上）。
+    expect(tokenRows.find((row) => row.token === firstFullToken)).toMatchObject({ name: 'first-token' });
+    expect(tokenRows.find((row) => row.token === secondFullToken)).toMatchObject({ name: 'second-token' });
+  });
+
+  it('keeps duplicated same-value placeholders even when names all match', async () => {
+    // 决策 8 的删除前提不可放宽：同值 pending **只有一条**时才允许判孤儿。
+    // 两条同值 pending 即便名称/分组全一致也不删——它们彼此不可区分，
+    // 「哪条是残留」没有证据，删两条就是拿猜测当证据（计划类型 B + 第 8 节遗留风险 3）。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    const maskedToken = maskToken(fullToken);
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'k',
+      token: fullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'k',
+      token: maskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'k',
+      token: maskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'k', key: maskedToken, enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as any;
+    expect(body).toMatchObject({
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 1,
+      total: 3,
+    });
+    // 只复用第一条，另两条保留；ready 行一行不动（种子 source 为 manual，被刷成 sync 即抓到）。
+    expect(body.pendingTokenIds).toHaveLength(1);
+    expect(body.undistinguishable.map((item: any) => item.kind)).toEqual(['pending-duplicate']);
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(3);
+    expect(tokenRows.filter((row) => row.token === maskedToken)).toHaveLength(2);
+    expect(tokenRows.find((row) => row.token === fullToken)).toMatchObject({ source: 'manual' });
+  });
+
+  it('reports undistinguishable group when two upstream items share one mask', async () => {
+    // 决策 12 类型 C：上游同一轮返回两条脱敏同值项，系统层面无法区分，塌缩成 1 行但必须上报。
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'first-name', key: 'sk-rea***1234', enabled: true },
+      { name: 'second-name', key: 'sk-rea***1234', enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as any;
+    // 杜绝重复：第二轮不新增行，且 pendingTokenIds 不出现重复 id。
+    expect(body).toMatchObject({ status: 'synced', total: 1, created: 1, maskedPending: 1 });
+    expect(body.pendingTokenIds).toHaveLength(1);
+
+    expect(body.undistinguishable).toHaveLength(1);
+    expect(body.undistinguishable[0]).toMatchObject({
+      maskedValue: 'sk-rea***1234',
+      kind: 'upstream-collapse',
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+  });
+
+  it('upgrades masked_pending to ready when upstream omits the group field', async () => {
+    // 关键修正：上游没给 group 字段时，分组一律不参与身份判定。
+    // 若在此处仍要求分组一致，本地有显式分组的 pending 行会判为不一致，
+    // 进而落到 insert 新造一条同值 ready 行 —— 正是本方案要消灭的重复行。
+    // （第 2 步的孤儿判定刻意仍要求分组一致：那里不一致的后果是「不删」，保守方向正确。）
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'my-key',
+      token: maskToken(fullToken),
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'vip',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'my-key', key: fullToken, enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'synced',
+      total: 1,
+      created: 0,
+      updated: 1,
+      maskedPending: 0,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'my-key',
+      token: fullToken,
+      enabled: true,
+      // 上游没给分组，本地分组保持不动。
+      tokenGroup: 'vip',
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('ready');
+  });
+
+  it('resolves token group as null instead of the token name', () => {
+    // 决策 6：normalizeTokenGroup 的第二参数只用于识别 default / 默认 / token-N 这类
+    // 可推断的命名，不再拿任意令牌名编造分组。
+    expect(normalizeTokenGroup(null, 'my-key')).toBeNull();
+    expect(normalizeTokenGroup(undefined, '生产令牌')).toBeNull();
+    expect(normalizeTokenGroup('   ', 'my-key')).toBeNull();
+    // 显式分组仍原样返回。
+    expect(normalizeTokenGroup('vip', 'my-key')).toBe('vip');
+    // 以下两条是既有行为，必须保持不变（tokens/stats 的既有用例依赖它们）。
+    expect(normalizeTokenGroup(null, 'default')).toBe('default');
+    expect(normalizeTokenGroup(null, 'token-1')).toBeNull();
+    expect(normalizeTokenGroup(null, null)).toBeNull();
   });
 });

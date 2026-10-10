@@ -33,7 +33,10 @@ import {
 } from "../../services/proxyDebugTraceStore.js";
 import { parseProxyLogMessageMeta } from "../../services/proxyLogMessage.js";
 import { requiresManagedAccountTokens } from "../../services/accountExtraConfig.js";
-import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from "../../services/accountTokenService.js";
+import {
+  ACCOUNT_TOKEN_VALUE_STATUS_READY,
+  normalizeTokenGroup,
+} from "../../services/accountTokenService.js";
 import {
   formatLocalDateTime,
   formatUtcSqlDateTime,
@@ -1447,27 +1450,6 @@ export async function statsRoutes(app: FastifyInstance) {
     "/api/models/token-candidates",
     { preHandler: [limitModelTokenCandidatesRead] },
     async () => {
-      const resolveTokenGroupLabel = (
-        tokenGroup: string | null,
-        tokenName: string | null,
-      ): string | null => {
-        const explicit = (tokenGroup || "").trim();
-        if (explicit) return explicit;
-
-        const name = (tokenName || "").trim();
-        if (!name) return null;
-        const normalized = name.toLowerCase();
-        if (
-          normalized === "default" ||
-          normalized === "默认" ||
-          /^default($|[-_\s])/.test(normalized)
-        ) {
-          return "default";
-        }
-        if (/^token-\d+$/.test(normalized)) return null;
-        return name;
-      };
-
       // Load global allowed models whitelist
       const globalAllowedModels = new Set(
         config.globalAllowedModels
@@ -1574,7 +1556,8 @@ export async function statsRoutes(app: FastifyInstance) {
         const accountModelKey = `${row.accounts.id}::${modelName.toLowerCase()}`;
         coveredAccountModelSet.add(accountModelKey);
 
-        const resolvedTokenGroup = resolveTokenGroupLabel(
+        // 分组解析统一走 accountTokenService 的 normalizeTokenGroup，此前此处是重复实现（AGENTS.md：one source of truth）
+        const resolvedTokenGroup = normalizeTokenGroup(
           row.account_tokens.tokenGroup,
           row.account_tokens.name,
         );
