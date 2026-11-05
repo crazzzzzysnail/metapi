@@ -30,6 +30,13 @@ import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
 import { confirmOrThrow } from '../helpers/confirmDialog.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
+import {
+  CHECKIN_DELAY_DEFAULTS,
+  CHECKIN_DELAY_UNITS,
+  CHECKIN_DELAY_UNIT_LABELS,
+  isCheckinDelayUnit,
+  type CheckinDelayUnit,
+} from '../../server/shared/checkinDelayPolicy.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
@@ -63,6 +70,21 @@ type RuntimeSettings = {
   checkinCron: string;
   checkinScheduleMode: 'cron' | 'interval';
   checkinIntervalHours: number;
+  checkinDelayEnabled: boolean;
+  checkinDelayMin: number;
+  checkinDelayMax: number;
+  checkinDelayUnit: CheckinDelayUnit;
+  /**
+   * 两条「仅提示不拦截」判据的服务端算结果（定稿第 8.2 条与第 4 条）。
+   * 可为 null：读库失败时服务端不猜，前端也就不显示提示。
+   */
+  checkinDelayHint?: {
+    windowMs: number;
+    accountCount: number;
+    avgBandMs: number;
+    tooNarrow: boolean;
+    compressed: boolean;
+  } | null;
   balanceRefreshCron: string;
   logCleanupCron: string;
   logCleanupUsageLogsEnabled: boolean;
@@ -345,6 +367,10 @@ export default function Settings() {
     checkinCron: '0 8 * * *',
     checkinScheduleMode: 'cron',
     checkinIntervalHours: 6,
+    checkinDelayEnabled: false,
+    checkinDelayMin: CHECKIN_DELAY_DEFAULTS.min,
+    checkinDelayMax: CHECKIN_DELAY_DEFAULTS.max,
+    checkinDelayUnit: CHECKIN_DELAY_DEFAULTS.unit,
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
@@ -668,6 +694,20 @@ export default function Settings() {
         checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
           ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
           : 6,
+        checkinDelayEnabled: !!runtimeInfo.checkinDelayEnabled,
+        checkinDelayMin: Number.isFinite(Number(runtimeInfo.checkinDelayMin)) && Number(runtimeInfo.checkinDelayMin) >= 0
+          ? Math.trunc(Number(runtimeInfo.checkinDelayMin))
+          : CHECKIN_DELAY_DEFAULTS.min,
+        checkinDelayMax: Number.isFinite(Number(runtimeInfo.checkinDelayMax)) && Number(runtimeInfo.checkinDelayMax) >= 0
+          ? Math.trunc(Number(runtimeInfo.checkinDelayMax))
+          : CHECKIN_DELAY_DEFAULTS.max,
+        checkinDelayUnit: isCheckinDelayUnit(runtimeInfo.checkinDelayUnit)
+          ? runtimeInfo.checkinDelayUnit
+          : CHECKIN_DELAY_DEFAULTS.unit,
+        // 两条「仅提示不拦截」判据的回显必须一起搬进 state：本处 setRuntime 是逐字段挑着赋值的，
+        // 漏掉这一个字段的结果是提示在生产路径上永远不显示，而单测只要直接喂 mock 就发现不了。
+        // 服务端读不到时回 null（不是 undefined），与类型声明保持一致。
+        checkinDelayHint: runtimeInfo.checkinDelayHint ?? null,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
@@ -787,6 +827,10 @@ export default function Settings() {
         checkinCron: runtime.checkinCron,
         checkinScheduleMode: runtime.checkinScheduleMode,
         checkinIntervalHours: runtime.checkinIntervalHours,
+        checkinDelayEnabled: runtime.checkinDelayEnabled,
+        checkinDelayMin: runtime.checkinDelayMin,
+        checkinDelayMax: runtime.checkinDelayMax,
+        checkinDelayUnit: runtime.checkinDelayUnit,
         balanceRefreshCron: runtime.balanceRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
@@ -804,8 +848,10 @@ export default function Settings() {
   const triggerScheduleCheckin = async () => {
     setTestingCheckin(true);
     try {
-      await api.triggerCheckinAll();
-      toast.success('已开始全部签到，请稍后查看签到日志');
+      const res = await api.triggerCheckinAll();
+      // 优先播报服务端文案：开启随机延迟后它会回「已按随机延迟排期 N 个账号，最迟 HH:MM 完成」，
+      // 关闭时服务端回的就是原来那句，因此这里对旧行为无影响。
+      toast.success(res?.message || '已开始全部签到，请稍后查看签到日志');
     } catch (err: any) {
       toast.error(err?.message || '触发签到失败');
     } finally {
@@ -1301,6 +1347,17 @@ export default function Settings() {
     }
   };
 
+  /**
+   * 两条「仅提示不拦截」的判据（定稿第 8.2 条窗口过窄、第 4 条跨日被压缩）。
+   * 全部来自服务端回显：账号数与阈值线都由派发层用同一份口径算，这里只负责渲染。
+   * 读不到时按「无提示」处理 —— 一条算错的警告比没有警告更糟。
+   */
+  const delayPlanHint = {
+    narrow: runtime?.checkinDelayHint?.tooNarrow === true,
+    compressed: runtime?.checkinDelayHint?.compressed === true,
+    avgBandMs: Number.isFinite(runtime?.checkinDelayHint?.avgBandMs) ? (runtime?.checkinDelayHint?.avgBandMs ?? 0) : 0,
+  };
+
   if (loading) {
     return (
       <div className="animate-fade-in">
@@ -1385,6 +1442,96 @@ export default function Settings() {
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
             </div>
+          </div>
+          <div
+            data-settings-card="checkin-delay"
+            style={{
+              marginTop: 16,
+              paddingTop: 16,
+              borderTop: '1px solid var(--color-border-light)',
+              display: 'grid',
+              gap: 12,
+            }}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13 }}>签到随机延迟</div>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
+              <input
+                type="checkbox"
+                checked={runtime.checkinDelayEnabled}
+                onChange={(e) => setRuntime((prev) => ({ ...prev, checkinDelayEnabled: e.target.checked }))}
+              />
+              启用签到随机延迟
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 180px', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>最小延迟</div>
+                <input
+                  type="number"
+                  min={0}
+                  value={runtime.checkinDelayMin}
+                  onChange={(e) => setRuntime((prev) => {
+                    const nextValue = Number(e.target.value);
+                    return {
+                      ...prev,
+                      // 前端拦截：非负整数且不大于当前最大延迟，与服务端 400 校验口径一致
+                      checkinDelayMin: Number.isFinite(nextValue) && nextValue >= 0 && nextValue <= prev.checkinDelayMax
+                        ? Math.trunc(nextValue)
+                        : prev.checkinDelayMin,
+                    };
+                  })}
+                  disabled={!runtime.checkinDelayEnabled}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>最大延迟</div>
+                <input
+                  type="number"
+                  min={0}
+                  value={runtime.checkinDelayMax}
+                  onChange={(e) => setRuntime((prev) => {
+                    const nextValue = Number(e.target.value);
+                    return {
+                      ...prev,
+                      // 前端拦截：不小于当前最小延迟（负数与非整数同样拒绝），与服务端 400 校验口径一致
+                      checkinDelayMax: Number.isFinite(nextValue) && nextValue >= prev.checkinDelayMin
+                        ? Math.trunc(nextValue)
+                        : prev.checkinDelayMax,
+                    };
+                  })}
+                  disabled={!runtime.checkinDelayEnabled}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>延迟单位</div>
+                <ModernSelect
+                  value={runtime.checkinDelayUnit}
+                  onChange={(value) => setRuntime((prev) => ({
+                    ...prev,
+                    checkinDelayUnit: isCheckinDelayUnit(value) ? value : prev.checkinDelayUnit,
+                  }))}
+                  disabled={!runtime.checkinDelayEnabled}
+                  options={CHECKIN_DELAY_UNITS.map((unit) => ({ value: unit, label: CHECKIN_DELAY_UNIT_LABELS[unit] }))}
+                />
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              默认关闭。开启后，每个账号的出发时刻会被打散到「定时任务时刻 + 偏移窗口」之内，避免全站账号同一秒齐发；偏移只做「更晚」不做提前，签到 Cron 就是窗口起点，想把覆盖挪到清晨就把 Cron 设成 06:00 之类。两种签到方式都参与打散：Cron 方式按当日时刻表分散；间隔方式在各自「满 N 小时」的到期基准上叠加每账户偏移，其原有的到期与失败重试语义保持不变（因此间隔方式的偏移可以跨日，不会被裁到当天日终）。
+            </div>
+            {/* 两条只提示、不拦截的判据（定稿第 8.2 条与第 4 条）。数据取自服务端回显，
+                前端不自己换算单位、也不重抄阈值，避免与服务端口径漂移。 */}
+            {runtime.checkinDelayEnabled && delayPlanHint.narrow && (
+              <div style={{ fontSize: 12, color: 'var(--color-warning)', background: 'var(--color-warning-soft)', border: '1px solid var(--color-warning)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', marginTop: 6 }}>
+                窗口相对账号数过窄，分散效果有限：当前平均每个账号只有约{' '}
+                {Math.max(1, Math.round(delayPlanHint.avgBandMs / 1000))} 秒的间距。可加大最大延迟，或增加子带宽度。
+              </div>
+            )}
+            {runtime.checkinDelayEnabled && delayPlanHint.compressed && (
+              <div style={{ fontSize: 12, color: 'var(--color-warning)', background: 'var(--color-warning-soft)', border: '1px solid var(--color-warning)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', marginTop: 6 }}>
+                定时任务时刻距当日结束不足一个完整窗口，末尾部分已被压缩到当天日终；把 Cron 往前挪可保留完整散布空间。
+              </div>
+            )}
           </div>
           <div
             style={{

@@ -6,6 +6,7 @@ import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
+import { isCheckinDelayUnit } from '../shared/checkinDelayPolicy.js';
 
 const BACKUP_VERSION = '2.1';
 
@@ -237,6 +238,16 @@ const EXCLUDED_SETTING_KEYS = new Set<string>([
   'db_type',
   'db_url',
   'db_ssl',
+  // 签到随机延迟的两个当日运行时状态键，绝不进备份。
+  // 真正的原因（与旧版本记录的不同，已随派发层第③分支改为静默而更正）：
+  // plan 存的是**当日**派发计划，其 plannedFireMs 是按锚点与当天窗口算死的时间戳。
+  // 若随备份恢复到另一台实例或另一天，那些时刻要么早已过去、要么落在一个与该实例无关的锚点上；
+  // 恢复路径把它当作「今天的计划」装载后，就会按一份对不上账的时刻表给真实账号排期，
+  // 轻则整天不签到（时刻全在过去），重则把签到压到一个用户从未设过的时间窗里。
+  // skipped_notice 同理：它是「本机今天是否已就跳过发过通知」的日期标记，跨实例继承会吞掉本该发的提醒。
+  // 二者都应当在目标实例上重新生成，而不是搬运。
+  'checkin_delay_plan',
+  'checkin_delay_skipped_notice',
 ]);
 const BACKUP_WEBDAV_CONFIG_SETTING_KEY = 'backup_webdav_config_v1';
 const BACKUP_WEBDAV_STATE_SETTING_KEY = 'backup_webdav_state_v1';
@@ -1288,6 +1299,25 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
     return keys.every((weightKey) => value[weightKey] === undefined || isFiniteNumber(value[weightKey]));
   }
 
+  // 签到随机延迟的用户配置与实例种子：恢复时按类型与取值范围校验，脏值直接拒绝落库。
+  if (key === 'checkin_delay_enabled') {
+    return typeof value === 'boolean';
+  }
+
+  if (key === 'checkin_delay_min' || key === 'checkin_delay_max') {
+    return isFiniteNumber(value) && value >= 0;
+  }
+
+  if (key === 'checkin_delay_unit') {
+    // 单位枚举以 checkinDelayPolicy 为唯一出处，避免这里再写一份 'minute' | 'hour' 字面量。
+    return isCheckinDelayUnit(value);
+  }
+
+  if (key === 'checkin_delay_seed') {
+    // 与 checkinDelayDispatcher.ensureSeed 的判据一致：非空且去除空白后有内容。
+    return typeof value === 'string' && value.trim().length > 0;
+  }
+
   return true;
 }
 
@@ -1846,11 +1876,28 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
   });
 }
 
+/**
+ * 只用于导入侧拦截的当日运行时状态键。
+ *
+ * **不要**直接复用 `EXCLUDED_SETTING_KEYS`：那份集合里还含 `auth_token` / `db_type` / `db_url` / `db_ssl`，
+ * 它们在导入路径上原本是可采纳的（仅导出不写），拿同一份集合去挡会顺手改掉登录口令与数据库选择的
+ * 恢复语义，那超出本需求的范围。这里只列签到随机延迟的两个瞬态键，逐个写明理由。
+ */
+const IMPORT_REJECTED_SETTING_KEYS = new Set<string>([
+  'checkin_delay_plan',
+  'checkin_delay_skipped_notice',
+]);
+
 async function importPreferencesSection(section: PreferencesBackupSection): Promise<Array<{ key: string; value: unknown }>> {
   const applied: Array<{ key: string; value: unknown }> = [];
 
   await db.transaction(async (tx) => {
     for (const row of section.settings) {
+      // 瞬态键在导入侧同样必须被挡下，不能只靠导出侧不写它们。
+      // 只防一边等于把不变量交给备份文件的作者：任何人手工编辑或复用一份旧 JSON
+      // 就能把往日的 checkin_delay_plan 灌进新实例，而恢复路径会把它当作「今天的计划」装载，
+      // 按一份对不上账的时刻表给真实账号排期。导出排除 + 导入拒绝，两侧都要有。
+      if (IMPORT_REJECTED_SETTING_KEYS.has(row.key)) continue;
       if (!isSettingValueAcceptable(row.key, row.value)) continue;
 
       await upsertSetting(row.key, row.value, tx);
