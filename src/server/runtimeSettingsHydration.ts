@@ -2,6 +2,7 @@ import {
   config,
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
+import { isCheckinDelayUnit } from './shared/checkinDelayPolicy.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
@@ -116,6 +117,29 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const checkinIntervalHours = parseSettingFromMap<number>(settingsMap, 'checkin_interval_hours');
   if (typeof checkinIntervalHours === 'number' && Number.isFinite(checkinIntervalHours) && checkinIntervalHours >= 1 && checkinIntervalHours <= 24) {
     config.checkinIntervalHours = Math.trunc(checkinIntervalHours);
+  }
+
+  // 签到随机延迟：与上面几项一样只做「类型正确的逐键回灌」，供设置页原样回显。
+  // 真正的窗口合法性（min<=max、单位可用、非法整体回落）由 shared/checkinDelayPolicy 在
+  // 派发层读取时判定，这里不重复一套钳制规则。
+  const checkinDelayEnabled = parseSettingFromMap<boolean>(settingsMap, 'checkin_delay_enabled');
+  if (typeof checkinDelayEnabled === 'boolean') {
+    config.checkinDelayEnabled = checkinDelayEnabled;
+  }
+
+  const checkinDelayMin = parseSettingFromMap<number>(settingsMap, 'checkin_delay_min');
+  if (typeof checkinDelayMin === 'number' && Number.isFinite(checkinDelayMin) && checkinDelayMin >= 0) {
+    config.checkinDelayMin = checkinDelayMin;
+  }
+
+  const checkinDelayMax = parseSettingFromMap<number>(settingsMap, 'checkin_delay_max');
+  if (typeof checkinDelayMax === 'number' && Number.isFinite(checkinDelayMax) && checkinDelayMax >= 0) {
+    config.checkinDelayMax = checkinDelayMax;
+  }
+
+  const checkinDelayUnit = parseSettingFromMap<unknown>(settingsMap, 'checkin_delay_unit');
+  if (isCheckinDelayUnit(checkinDelayUnit)) {
+    config.checkinDelayUnit = checkinDelayUnit;
   }
 
   const balanceRefreshCron = parseSettingFromMap<string>(settingsMap, 'balance_refresh_cron');

@@ -82,6 +82,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       ? 'interval' as const
       : 'cron' as const,
     checkinIntervalHours: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.CHECKIN_INTERVAL_HOURS, 6)))),
+    // 签到随机延迟：环境变量只提供「原值 + 单位」，归一化统一交给 shared/checkinDelayPolicy，
+    // 避免 config、路由、调度器三处各写一套钳制规则而漂移。
+    checkinDelayEnabled: parseBoolean(env.CHECKIN_DELAY_ENABLED, false),
+    checkinDelayMin: parseNumber(env.CHECKIN_DELAY_MIN, 0),
+    checkinDelayMax: parseNumber(env.CHECKIN_DELAY_MAX, 360),
+    checkinDelayUnit: env.CHECKIN_DELAY_UNIT === 'hour' ? ('hour' as const) : ('minute' as const),
     balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
     logCleanupCron: env.LOG_CLEANUP_CRON || '0 6 * * *',
     logCleanupConfigured: false,

@@ -107,6 +107,13 @@ describe('Settings log cleanup schedule', () => {
         checkinCron: '0 8 * * *',
         checkinScheduleMode: 'interval',
         checkinIntervalHours: 6,
+        // 签到随机延迟四项随「保存定时任务」一并提交。本用例的 getRuntimeSettings 回显里没有
+        // 这四个键，因此按 CHECKIN_DELAY_DEFAULTS 回落：关闭 / 0 / 360 / 分钟。
+        // 提交的是「原值 + 单位」，不是换算后的毫秒。
+        checkinDelayEnabled: false,
+        checkinDelayMin: 0,
+        checkinDelayMax: 360,
+        checkinDelayUnit: 'minute',
         balanceRefreshCron: '0 * * * *',
         logCleanupCron: '15 4 * * *',
         logCleanupUsageLogsEnabled: true,

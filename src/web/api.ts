@@ -1,4 +1,5 @@
 import { clearAuthSession, getAuthToken } from "./authSession.js";
+import type { CheckinDelayUnit } from "../server/shared/checkinDelayPolicy.js";
 
 type BufferLike = {
   from(data: ArrayBuffer): { toString(encoding: "base64"): string };
@@ -381,6 +382,10 @@ export type RuntimeSettingsPayload = {
   checkinCron?: string;
   checkinScheduleMode?: "cron" | "interval";
   checkinIntervalHours?: number;
+  checkinDelayEnabled?: boolean;
+  checkinDelayMin?: number;
+  checkinDelayMax?: number;
+  checkinDelayUnit?: CheckinDelayUnit;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;

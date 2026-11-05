@@ -6,8 +6,16 @@ import { db, runtimeDbDialect, schema } from '../../db/index.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { getAllBrandNames } from '../../services/brandMatcher.js';
-import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
+import { updateBalanceRefreshCron, updateCheckinSchedule, updateCheckinDelaySettings, updateLogCleanupSettings } from '../../services/checkinScheduler.js';
+import {
+  CHECKIN_DELAY_UNITS,
+  CHECKIN_DELAY_UNIT_LABELS,
+  formatCheckinDelayWindow,
+  isCheckinDelayUnit,
+  type CheckinDelayUnit,
+} from '../../shared/checkinDelayPolicy.js';
 import { sendNotification } from '../../services/notifyService.js';
+import { describeCheckinDelayHintInput, describeCheckinDelayPlan } from '../../services/checkinDelayDispatcher.js';
 import {
   exportBackup,
   exportBackupToWebdav,
@@ -70,6 +78,10 @@ interface RuntimeSettingsBody {
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
+  checkinDelayEnabled?: boolean;
+  checkinDelayMin?: number;
+  checkinDelayMax?: number;
+  checkinDelayUnit?: CheckinDelayUnit;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -364,6 +376,31 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
         cronExpr: config.checkinCron,
         intervalHours: config.checkinIntervalHours,
       });
+      return;
+    }
+    // 延迟配置只回灌 config，不在这里逐个调用调度器：装载动作由 applyImportedSettingsToRuntime
+    // 在整批导入结束后统一触发一次（见该函数注释）。窗口参数是否可用交给 shared/checkinDelayPolicy
+    // 在读取时归一化，这里不重复一套钳制。
+    case 'checkin_delay_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.checkinDelayEnabled = value;
+      return;
+    }
+    case 'checkin_delay_min': {
+      const min = Number(value);
+      if (!Number.isFinite(min) || min < 0) return;
+      config.checkinDelayMin = min;
+      return;
+    }
+    case 'checkin_delay_max': {
+      const max = Number(value);
+      if (!Number.isFinite(max) || max < 0) return;
+      config.checkinDelayMax = max;
+      return;
+    }
+    case 'checkin_delay_unit': {
+      if (!isCheckinDelayUnit(value)) return;
+      config.checkinDelayUnit = value;
       return;
     }
     case 'balance_refresh_cron': {
@@ -711,11 +748,38 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
   }
 }
 
-function getRuntimeSettingsResponse(currentAdminIp = '') {
+function applyImportedSettingsToRuntime(appliedSettings: Array<{ key: string; value: unknown }>) {
+  for (const item of appliedSettings) {
+    applyImportedSettingToRuntime(item.key, item.value);
+  }
+  // 延迟配置在导入期间只是逐个回灌到 config，装载动作整批只做一次：
+  // 逐键调用会让兜底扫描定时器被反复拆建、并被立刻触发多轮。
+  if (appliedSettings.some((item) => item.key.startsWith('checkin_delay_'))) {
+    updateCheckinDelaySettings();
+  }
+}
+
+async function getRuntimeSettingsResponse(currentAdminIp = '') {
+  // 提示用的输入要读库取账号数，因此本函数转为异步；两条判据都在派发层算，
+  // 前端只渲染结果，不重抄阈值与单位换算（避免与服务端口径漂移）。
+  const checkinDelayHint = await describeCheckinDelayHintInput().catch((err) => {
+    console.error('[Settings] Delay hint readout failed:', err);
+    return null;
+  });
   return {
     checkinCron: config.checkinCron,
     checkinScheduleMode: config.checkinScheduleMode,
     checkinIntervalHours: config.checkinIntervalHours,
+    // 回显「原值 + 单位」而不是换算后的毫秒：设置页要能把用户填的数原样显示出来。
+    checkinDelayEnabled: config.checkinDelayEnabled,
+    checkinDelayMin: config.checkinDelayMin,
+    checkinDelayMax: config.checkinDelayMax,
+    checkinDelayUnit: config.checkinDelayUnit,
+    // 当日排期的进程内视图（scheduled/upcoming/missed/nextFireAt），供设置页与人工核对分散效果用。
+    // 只读派发器内存里的当日计划，不触发任何排期或库读；没有计划时 active=false。
+    checkinDelayPlan: describeCheckinDelayPlan(),
+    // 两条「仅提示不拦截」的判据（定稿第 8.2 条与第 4 条）。读不到时为 null，前端不显示提示。
+    checkinDelayHint,
     balanceRefreshCron: config.balanceRefreshCron,
     logCleanupCron: config.logCleanupCron,
     logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
@@ -845,7 +909,7 @@ function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
 export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
     const currentAdminIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
-    return getRuntimeSettingsResponse(currentAdminIp);
+    return await getRuntimeSettingsResponse(currentAdminIp);
   });
 
   app.get('/api/settings/brand-list', async () => {
@@ -1038,9 +1102,74 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.checkinCron = nextCheckinCron;
       config.checkinScheduleMode = nextCheckinScheduleMode;
       config.checkinIntervalHours = nextCheckinIntervalHours;
-      upsertSetting('checkin_cron', config.checkinCron);
-      upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
-      upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+      await upsertSetting('checkin_cron', config.checkinCron);
+      await upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
+      await upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
+    }
+
+    const checkinDelayTouched = body.checkinDelayEnabled !== undefined
+      || body.checkinDelayMin !== undefined
+      || body.checkinDelayMax !== undefined
+      || body.checkinDelayUnit !== undefined;
+
+    if (checkinDelayTouched) {
+      if (body.checkinDelayEnabled !== undefined) {
+        try {
+          parseBooleanFlag(body.checkinDelayEnabled, '签到随机延迟开关');
+        } catch (err: any) {
+          return reply.code(400).send({ success: false, message: err?.message || '签到随机延迟开关格式无效' });
+        }
+      }
+      if (body.checkinDelayUnit !== undefined && !isCheckinDelayUnit(body.checkinDelayUnit)) {
+        const supportedUnits = CHECKIN_DELAY_UNITS.map((unit) => CHECKIN_DELAY_UNIT_LABELS[unit]).join(' / ');
+        return reply.code(400).send({ success: false, message: `签到延迟单位无效：仅支持 ${supportedUnits}` });
+      }
+
+      const nextCheckinDelayMin = body.checkinDelayMin !== undefined ? Number(body.checkinDelayMin) : config.checkinDelayMin;
+      const nextCheckinDelayMax = body.checkinDelayMax !== undefined ? Number(body.checkinDelayMax) : config.checkinDelayMax;
+      if (!Number.isInteger(nextCheckinDelayMin) || nextCheckinDelayMin < 0) {
+        return reply.code(400).send({ success: false, message: '签到最小延迟必须是不小于 0 的整数' });
+      }
+      if (!Number.isInteger(nextCheckinDelayMax) || nextCheckinDelayMax < 0) {
+        return reply.code(400).send({ success: false, message: '签到最大延迟必须是不小于 0 的整数' });
+      }
+      if (nextCheckinDelayMin > nextCheckinDelayMax) {
+        return reply.code(400).send({ success: false, message: '签到最大延迟不能小于最小延迟' });
+      }
+
+      const nextCheckinDelayEnabled = body.checkinDelayEnabled !== undefined
+        ? !!body.checkinDelayEnabled
+        : config.checkinDelayEnabled;
+      const nextCheckinDelayUnit: CheckinDelayUnit = isCheckinDelayUnit(body.checkinDelayUnit)
+        ? body.checkinDelayUnit
+        : config.checkinDelayUnit;
+      const nextCheckinDelayLabel = formatCheckinDelayWindow(
+        nextCheckinDelayMin,
+        nextCheckinDelayMax,
+        nextCheckinDelayUnit,
+      );
+
+      if (nextCheckinDelayEnabled !== config.checkinDelayEnabled) {
+        changedLabels.push(`签到随机延迟（${config.checkinDelayEnabled ? '开启' : '关闭'} -> ${nextCheckinDelayEnabled ? '开启' : '关闭'}）`);
+      }
+      const delayRangeChanged = nextCheckinDelayMin !== config.checkinDelayMin
+        || nextCheckinDelayMax !== config.checkinDelayMax
+        || nextCheckinDelayUnit !== config.checkinDelayUnit;
+      if (delayRangeChanged) {
+        changedLabels.push(`签到随机延迟窗口（${nextCheckinDelayLabel}）`);
+      }
+
+      config.checkinDelayEnabled = nextCheckinDelayEnabled;
+      config.checkinDelayMin = nextCheckinDelayMin;
+      config.checkinDelayMax = nextCheckinDelayMax;
+      config.checkinDelayUnit = nextCheckinDelayUnit;
+      // 顺序要紧：先落库再通知调度器。updateCheckinDelaySettings 会读库里的新配置来装载运行时，
+      // 若这里用未 await 的写入，调度器可能读到旧值（旧写法在上一段 checkin_* 里同样存在，一并修正）。
+      await upsertSetting('checkin_delay_enabled', config.checkinDelayEnabled);
+      await upsertSetting('checkin_delay_min', config.checkinDelayMin);
+      await upsertSetting('checkin_delay_max', config.checkinDelayMax);
+      await upsertSetting('checkin_delay_unit', config.checkinDelayUnit);
+      updateCheckinDelaySettings();
     }
 
     if (body.balanceRefreshCron !== undefined) {
@@ -1731,6 +1860,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       let eventType: 'checkin' | 'balance' | 'proxy' | 'status' | 'token' = 'status';
       if (changedLabels.length === 1) {
         if (changedLabels[0].startsWith('签到 Cron')) eventType = 'checkin';
+        else if (changedLabels[0].startsWith('签到随机延迟')) eventType = 'checkin';
         else if (changedLabels[0].startsWith('余额刷新 Cron')) eventType = 'balance';
         else if (changedLabels[0] === '代理访问 Token') eventType = 'proxy';
       }
@@ -1744,7 +1874,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     return {
       success: true,
       message: '运行时设置已更新',
-      ...getRuntimeSettingsResponse(currentRequestIp),
+      ...(await getRuntimeSettingsResponse(currentRequestIp)),
     };
   });
 
@@ -1866,9 +1996,7 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     try {
       const result = await importBackup(parsedBody.data.data);
-      for (const item of result.appliedSettings) {
-        applyImportedSettingToRuntime(item.key, item.value);
-      }
+      applyImportedSettingsToRuntime(result.appliedSettings);
       if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
         await reloadBackupWebdavScheduler();
       }
@@ -1945,9 +2073,7 @@ export async function settingsRoutes(app: FastifyInstance) {
   app.post('/api/settings/backup/webdav/import', async (_, reply) => {
     try {
       const result = await importBackupFromWebdav();
-      for (const item of result.appliedSettings) {
-        applyImportedSettingToRuntime(item.key, item.value);
-      }
+      applyImportedSettingsToRuntime(result.appliedSettings);
       if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
         await reloadBackupWebdavScheduler();
       }

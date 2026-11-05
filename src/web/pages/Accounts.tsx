@@ -575,12 +575,15 @@ export default function Accounts() {
   const withLoading = async (
     key: string,
     fn: () => Promise<any>,
-    successMsg?: string,
+    // 第三参数可以是固定文案，也可以是从响应里取文案的函数：
+    // 全量签到这类「服务端才知道结果」的操作需要播报服务端文案（例如随机延迟的最迟完成时刻）。
+    successMsg?: string | ((res: any) => string),
   ) => {
     setActionLoading((s) => ({ ...s, [key]: true }));
     try {
-      await fn();
-      if (successMsg) toast.success(successMsg);
+      const res = await fn();
+      const message = typeof successMsg === 'function' ? successMsg(res) : successMsg;
+      if (message) toast.success(message);
     } catch (e: any) {
       toast.error(e.message || "操作失败");
     } finally {
@@ -1371,7 +1374,9 @@ export default function Accounts() {
                       withLoading(
                         "checkin-all",
                         () => api.triggerCheckinAll(),
-                        "已触发全部签到",
+                        // 开启随机延迟后服务端会回「已按随机延迟排期 N 个账号，最迟 HH:MM 完成」；
+                        // 关闭时服务端回的就是原来这句，所以旧行为不变。
+                        (res) => res?.message || "已触发全部签到",
                       )
                     }
                     disabled={actionLoading["checkin-all"]}
@@ -1454,7 +1459,8 @@ export default function Accounts() {
                   await withLoading(
                     "checkin-all",
                     () => api.triggerCheckinAll(),
-                    "已触发全部签到",
+                    // 与桌面端同一口径：优先播报服务端文案（含随机延迟的最迟完成时刻）。
+                    (res) => res?.message || "已触发全部签到",
                   );
                 }}
                 disabled={actionLoading["checkin-all"]}

@@ -144,6 +144,22 @@ export function getLocalDayRangeUtc(now = new Date()): {
   };
 }
 
+/**
+ * 本地当日终点的 epoch 毫秒（开区间上界，等于次日本地零点）。
+ *
+ * 与 getLocalDayRangeUtc 共用同一天界定义：那里返回 UTC SQL 字符串，本函数返回毫秒，
+ * 供需要参与算术运算的调用方（签到随机延迟的窗口压缩）使用。
+ * 刻意不用 setHours(23, 59, 59, 999)：夏令时切换日长度可变，而「本地零点 + DAY_MS」
+ * 恒等于次日零点，与 getLocalDayRangeUtc 的 endUtc 严格一致。
+ * 不要再新增内联的 setHours 日界算法（balanceService.ts:84-87、dashboardSnapshotService.ts:88-89 已是历史遗留的平行实现）。
+ */
+export function getLocalDayEndMs(input: Date | number = new Date()): number {
+  const now = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(now.getTime())) return Number.NaN;
+  const localStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  return localStart.getTime() + DAY_MS;
+}
+
 export function getLocalRangeStartUtc(days: number, now = new Date()): string {
   const normalizedDays = Math.max(1, Math.floor(days || 1));
   const localStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
