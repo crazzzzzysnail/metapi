@@ -43,7 +43,7 @@ import {
   parseBackupWebdavExportPayload,
 } from '../../contracts/settingsRoutePayloads.js';
 import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
-import { extractClientIp, findInvalidIpAllowlistEntries, isIpAllowed } from '../../middleware/auth.js';
+import { findInvalidIpAllowlistEntries, getRequestClientIp, isIpAllowed } from '../../middleware/auth.js';
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
@@ -924,7 +924,7 @@ function buildRuntimeDatabaseState(saved: RuntimeDatabaseConfig | null) {
 
 export async function settingsRoutes(app: FastifyInstance) {
   await app.get('/api/settings/runtime', async (request) => {
-    const currentAdminIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+    const currentAdminIp = getRequestClientIp(request);
     return await getRuntimeSettingsResponse(currentAdminIp);
   });
 
@@ -988,7 +988,7 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     const body = parsedBody.data as RuntimeSettingsBody;
     const changedLabels: string[] = [];
-    const currentRequestIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+    const currentRequestIp = getRequestClientIp(request);
     let pendingPayloadRules: typeof config.payloadRules | undefined;
 
     const webhookTouched = body.webhookUrl !== undefined || body.webhookEnabled !== undefined;
