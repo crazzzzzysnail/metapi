@@ -57,7 +57,7 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogStreamTimingColumns: (...args: unknown[]) => hasProxyLogStreamTimingColumnsMock(...args),
 }));
 
-import { insertProxyLog, parseProxyLogBillingDetails, withProxyLogSelectFields } from './proxyLogStore.js';
+import { insertProxyLog, parseProxyLogBillingDetails, extractProxyLogBillingSummary, withProxyLogSelectFields } from './proxyLogStore.js';
 
 describe('proxyLogStore', () => {
   beforeEach(() => {
@@ -268,5 +268,65 @@ describe('proxyLogStore', () => {
     });
     expect(dbInsertValuesMock.mock.calls[1][0].isStream).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].firstByteLatencyMs).toBeUndefined();
+  });
+
+  /**
+   * 列表页默认显示「分组/计费」两行，靠的就是这个摘要。
+   * 判据：只出界面要用的标量；缺字段留 null（前端据此省略该行），
+   * 全空则整条返回 null —— 不能给一个看起来有值的空对象。
+   */
+  describe('extractProxyLogBillingSummary', () => {
+    it('pulls group, ratio, tier and per-million prices out of the JSON text', () => {
+      const raw = JSON.stringify({
+        quotaType: 0,
+        usage: { promptTokens: 31, completionTokens: 56 },
+        pricing: { modelRatio: 37.5, groupRatio: 0.4, groupName: '组丁-chs', tierName: 'off_peak' },
+        breakdown: { inputPerMillion: 0.4, outputPerMillion: 1.6, totalCost: 0.000102 },
+      });
+
+      expect(extractProxyLogBillingSummary(raw)).toEqual({
+        groupName: '组丁-chs',
+        groupRatio: 0.4,
+        tierName: 'off_peak',
+        inputPerMillion: 0.4,
+        outputPerMillion: 1.6,
+      });
+    });
+
+    it('accepts an already-parsed object as well', () => {
+      expect(extractProxyLogBillingSummary({
+        pricing: { groupRatio: 0.15, groupName: 'grp-codex' },
+        breakdown: { inputPerMillion: 0.3, outputPerMillion: 1.8 },
+      })).toEqual({
+        groupName: 'grp-codex',
+        groupRatio: 0.15,
+        tierName: null,
+        inputPerMillion: 0.3,
+        outputPerMillion: 1.8,
+      });
+    });
+
+    it('keeps missing fields as null instead of inventing zeros', () => {
+      // 旧记录没有 groupName / tierName：必须如实为 null，
+      // 补 0 会让界面显示成"分组 0、倍率 ×0"这种凭空造出来的口径。
+      const summary = extractProxyLogBillingSummary(JSON.stringify({
+        pricing: { modelRatio: 1 },
+        breakdown: { inputPerMillion: 2 },
+      }));
+      expect(summary).toEqual({
+        groupName: null,
+        groupRatio: null,
+        tierName: null,
+        inputPerMillion: 2,
+        outputPerMillion: null,
+      });
+    });
+
+    it('returns null when there is nothing usable at all', () => {
+      expect(extractProxyLogBillingSummary(null)).toBeNull();
+      expect(extractProxyLogBillingSummary('')).toBeNull();
+      expect(extractProxyLogBillingSummary('not-json')).toBeNull();
+      expect(extractProxyLogBillingSummary(JSON.stringify({ pricing: {}, breakdown: {} }))).toBeNull();
+    });
   });
 });

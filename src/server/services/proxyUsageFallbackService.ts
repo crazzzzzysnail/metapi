@@ -5,6 +5,7 @@ import {
   fetchJsonWithShieldCookieRetry,
 } from './platforms/newApiShield.js';
 import { withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { tokensToUsd } from './billing/quotaScale.js';
 
 const SELF_LOG_FETCH_TIMEOUT_MS = 8_000;
 const SELF_LOG_PAGE_SIZE = 20;
@@ -12,7 +13,6 @@ const MATCH_LOOKBACK_MS = 25_000;
 const MATCH_LOOKAHEAD_MS = 120_000;
 const MATCH_MAX_CREATED_DELTA_MS = 90_000;
 const MATCH_MAX_LATENCY_DELTA_MS = 12_000;
-const QUOTA_PER_UNIT = 500_000;
 const SUPPORTED_USAGE_FALLBACK_PLATFORMS = new Set(['done-hub', 'one-hub', 'new-api', 'anyrouter', 'sub2api']);
 const ALWAYS_LOOKUP_SELF_LOG_PLATFORMS = new Set(['done-hub', 'one-hub', 'anyrouter', 'sub2api']);
 const PLATFORM_REQUIRES_USER_HEADER = new Set(['new-api', 'anyrouter']);
@@ -55,12 +55,23 @@ interface ProxyUsageFallbackResult extends ProxyUsage {
   usageSource: 'upstream' | 'self-log' | 'unknown';
 }
 
+/**
+ * self-log 里读到的计费元数据。
+ *
+ * ⚠️ D12 修复（2026-11-09）：四个比率改为**可选**。
+ * 旧实现一律 `normalizePositiveRatio(x, 1)`，把"上游没给这个字段"变成"值是 1"，
+ * 于是这些伪造出来的 1 会作为 override **完全绕开定价目录**——
+ * 而目录里才是真实倍率（实测 siteA 各分组 ×0.15、siteB default ×2）。
+ * 结果不是"少算一点"，而是按一个上游从未声明的 1× 记账。
+ *
+ * 新语义：字段缺失 = undefined = 不参与覆盖；只有显式给出的值才可信。
+ */
 export interface SelfLogBillingMeta {
-  modelRatio: number;
-  completionRatio: number;
-  cacheRatio: number;
-  cacheCreationRatio: number;
-  groupRatio: number;
+  modelRatio?: number;
+  completionRatio?: number;
+  cacheRatio?: number;
+  cacheCreationRatio?: number;
+  groupRatio?: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   promptTokensIncludeCache: boolean;
@@ -103,10 +114,15 @@ function roundCost(value: number): number {
   return Math.round(Math.max(0, value) * 1_000_000) / 1_000_000;
 }
 
-function normalizePositiveRatio(value: unknown, fallback: number): number {
+/**
+ * D12：读取可选比率 —— 缺失返回 undefined，**不兜底成 1**。
+ * 0 保留（免费模型的真实语义），与"上游没给这个字段"严格区分。
+ * （这里刻意不提供 fallback 参数：旧版 `normalizePositiveRatio(x, 1)` 的默认 1
+ *   正是 self-log 伪造倍率、绕开定价目录的根源。）
+ */
+function readOptionalRatio(value: unknown): number | undefined {
   const ratio = toNumber(value, Number.NaN);
-  if (Number.isFinite(ratio) && ratio >= 0) return ratio;
-  return fallback;
+  return Number.isFinite(ratio) && ratio >= 0 ? ratio : undefined;
 }
 
 function toTimestampMs(value: unknown): number {
@@ -268,7 +284,7 @@ function mapSelfLogItem(raw: unknown): SelfLogItem | null {
   };
 }
 
-function parseSelfLogBillingMeta(rawOther: unknown): SelfLogBillingMeta | null {
+export function parseSelfLogBillingMeta(rawOther: unknown): SelfLogBillingMeta | null {
   let payload = rawOther;
   if (typeof rawOther === 'string') {
     const trimmed = rawOther.trim();
@@ -283,23 +299,18 @@ function parseSelfLogBillingMeta(rawOther: unknown): SelfLogBillingMeta | null {
   if (!payload || typeof payload !== 'object') return null;
   const other = payload as Record<string, unknown>;
 
-  const modelRatio = normalizePositiveRatio(other.model_ratio ?? other.modelRatio, 1);
-  const completionRatio = normalizePositiveRatio(
-    other.completion_ratio ?? other.completionRatio,
-    1,
-  );
-  const cacheRatio = normalizePositiveRatio(
-    other.cache_ratio ?? other.cacheRatio,
-    1,
-  );
-  const cacheCreationRatio = normalizePositiveRatio(
+  // D12：一律用"有值才取、无值留 undefined"，不再以 1 兜底。
+  // 0 是合法值（免费模型的真实语义），必须与"缺失"区分开。
+  const modelRatio = readOptionalRatio(other.model_ratio ?? other.modelRatio);
+  const completionRatio = readOptionalRatio(other.completion_ratio ?? other.completionRatio);
+  const cacheRatio = readOptionalRatio(other.cache_ratio ?? other.cacheRatio);
+  const cacheCreationRatio = readOptionalRatio(
     other.cache_creation_ratio
       ?? other.cacheCreationRatio
       ?? other.create_cache_ratio
       ?? other.createCacheRatio,
-    1,
   );
-  const groupRatio = normalizePositiveRatio(other.group_ratio ?? other.groupRatio, 1);
+  const groupRatio = readOptionalRatio(other.group_ratio ?? other.groupRatio);
   const cacheReadTokens = toPositiveInt(
     other.cache_tokens ?? other.cacheTokens ?? other.cache_read_tokens ?? other.cacheReadTokens,
   );
@@ -310,23 +321,26 @@ function parseSelfLogBillingMeta(rawOther: unknown): SelfLogBillingMeta | null {
       ?? other.createCacheTokens,
   );
 
+  // "有意义"的判据改为**确实读到了东西**：某个比率存在，或存在缓存量。
+  // 旧判据 `modelRatio !== 1` 的问题在于：伪造的默认 1 会被当成"没数据"，
+  // 而真实给的 1（倍率恰为 1 的分组）又会被当成"没数据"——两个方向都错。
   const hasMeaningfulData = (
     cacheReadTokens > 0
     || cacheCreationTokens > 0
-    || modelRatio !== 1
-    || completionRatio !== 1
-    || cacheRatio !== 1
-    || cacheCreationRatio !== 1
-    || groupRatio !== 1
+    || modelRatio !== undefined
+    || completionRatio !== undefined
+    || cacheRatio !== undefined
+    || cacheCreationRatio !== undefined
+    || groupRatio !== undefined
   );
   if (!hasMeaningfulData) return null;
 
   return {
-    modelRatio,
-    completionRatio,
-    cacheRatio,
-    cacheCreationRatio,
-    groupRatio,
+    ...(modelRatio !== undefined ? { modelRatio } : {}),
+    ...(completionRatio !== undefined ? { completionRatio } : {}),
+    ...(cacheRatio !== undefined ? { cacheRatio } : {}),
+    ...(cacheCreationRatio !== undefined ? { cacheCreationRatio } : {}),
+    ...(groupRatio !== undefined ? { groupRatio } : {}),
     cacheReadTokens,
     cacheCreationTokens,
     promptTokensIncludeCache: true,
@@ -526,13 +540,13 @@ export function findBestSelfLogMatch(items: SelfLogItem[], input: SelfLogMatchIn
   return best;
 }
 
-function toQuotaCost(quota: number): number {
-  return roundCost(toPositiveInt(quota) / QUOTA_PER_UNIT);
+function toQuotaCost(quota: number, platform?: string | null): number {
+  return roundCost(tokensToUsd(toPositiveInt(quota), platform));
 }
 
-function toRecoveredCost(item: SelfLogItem): number {
+function toRecoveredCost(item: SelfLogItem, platform?: string | null): number {
   if (typeof item.recoveredCost === 'number' && item.recoveredCost > 0) return item.recoveredCost;
-  return toQuotaCost(item.quota);
+  return toQuotaCost(item.quota, platform);
 }
 
 export async function resolveProxyUsageWithSelfLogFallback(
@@ -583,7 +597,7 @@ export async function resolveProxyUsageWithSelfLogFallback(
       completionTokens: resolvedTokens.completionTokens,
       totalTokens: resolvedTokens.totalTokens,
       recoveredFromSelfLog: true,
-      estimatedCostFromQuota: toRecoveredCost(matched),
+      estimatedCostFromQuota: toRecoveredCost(matched, platform),
       selfLogBillingMeta: matched.billingMeta,
       usageSource: useMatchedTokens ? 'self-log' : fallbackUsageSource,
     };

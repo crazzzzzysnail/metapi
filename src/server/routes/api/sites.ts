@@ -442,6 +442,10 @@ export async function sitesRoutes(app: FastifyInstance) {
       balance: schema.accounts.balance,
       extraConfig: schema.accounts.extraConfig,
     }).from(schema.accounts).all();
+    // T8.9：站点列表要如实展示每个站点的汇率状态（自动探测 / 手动覆盖 / 未知）。
+    const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
+    const billingProfileBySiteId: Record<number, typeof schema.siteBillingProfiles.$inferSelect> = {};
+    for (const row of billingProfileRows) billingProfileBySiteId[row.siteId] = row;
 
     const totalBalanceBySiteId: Record<number, number> = {};
     const subscriptionBySiteId: Record<number, SiteSubscriptionAggregate | undefined> = {};
@@ -454,7 +458,58 @@ export async function sitesRoutes(app: FastifyInstance) {
       ...site,
       totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
       subscriptionSummary: subscriptionBySiteId[site.id] || null,
+      billingProfile: (() => {
+        const p = billingProfileBySiteId[site.id];
+        if (!p) return { cnyPerUsd: null, rateSource: null, quotaPerUnit: null, quotaSource: null, capturedAt: null };
+        return {
+          cnyPerUsd: p.cnyPerUsd ?? null,
+          rateSource: p.rateSource ?? null,
+          quotaPerUnit: p.quotaPerUnit ?? null,
+          quotaSource: p.quotaSource ?? null,
+          capturedAt: p.capturedAt ?? null,
+        };
+      })(),
     }));
+  });
+
+  // T8.10：计费参数（汇率/标尺）的人工维护与重新探测
+  app.post<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/billing-profile', async (request, reply) => {
+    const id = parseInt(request.params.id);
+    if (Number.isNaN(id)) return reply.code(400).send({ success: false, message: '无效的站点 ID' });
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    if (!site) return reply.code(404).send({ success: false, message: '站点不存在' });
+
+    const body = (request.body || {}) as Record<string, unknown>;
+    const mode = String(body.mode || 'manual').trim().toLowerCase();
+
+    if (mode === 'probe') {
+      const { probeAndPersistSiteBillingProfile } = await import('../../services/billing/siteBillingProfileService.js');
+      const profile = await probeAndPersistSiteBillingProfile(
+        { id: site.id, url: site.url },
+        async (url, init) => {
+          const { fetch } = await import('undici');
+          const res = await fetch(url, init as any);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        },
+      );
+      return { success: true, profile };
+    }
+
+    const { setManualBillingOverrides } = await import('../../services/billing/siteBillingProfileService.js');
+    const readOverride = (key: string): number | null | undefined => {
+      if (!(key in body)) return undefined;
+      const raw = body[key];
+      if (raw === null || raw === '') return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const profile = await setManualBillingOverrides({
+      siteId: site.id,
+      cnyPerUsd: readOverride('cnyPerUsd'),
+      quotaPerUnit: readOverride('quotaPerUnit'),
+    });
+    return { success: true, profile };
   });
 
   // Add a site
@@ -728,6 +783,22 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     invalidateSiteCaches();
+
+    // S6 / T8.4：站点保存后异步探测一次计费参数（汇率/标尺）。
+    // 失败不影响本次保存结果 —— 探测不到就留 null，界面显示"汇率未知"。
+    void import('../../services/billing/siteBillingProfileService.js')
+      .then(({ probeAndPersistSiteBillingProfile }) => probeAndPersistSiteBillingProfile(
+        { id, url: nextUrl },
+        async (probeUrl, init) => {
+          const { fetch } = await import('undici');
+          const { withSiteRecordProxyRequestInit } = await import('../../services/siteProxy.js');
+          // 该 helper 是同步的且吃的是站点记录（含代理与自定义头），不是 URL
+          const res = await fetch(probeUrl, withSiteRecordProxyRequestInit(existingSite, init as any));
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        },
+      ))
+      .catch(() => {});
 
     return await loadSiteWithApiEndpoints(id);
   });

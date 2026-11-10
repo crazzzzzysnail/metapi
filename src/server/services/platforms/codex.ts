@@ -1,4 +1,4 @@
-import { BasePlatformAdapter, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
+import { BasePlatformAdapter, unsupportedBalance, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
   let normalized = (baseUrl || '').trim();
@@ -29,7 +29,8 @@ export class CodexAdapter extends BasePlatformAdapter {
   }
 
   async getBalance(_baseUrl: string, _accessToken: string): Promise<BalanceInfo> {
-    return { balance: 0, used: 0, quota: 0 };
+    // T2.4：不再伪造 0，改为显式声明无余额接口。
+    return unsupportedBalance('codex oauth connections do not expose a balance API');
   }
 
   async getModels(_baseUrl: string, _token: string): Promise<string[]> {

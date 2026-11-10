@@ -3,6 +3,7 @@ import {
   parseStoredUtcDateTime,
   type StoredUtcDateTimeInput,
 } from './localTimeService.js';
+import { tokensToUsd } from './billing/quotaScale.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -14,6 +15,8 @@ interface ProxyLogLike {
   latencyMs: number | null;
   totalTokens: number | null;
   estimatedCost: number | null;
+  // 站点平台，用于缺省费用时的额度标尺换算；缺省按 new-api 口径处理。
+  sitePlatform?: string | null;
 }
 
 interface ModelAnalysisResult {
@@ -114,11 +117,13 @@ function resolveModelName(log: ProxyLogLike): string {
 export function resolveModelAnalysisSpend(
   log: Pick<ProxyLogLike, 'estimatedCost'>,
   tokens: number,
+  platform?: string | null,
 ): number {
   const explicit = toSafeNumber(log.estimatedCost);
   if (explicit > 0) return explicit;
   if (tokens <= 0) return 0;
-  return tokens / 500000;
+  // 标尺统一走 quotaScale；缺省平台沿用 new-api 口径（500_000），与历史行为一致。
+  return tokensToUsd(tokens, platform ?? 'new-api');
 }
 
 function finalizeModelAnalysis(
@@ -213,7 +218,7 @@ export function buildModelAnalysis(
 
     const model = resolveModelName(log);
     const tokens = toPositiveInt(log.totalTokens);
-    const spend = Math.max(0, resolveModelAnalysisSpend(log, tokens));
+    const spend = Math.max(0, resolveModelAnalysisSpend(log, tokens, log.sitePlatform));
     const latency = toPositiveInt(log.latencyMs);
     const isSuccess = (log.status || '').toLowerCase() === 'success';
 

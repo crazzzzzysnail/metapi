@@ -116,7 +116,15 @@ describe("stats proxy logs routes", () => {
           totalTokens: 10,
           estimatedCost: 0.2,
           createdAt: timestamps[1],
-          billingDetails: JSON.stringify({ id: "failed-gpt" }),
+          // 本用例筛选 status=failed & search=gpt，命中的就是这一条（见下方 items[0] 断言）。
+          // 给它一份真实的计费明细，好让「分组/计费」摘要能被正向校验 ——
+          // 原先这里只是 {"id":"failed-gpt"}，任何映射漏传都会表现成"字段缺失但测试全绿"。
+          billingDetails: JSON.stringify({
+            quotaType: 0,
+            usage: { promptTokens: 8, completionTokens: 2 },
+            pricing: { modelRatio: 1, groupRatio: 0.4, groupName: 'vip', tierName: 'off_peak' },
+            breakdown: { inputPerMillion: 0.4, outputPerMillion: 1.6, totalCost: 0.2 },
+          }),
         },
         {
           accountId: account.id,
@@ -189,6 +197,18 @@ describe("stats proxy logs routes", () => {
     expect(body.items[0]?.isStream).toBe(false);
     expect(body.items[0]?.firstByteLatencyMs).toBe(12);
     expect(body.items[0]).not.toHaveProperty("billingDetails");
+    /**
+     * 「分组/计费」两行默认显示依赖 billingSummary，必须**正向**断言它存在且值取对。
+     * 只断言"不带 billingDetails"是不够的：曾有一版实现把摘要开关传给了取数层、
+     * 却没传给映射函数，结果列查出来了但字段不输出 —— 界面全空而测试全绿。
+     */
+    expect(body.items[0]?.billingSummary).toEqual({
+      groupName: "vip",
+      groupRatio: 0.4,
+      tierName: "off_peak",
+      inputPerMillion: 0.4,
+      outputPerMillion: 1.6,
+    });
     expect(body.clientOptions).toEqual([
       { value: "family:codex", label: "协议 · Codex" },
     ]);

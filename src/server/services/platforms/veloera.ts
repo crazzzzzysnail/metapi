@@ -1,5 +1,6 @@
 import { BasePlatformAdapter, CheckinResult, BalanceInfo } from './base.js';
 import { resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
+import { quotaToUsd } from '../billing/quotaScale.js';
 
 export class VeloeraAdapter extends BasePlatformAdapter {
   readonly platformName = 'veloera';
@@ -47,11 +48,17 @@ export class VeloeraAdapter extends BasePlatformAdapter {
       headers: this.veloeraHeaders(accessToken, platformUserId),
     });
     const data = res?.data;
-    const quota = (data?.quota || 0) / 1000000;
-    const used = (data?.used_quota || 0) / 1000000;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 1000000) : undefined;
-    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? (data.today_quota_consumption / 1000000) : undefined;
-    return { balance: quota - used, used, quota, todayIncome, todayQuotaConsumption };
+    // veloera 的 quota 同样是剩余额度，但标尺是 1_000_000 额度 = 1 USD。
+    // 旧实现又减一次 used，与 one-api 同族的双扣缺陷。
+    const quota = quotaToUsd(data?.quota, this.platformName);
+    const used = quotaToUsd(data?.used_quota, this.platformName);
+    const todayIncome = Number.isFinite(data?.today_income)
+      ? quotaToUsd(data.today_income, this.platformName)
+      : undefined;
+    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption)
+      ? quotaToUsd(data.today_quota_consumption, this.platformName)
+      : undefined;
+    return { balance: quota, used, quota: quota + used, todayIncome, todayQuotaConsumption };
   }
 
   async getModels(baseUrl: string, apiToken: string, _platformUserId?: number): Promise<string[]> {

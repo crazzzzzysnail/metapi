@@ -80,7 +80,26 @@ function buildPostgresPoolOptions(
   return poolOptions;
 }
 
+/** S6 事故防线：导出当前 SQLite 连接的物理路径，供破坏性操作前核对（:memory: 原样返回）。 */
+export function getCurrentSqliteFilePath(): string {
+  return resolveSqlitePath();
+}
+
+/**
+ * 解析当前 SQLite 连接的物理路径。
+ *
+ * S6 事故防线：`DB_URL` 的优先级**低于**显式设置的 `DATA_DIR`。
+ * 大量测试只设 DATA_DIR 做隔离，若环境/先前测试残留了 DB_URL（备份往返用例、
+ * .env 里的默认值都会造成这种残留），连接就会绕过临时目录直接命中仓库真实库——
+ * 那次站点数据被覆盖的事故正是这个机制。现在只要 DATA_DIR 是非默认的具体目录，
+ * 就无条件以它为准；只有"没设"或"就是仓库 ./data"两种情况才按 DB_URL / 兜底走。
+ */
 function resolveSqlitePath(): string {
+  const explicitDataDir = (process.env.DATA_DIR || '').trim();
+  if (explicitDataDir && !isDefaultRepoDataDir(explicitDataDir)) {
+    return resolve(`${explicitDataDir}/hub.db`);
+  }
+
   const raw = (config.dbUrl || '').trim();
   if (!raw) {
     const isolatedVitestPath = resolveVitestSqlitePath();
@@ -199,6 +218,10 @@ function ensureTokenManagementSchema() {
   }
   if (!tableColumnExists('account_tokens', 'value_status')) {
     execSqliteLegacyCompat("ALTER TABLE account_tokens ADD COLUMN value_status text NOT NULL DEFAULT 'ready';");
+  }
+  // 令牌实际 auto 链路（0029）。null 与 '[]' 含义不同，故不设默认值。
+  if (!tableColumnExists('account_tokens', 'auto_groups')) {
+    execSqliteLegacyCompat('ALTER TABLE account_tokens ADD COLUMN auto_groups text;');
   }
 
   execSqliteStatement(`

@@ -21,6 +21,7 @@ import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
+import { formatBalance } from '../numberFormat.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
@@ -68,6 +69,14 @@ type SiteRow = {
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
+  /** S6 / T8.9：站点计费档案（汇率/标尺及其来源）。缺省表示从未探测。 */
+  billingProfile?: {
+    cnyPerUsd: number | null;
+    rateSource: 'auto' | 'manual' | null;
+    quotaPerUnit: number | null;
+    quotaSource: 'auto' | 'manual' | null;
+    capturedAt: string | null;
+  } | null;
   subscriptionSummary?: SiteSubscriptionSummary | null;
   createdAt?: string;
   postRefreshProbeEnabled?: boolean;
@@ -138,8 +147,12 @@ function buildSiteApiEndpointSummary(site?: Pick<SiteRow, 'apiEndpoints'> | null
   return `${enabledCount}/${endpoints.length} 条启用`;
 }
 
+// T8.1 / N3：改为转调统一的金额格式化，保留函数名以免动到 7 处调用点。
+// 精度从"恒定 2 位"变成按量级分档（≥1000→2、≥1→3、否则 6），
+// 这样 $0.00001/M 这类极小单价不会全显示成 $0.00。
 function formatUsd(value?: number | null): string {
-  return `$${(value || 0).toFixed(2)}`;
+  // 一-1：余额列固定 2 位小数，只有小于 1 才展开有效位数。
+  return formatBalance(value);
 }
 
 function resolveSiteCreatedSessionLabel(platform?: string | null): string {
@@ -366,6 +379,16 @@ export default function Sites() {
   const [probeScope, setProbeScope] = useState<'single' | 'all'>('single');
   const [probeSaving, setProbeSaving] = useState(false);
   const [probeLatencyThreshold, setProbeLatencyThreshold] = useState('0');
+  // S6 / T8.10：计费参数（汇率/标尺）折叠区。空串表示"未维护"，不是 0。
+  const [billingCnyRate, setBillingCnyRate] = useState('');
+  const [billingQuotaPerUnit, setBillingQuotaPerUnit] = useState('');
+  const [billingSourceInfo, setBillingSourceInfo] = useState<{
+    rateSource: 'auto' | 'manual' | null;
+    quotaSource: 'auto' | 'manual' | null;
+    capturedAt: string | null;
+  }>({ rateSource: null, quotaSource: null, capturedAt: null });
+  const [billingAdvancedOpen, setBillingAdvancedOpen] = useState(false);
+  const [billingSaving, setBillingSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   type ProbeLogEntry = { time: string; text: string; color?: string };
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
@@ -448,6 +471,141 @@ export default function Sites() {
     background: 'var(--color-bg)',
     color: 'var(--color-text-primary)',
   } as const;
+
+  /**
+   * S6 / T8.10：编辑站点的「计费参数」区块。
+   *
+   * VPS 实测反馈的四点调整：
+   *  - 标题去掉「（高级）」，避免用户以为这不是常规设置；
+   *  - 位置从弹窗末尾移到「API 请求地址池」之前（汇率/标尺决定这个站点花多少钱，
+   *    属于首要信息，不该排在最末）；
+   *  - 默认折叠，展开与否由 billingAdvancedOpen 控制；
+   *  - 容器、标题字号、按钮样式与「API 请求地址池」「站点自定义请求头」完全一致，
+   *    不再用 borderTop + ▸/▾ 的另类写法。
+   */
+  const billingProfileSection = (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: 12,
+        border: '1px solid var(--color-border)',
+        borderRadius: 'var(--radius-sm)',
+        background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>
+          {tr('计费参数')}
+        </div>
+        <button
+          type="button"
+          onClick={() => setBillingAdvancedOpen((prev) => !prev)}
+          className="btn btn-ghost"
+          style={{ border: '1px solid var(--color-border)' }}
+        >
+          {billingAdvancedOpen ? tr('收起') : tr('展开')}
+        </button>
+      </div>
+      {!billingAdvancedOpen ? null : (
+        <>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <input
+              placeholder={tr('人民币对美元汇率（如 7.3）')}
+              value={billingCnyRate}
+              onChange={(e) => setBillingCnyRate(e.target.value)}
+              style={{ ...formInputStyle, flex: '1 1 200px' }}
+            />
+            <input
+              placeholder={tr('额度标尺（留空按平台默认）')}
+              value={billingQuotaPerUnit}
+              onChange={(e) => setBillingQuotaPerUnit(e.target.value)}
+              style={{ ...formInputStyle, flex: '1 1 200px' }}
+            />
+          </div>
+          {/* 一-3：两个输入框的"留空"含义不同，过去共用一句说明，容易被读成
+              "两个都留空就是都不知道"。这里拆成逐字段标注，各自写清留空的结果。 */}
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
+            {tr('汇率：留空表示未知。切到人民币时，汇率未知的站点会被排除出合计并提示数量。')}
+            <br />
+            {tr('额度标尺：留空则使用该平台的默认换算，不是按 0 计算。')}
+            {billingSourceInfo.capturedAt ? (
+              <>
+                <br />
+                {tr('最近自动探测')}：{new Date(billingSourceInfo.capturedAt).toLocaleString()}
+                （{tr('汇率')} {billingSourceInfo.rateSource === 'manual' ? tr('手动') : billingSourceInfo.rateSource === 'auto' ? tr('自动') : tr('未知')}
+                ，{tr('标尺')} {billingSourceInfo.quotaSource === 'manual' ? tr('手动') : billingSourceInfo.quotaSource === 'auto' ? tr('自动') : tr('未知')}）
+              </>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              disabled={billingSaving}
+              onClick={async () => {
+                if (editor?.mode !== 'edit') return;
+                setBillingSaving(true);
+                try {
+                  const res = await api.saveSiteBillingProfile(editor.editingSiteId, {
+                    mode: 'probe',
+                  });
+                  const rate = Number(res?.profile?.cnyPerUsd);
+                  setBillingCnyRate(Number.isFinite(rate) && rate > 0 ? String(rate) : '');
+                  const scale = Number(res?.profile?.quotaPerUnit);
+                  setBillingQuotaPerUnit(Number.isFinite(scale) && scale > 0 ? String(scale) : '');
+                  setBillingSourceInfo({
+                    rateSource: res?.profile?.rateSource ?? null,
+                    quotaSource: res?.profile?.quotaSource ?? null,
+                    capturedAt: res?.profile?.capturedAt ?? null,
+                  });
+                  toast.success(res?.profile?.cnyPerUsd ? tr('已探测到汇率') : tr('上游未提供汇率，保持未知'));
+                } catch (err: any) {
+                  toast.error(err?.message || tr('探测失败'));
+                } finally {
+                  setBillingSaving(false);
+                }
+              }}
+            >
+              {billingSaving ? tr('探测中...') : tr('探测上游汇率')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={billingSaving}
+              onClick={async () => {
+                if (editor?.mode !== 'edit') return;
+                setBillingSaving(true);
+                try {
+                  // 空串 → null：显式清除覆盖，回到"未知"而不是提交 0
+                  const parseOrNull = (raw: string): number | null => {
+                    const trimmed = raw.trim();
+                    if (!trimmed) return null;
+                    const n = Number(trimmed);
+                    return Number.isFinite(n) && n > 0 ? n : null;
+                  };
+                  await api.saveSiteBillingProfile(editor.editingSiteId, {
+                    mode: 'manual',
+                    cnyPerUsd: parseOrNull(billingCnyRate),
+                    quotaPerUnit: parseOrNull(billingQuotaPerUnit),
+                  });
+                  toast.success(tr('计费参数已保存'));
+                } catch (err: any) {
+                  toast.error(err?.message || tr('保存失败'));
+                } finally {
+                  setBillingSaving(false);
+                }
+              }}
+            >
+              {tr('保存计费参数')}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
 
   const load = async () => {
     try {
@@ -569,6 +727,18 @@ export default function Sites() {
     setProbeModel(typeof site.postRefreshProbeModel === 'string' ? site.postRefreshProbeModel : '');
     setProbeScope(site.postRefreshProbeScope === 'all' ? 'all' : 'single');
     setProbeLatencyThreshold(String(site.postRefreshProbeLatencyThresholdMs ?? 0));
+    // S6 / T8.10：回填计费参数。null 一律留空串——"未维护"与"值为 0"必须可区分。
+    {
+      const profile = site.billingProfile;
+      setBillingCnyRate(profile?.cnyPerUsd != null ? String(profile.cnyPerUsd) : '');
+      setBillingQuotaPerUnit(profile?.quotaPerUnit != null ? String(profile.quotaPerUnit) : '');
+      setBillingSourceInfo({
+        rateSource: profile?.rateSource ?? null,
+        quotaSource: profile?.quotaSource ?? null,
+        capturedAt: profile?.capturedAt ?? null,
+      });
+      setBillingAdvancedOpen(false);
+    }
     setProbeLog([]);
     setProbeCompleted(false);
     probeAbortRef.current?.abort();
@@ -1644,6 +1814,9 @@ export default function Sites() {
               </div>
             </div>
           ) : null}
+          {/* S6 / T8.10：计费参数（一-5）。放在「API 请求地址池」之前 ——
+              汇率与标尺决定这个站点实际花多少钱，属于首要信息，不该排在弹窗末尾。 */}
+          {billingProfileSection}
           <div
             style={{
               display: 'flex',
@@ -2248,6 +2421,19 @@ export default function Sites() {
                         />
                       )}
                     />
+                    {/* S6 / T8.9：移动端同样给出汇率状态，与桌面表格保持一致口径。 */}
+                    <MobileField
+                      label="汇率"
+                      value={(
+                        <span className={`badge ${(Number(site.billingProfile?.cnyPerUsd) > 0) ? (site.billingProfile?.rateSource === 'manual' ? 'badge-info' : 'badge-success') : 'badge-warning'}`} style={{ fontSize: 11 }}>
+                          {(() => {
+                            const rate = Number(site.billingProfile?.cnyPerUsd);
+                            if (!(Number.isFinite(rate) && rate > 0)) return tr('汇率未知');
+                            return `¥${rate}${site.billingProfile?.rateSource === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`;
+                          })()}
+                        </span>
+                      )}
+                    />
                     <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
                     {isExpanded ? (
                       <div className="mobile-card-extra">
@@ -2394,6 +2580,9 @@ export default function Sites() {
                   <th>名称</th>
                   <th>外部签到站URL</th>
                   <th>总余额</th>
+                  {/* S6 / T8.9：汇率状态列。自动探测 / 手动覆盖 / 未知三种可区分，
+                      未知意味着该站点不会计入人民币合计（R7）。 */}
+                  <th>汇率</th>
                   <th>状态</th>
                   <th>代理</th>
                   <th>权重</th>
@@ -2469,6 +2658,27 @@ export default function Sites() {
                         balance={site.totalBalance}
                         summary={site.subscriptionSummary}
                       />
+                    </td>
+                    <td>
+                      {(() => {
+                        // T8.9：三态区分。null 汇率一律标「未知」，不显示换算值。
+                        const profile = site.billingProfile;
+                        const rate = Number(profile?.cnyPerUsd);
+                        const known = Number.isFinite(rate) && rate > 0;
+                        if (!known) {
+                          return (
+                            <span className="badge badge-warning" style={{ fontSize: 11 }} title="未探测到汇率，该站点不计入人民币合计；可在编辑弹窗的「计费参数」中手动填写。">
+                              {tr('汇率未知')}
+                            </span>
+                          );
+                        }
+                        const source = String(profile?.rateSource || '');
+                        return (
+                          <span className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'}`} style={{ fontSize: 11 }} title={source === 'manual' ? tr('用户手动维护') : tr('自动探测')}>
+                            ¥{rate}{source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td>
                       <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>

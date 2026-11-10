@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { fallbackTokenCost } from './modelPricingService.js';
+import { tokensToUsd } from './billing/quotaScale.js';
 import {
   getLocalRangeStartDayKey,
   getResolvedTimeZone,
@@ -166,9 +167,8 @@ function resolveSummarySpend(params: {
   if (explicit > 0) return explicit;
   const tokens = normalizeNonNegativeInt(params.totalTokens);
   if (tokens <= 0) return 0;
-  return String(params.platform || '').trim().toLowerCase() === 'veloera'
-    ? tokens / 1_000_000
-    : tokens / 500_000;
+  // 标尺统一从 quotaScale 取：veloera 是 1_000_000，此前硬编码比较已收敛。
+  return tokensToUsd(tokens, params.platform);
 }
 
 function resolveSiteSpend(params: {
@@ -186,12 +186,14 @@ function resolveSiteSpend(params: {
 function resolveModelSpend(params: {
   estimatedCost: number | null;
   totalTokens: number | null;
+  platform: string | null;
 }) {
   const explicit = normalizeNonNegativeFloat(params.estimatedCost);
   if (explicit > 0) return explicit;
   const tokens = normalizeNonNegativeInt(params.totalTokens);
   if (tokens <= 0) return 0;
-  return tokens / 500_000;
+  // D14 后半：模型维度此前恒定 ÷500000，对 veloera 高估 2 倍。
+  return tokensToUsd(tokens, params.platform);
 }
 
 function resolveModelName(row: ProxyLogProjectionRow): string {
@@ -440,6 +442,7 @@ function buildProjectionBatchDelta(rows: ProxyLogProjectionRow[]): ProjectionBat
     const modelSpend = resolveModelSpend({
       estimatedCost: row.estimatedCost,
       totalTokens: row.totalTokens,
+      platform: row.sitePlatform,
     });
 
     const siteDayKey = `${localDay}:${siteId}`;

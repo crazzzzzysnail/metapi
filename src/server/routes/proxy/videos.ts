@@ -162,9 +162,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
           totalTokens: 0,
         });
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost ?? 0, upstreamModel)
         ));
-        recordDownstreamCostUsage(request, estimatedCost);
+        recordDownstreamCostUsage(request, estimatedCost ?? 0);
         return reply.code(upstream.status).send(rewriteVideoResponsePublicId(data, mapping.publicId));
       } catch (error: any) {
         const status = error instanceof SiteApiEndpointRequestError ? (error.status || 0) : 0;

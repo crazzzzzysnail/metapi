@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api } from '../api.js';
+import { formatMoney } from '../numberFormat.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import { useToast } from '../components/Toast.js';
@@ -9,7 +10,7 @@ import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
-import { renderGroupPricingValue } from './helpers/modelPricingPresentation.js';
+import { formatAutoTierLabel, renderGroupPricingValue, type ModelGroupPricingPresentation } from './helpers/modelPricingPresentation.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
@@ -21,14 +22,9 @@ interface ModelTokenInfo {
   isDefault: boolean;
 }
 
-interface ModelGroupPricing {
-  quotaType: number;
-  inputPerMillion?: number;
-  outputPerMillion?: number;
-  perCallInput?: number;
-  perCallOutput?: number;
-  perCallTotal?: number;
-}
+// 复用展示层的定价形状，避免在此重复声明一份"看起来一样但少了 evidence 字段"的副本
+// —— 那会让后端传来的可信度信息在类型层被静默丢弃（T1.29）。
+type ModelGroupPricing = ModelGroupPricingPresentation;
 
 interface ModelPricingSource {
   siteId: number;
@@ -38,6 +34,8 @@ interface ModelPricingSource {
   ownerBy: string | null;
   enableGroups: string[];
   groupPricing: Record<string, ModelGroupPricing>;
+  /** auto 聚合链路的成员分组（T4.4）。 */
+  autoGroups?: string[];
 }
 
 interface ModelAccountInfo {
@@ -161,6 +159,56 @@ export default function Models() {
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
+  // S6 / T8.7–T8.9：显示货币（USD/CNY）与站点汇率档案。
+  // 汇率未知绝不猜测换算；合计处排除并提示数量。
+  const [displayCurrency, setDisplayCurrency] = useState<'USD' | 'CNY'>('USD');
+  const [pricingDisplayMode, setPricingDisplayMode] = useState<'official' | 'effective'>('official');
+  const [billingProfiles, setBillingProfiles] = useState<Map<number, number | null>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [runtimeInfo, sitesRes] = await Promise.all([
+          api.getRuntimeSettings().catch(() => null),
+          api.getSites().catch(() => [] as any[]),
+        ]);
+        if (cancelled) return;
+        const currency = String((runtimeInfo as any)?.displayCurrency || 'USD').toUpperCase();
+        setDisplayCurrency(currency === 'CNY' ? 'CNY' : 'USD');
+        const mode = String((runtimeInfo as any)?.pricingDisplayMode || 'official').toLowerCase();
+        setPricingDisplayMode(mode === 'effective' ? 'effective' : 'official');
+        const list = Array.isArray(sitesRes) ? sitesRes : ((sitesRes as any)?.sites || []);
+        const map = new Map<number, number | null>();
+        for (const site of list) {
+          const id = Number(site?.id);
+          if (!Number.isFinite(id) || id <= 0) continue;
+          const rate = Number(site?.billingProfile?.cnyPerUsd);
+          map.set(id, Number.isFinite(rate) && rate > 0 ? rate : null);
+        }
+        setBillingProfiles(map);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  /**
+   * 按站点汇率把美元单价换算成展示金额字符串。
+   * 汇率未知时返回 null —— 调用方必须显式渲染"汇率未知"，不得回退原数字加 ¥。
+   */
+  const convertSitePrice = useCallback((siteId: number, usd: number | undefined): string | null => {
+    if (displayCurrency === 'USD') {
+      return usd == null ? null : formatMoney(usd);
+    }
+    const rate = billingProfiles.get(Number(siteId));
+    if (usd == null || rate == null) return null;
+    return formatMoney(usd * rate, 'CNY', 1);
+  }, [displayCurrency, billingProfiles]);
+  /** CNY 下汇率未知的站点数，用于列表页顶部的排除提示（R3：逐站换算，缺汇率排除）。 */
+  const unknownRateSiteCount = useMemo(() => {
+    if (displayCurrency !== 'CNY') return 0;
+    let count = 0;
+    for (const rate of billingProfiles.values()) if (rate == null) count += 1;
+    return count;
+  }, [displayCurrency, billingProfiles]);
   const location = useLocation();
   const siteIdByName = useMemo(() => {
     const index = new Map<string, number>();
@@ -549,6 +597,12 @@ export default function Models() {
               <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
                 {tr('共')} {filteredModels.length} {tr('个模型')}
               </span>
+              {/* S6 / T8.7：CNY 下汇率未知的站点必须显式说明被排除，不能静默少算。 */}
+              {unknownRateSiteCount > 0 && (
+                <span className="badge badge-warning" style={{ fontSize: 12, fontWeight: 500 }}>
+                  {`${tr('已排除')} ${unknownRateSiteCount} ${tr('个汇率未知的站点')}`}
+                </span>
+              )}
             </h2>
             {(activeBrand || activeSite) && (
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
@@ -754,7 +808,7 @@ export default function Models() {
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                   {Object.entries(source.groupPricing).map(([group, pricing]) => (
                                     <span key={group} className="badge badge-info">
-                                      {group}: {renderGroupPricingValue(pricing)}
+                                      {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
                                     </span>
                                   ))}
                                 </div>
@@ -953,7 +1007,7 @@ export default function Models() {
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                           {Object.entries(source.groupPricing).map(([group, pricing]) => (
                                             <span key={group} className="badge badge-info">
-                                              {group}: {renderGroupPricingValue(pricing)}
+                                              {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
                                             </span>
                                           ))}
                                         </div>

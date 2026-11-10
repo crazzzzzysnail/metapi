@@ -64,11 +64,9 @@ export function formatIso(value: string | null | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function formatMoney(value: number): string {
-  if (!Number.isFinite(value)) return '$0';
-  if (value >= 1) return `$${value.toFixed(3)}`;
-  return `$${value.toFixed(6)}`;
-}
+// T8.1 / N3：直接复用 numberFormat 的统一实现，本模块只做再导出。
+// （此前这里自带一套 ≥1→3 位、否则 6 位的精度规则，与另两个页面不一致。）
+export { formatMoney } from '../../numberFormat.js';
 
 export function formatCompactTokens(value: number): string {
   if (!Number.isFinite(value)) return '0';

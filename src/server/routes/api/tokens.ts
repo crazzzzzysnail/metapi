@@ -2,6 +2,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { db, schema } from '../../db/index.js';
+import { normalizeGroupList } from '../../services/platforms/base.js';
 import { requireInsertedRowId } from '../../db/insertHelpers.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import {
@@ -24,6 +25,7 @@ import {
   type ModelGroupPricing,
   type ModelPricingCatalog,
 } from '../../services/modelPricingService.js';
+import { isAutoGroupName } from '../../services/billing/groupNames.js';
 import {
   clearRouteDecisionSnapshot,
   clearRouteDecisionSnapshots,
@@ -522,27 +524,113 @@ type RouteChannelSummary = {
   siteNames: Set<string>;
 };
 
-type AccountTokenLite = Pick<typeof schema.accountTokens.$inferSelect, 'id' | 'accountId' | 'name' | 'tokenGroup' | 'enabled' | 'isDefault' | 'token' | 'valueStatus'>;
+type AccountTokenLite = Pick<typeof schema.accountTokens.$inferSelect, 'id' | 'accountId' | 'name' | 'tokenGroup' | 'enabled' | 'isDefault' | 'token' | 'valueStatus' | 'autoGroups'>;
+
+/**
+ * 解析落库的 auto 链路 JSON。
+ * 三态必须保留：null（未同步到）/ []（上游明确给空）/ [...]（实际链路）。
+ * 存成非法 JSON 时按 null 处理，不能猜成空链路 —— 那会把"没数据"显示成"无链路"。
+ */
+function parseStoredAutoGroups(raw: unknown): string[] | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return normalizeGroupList(parsed);
+  } catch {
+    return null;
+  }
+}
 
 type RouteChannelHealthStatus = 'healthy' | 'degraded' | 'cooling' | 'unavailable' | 'disabled';
+
+/**
+ * auto 分组在**上游目录里是真实存在的一档**，但它不是一个价。
+ * VPS 实测（siteA /api/pricing）：`group_ratio.auto = 1`，而 `usable_group.auto`
+ * 的官方说明是「此分组无效。所有默认key禁止删除。」—— 上游自己就把 auto 排除出计价口径。
+ * 因此绝不能用 `auto` 去查目录价（那会拿到一个未经适用的 ×1），
+ * 必须改用令牌自己的链路列表（`/api/token/` 返回的 `auto_groups`）。
+ *
+ * 判据本体在 services/billing/groupNames 的 isAutoGroupName —— 与实扣计价共用一份，防止两处漂移。
+ */
+
+/**
+ * 解析路由通道应显示的计费分组（三-1）。
+ *
+ * 优先级来自"哪个分组真正决定这次请求被怎么扣钱"：
+ *   ① 令牌显式分组（不是 auto）→ 直接用；
+ *   ② 令牌是 auto 且有链路列表 → 取链路里**第一个**模型可用的分组。上游按列表顺序
+ *      命中第一个可用分组，实测 test 令牌为 [grp-codex, grp-codex-pro, 组丁-chs]，
+ *      其 group_ratio 分别是 0.15 / 0.3 / 0.4 —— 取错一档就是取错钱。
+ *      具体命中哪一档还要看模型是否声明该分组，由调用方在目录里二次筛选。
+ *   ③ auto 但没有链路 → 未知，明确说明原因，绝不退回 auto 那一档。
+ *
+ * 为什么是"第一个"而不是"最后一个"：new-api 家族的链路是**降级顺序**，
+ * 上游命中第一个可用档；取末档会把 ×0.15 记成 ×0.4（已由 siteA 真实账单证伪）。
+ *
+ * 判据 isAutoGroupName 与实扣计价共用同一份实现（services/billing/groupNames），
+ * 避免"界面按 A 档显示、实扣按 B 档记账"。
+ */
+export function resolveRouteChannelGroup(input: {
+  effectiveGroupName: string | null;
+  autoGroups: string[] | null;
+}): { groupName: string | null; candidates: string[]; note: string | null } {
+  const explicit = (input.effectiveGroupName || '').trim();
+  const candidates = input.autoGroups ?? [];
+
+  if (explicit && !isAutoGroupName(explicit)) {
+    return { groupName: explicit, candidates: [], note: null };
+  }
+
+  if (candidates.length > 0) {
+    // 默认取链路首个候选；调用方会用模型目录再筛一次，取"首个模型可用的档"。
+    return {
+      groupName: candidates[0]!,
+      candidates,
+      note: explicit ? `令牌为 ${explicit} 分组，按 auto 链路计价` : '令牌未标注分组，按 auto 链路计价',
+    };
+  }
+
+  return {
+    groupName: explicit || null,
+    candidates: [],
+    note: candidates.length === 0 && (explicit || '') !== ''
+      ? 'auto 分组在上游无对应价格，且未同步到该令牌的链路分组'
+      : '当前令牌分组未知',
+  };
+}
 
 type RouteChannelBilling = {
   status: 'ready' | 'refreshing' | 'unavailable';
   groupName: string | null;
+  /** auto 链路的全部候选档（三-1）；非 auto 令牌为空数组。UI 据此显示"命中哪几档"。 */
+  groupCandidates?: string[];
+  /** 为什么按这个分组计价（三-1）。普通显式分组为 null。 */
+  groupNote?: string | null;
   modelName: string | null;
   pricing: ModelGroupPricing | null;
   refreshTaskId?: string | null;
   message: string;
 };
 
+/**
+ * 具备「模型计价目录」能力的平台（T2.5）。
+ *
+ * **sub2api 已移除**：它只有订阅摘要与余额，`sub2api.ts` 全文没有
+ * pricing / available_model 相关代码。原先列为支持会让 UI 显示"可查目录"
+ * 而结果恒为空 —— 属于 AGENTS.md「Thin adapters must stay honest」的反例。
+ *
+ * 说明：这份名单刻意留在路由层而不是从 modelPricingService 导入。
+ * `tokens.channel-presentation.test.ts` 用完整工厂函数 mock 了那个服务模块，
+ * 任何新增的具名导入都会在链接期失败；等 P9 平台能力声明表落地后再统一收敛。
+ */
 const PRICING_CATALOG_PLATFORMS = new Set([
   'new-api',
   'one-api',
   'veloera',
+  'anyrouter',
   'one-hub',
   'done-hub',
-  'sub2api',
-  'anyrouter',
 ]);
 
 function buildRouteChannelHealth(channel: typeof schema.routeChannels.$inferSelect): {
@@ -706,86 +794,116 @@ function startRouteChannelPricingRefresh(input: EstimateProxyCostInput): string 
 function buildRouteChannelBilling(input: {
   pricingInput: EstimateProxyCostInput | null;
   effectiveGroupName: string | null;
+  /** 令牌自己的 auto 链路（三-1）；非 auto 令牌传 null 即可。 */
+  autoGroups?: string[] | null;
   refreshBlockReason: string | null;
   triggerRefresh: boolean;
 }): RouteChannelBilling {
   const modelName = input.pricingInput?.modelName?.trim() || null;
-  const groupName = input.effectiveGroupName?.trim() || null;
+  // 三-1：auto 分组不能直接拿去查目录价 —— 上游把 auto 标为「此分组无效」，
+  // 必须换成令牌自己的链路分组（详见 resolveRouteChannelGroup）。
+  const resolved = resolveRouteChannelGroup({
+    effectiveGroupName: input.effectiveGroupName,
+    autoGroups: input.autoGroups ?? null,
+  });
+  const groupName = resolved.groupName;
+  const groupCandidates = resolved.candidates;
+  const groupNote = resolved.note;
+  const withGroup = <T extends object>(value: T): T & { groupCandidates?: string[]; groupNote?: string | null } => (
+    groupCandidates.length > 0 ? { ...value, groupCandidates, groupNote } : value
+  );
+
   if (!input.pricingInput || !modelName) {
-    return {
-      status: 'unavailable',
+    return withGroup({
+      status: 'unavailable' as const,
       groupName,
       modelName,
       pricing: null,
       message: '缺少模型信息，无法匹配分组计费',
-    };
+    });
   }
 
   if (!groupName) {
-    return {
-      status: 'unavailable',
+    return withGroup({
+      status: 'unavailable' as const,
       groupName: null,
       modelName,
       pricing: null,
-      message: '当前令牌分组未知',
-    };
+      message: groupNote || '当前令牌分组未知',
+    });
   }
 
   const catalog = getCachedModelPricingCatalog(input.pricingInput);
   if (!catalog) {
     if (input.refreshBlockReason) {
-      return {
-        status: 'unavailable',
+      return withGroup({
+        status: 'unavailable' as const,
         groupName,
         modelName,
         pricing: null,
         message: input.refreshBlockReason,
-      };
+      });
     }
 
     const refreshTaskId = input.triggerRefresh
       ? startRouteChannelPricingRefresh(input.pricingInput)
       : null;
-    return {
-      status: 'refreshing',
+    return withGroup({
+      status: 'refreshing' as const,
       groupName,
       modelName,
       pricing: null,
       refreshTaskId,
       message: refreshTaskId ? '计费缓存刷新中' : '计费缓存未命中',
-    };
+    });
   }
 
   const model = findCatalogModel(catalog, modelName);
   if (!model) {
-    return {
-      status: 'unavailable',
+    return withGroup({
+      status: 'unavailable' as const,
       groupName,
       modelName,
       pricing: null,
       message: '上游计费目录未提供该模型',
-    };
+    });
   }
 
-  const pricingEntry = Object.entries(model.groupPricing || {}).find(([group]) => (
-    group.trim().toLowerCase() === groupName.toLowerCase()
-  ));
-  if (!pricingEntry) {
-    return {
-      status: 'unavailable',
+  // 候选档逐个比对目录。auto 链路里不是每一档都挂了当前模型，
+  // 取"最后一个同时存在于目录中的候选"= 链路里最深可用档，与上游按序命中一致。
+  const declared = groupCandidates.length > 0 ? groupCandidates : [groupName];
+  const matched = declared
+    .map((candidate) => [candidate, Object.entries(model.groupPricing || {}).find(([group]) => (
+      group.trim().toLowerCase() === candidate.trim().toLowerCase()
+    ))] as const)
+    .filter((entry): entry is readonly [string, [string, ModelGroupPricing]] => Boolean(entry[1]));
+
+  if (matched.length === 0) {
+    const tried = declared.join(' / ');
+    return withGroup({
+      status: 'unavailable' as const,
       groupName,
       modelName,
       pricing: null,
-      message: `上游计费目录未提供 ${groupName} 分组`,
-    };
+      message: groupCandidates.length > 1
+        ? `上游计费目录未提供该模型的任何链路分组（已尝试 ${tried}）`
+        : `上游计费目录未提供 ${groupName} 分组`,
+    });
   }
 
+  // 命中多个候选时，用**第一个**（= 链路顺序里最先命中的档），与上游实际结算一致。
+  // 实测 sample-model-ratio 同时挂在 grp-codex 与 grp-codex-pro，上游扣的是 grp-codex(0.15)。
+  const [chosenGroup, pricingEntry] = matched[0]!;
   return {
-    status: 'ready',
-    groupName: pricingEntry[0],
-    modelName,
-    pricing: pricingEntry[1],
-    message: '来自模型广场计费缓存',
+    ...withGroup({
+      status: 'ready' as const,
+      groupName: chosenGroup,
+      modelName,
+      pricing: pricingEntry[1] as ModelGroupPricing,
+      message: matched.length > 1
+        ? `来自模型广场计费缓存（链路 ${matched.map(([g]) => g).join(' → ')}，按首个命中档计价）`
+        : '来自模型广场计费缓存',
+    }),
   };
 }
 
@@ -928,12 +1046,16 @@ async function fetchChannelsForRouteRows(
           isDefault: effectiveToken.isDefault,
           tokenGroup: effectiveToken.tokenGroup,
           groupName: effectiveGroupName,
+          // 令牌实际 auto 链路（T4.4）。null = 未同步到；[] = 上游明确给了空链路。
+          autoGroups: parseStoredAutoGroups(effectiveToken.autoGroups),
         }
         : null,
       billing: includePresentationDetails
         ? buildRouteChannelBilling({
           pricingInput,
           effectiveGroupName,
+          // 三-1：auto 令牌实际按链路分组扣钱，计费匹配必须用同一份链路数据。
+          autoGroups: effectiveToken ? parseStoredAutoGroups(effectiveToken.autoGroups) : null,
           refreshBlockReason: getRouteChannelPricingRefreshBlockReason({
             routeChannels: row.route_channels,
             accounts: row.accounts,

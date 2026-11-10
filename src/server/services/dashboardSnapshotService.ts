@@ -22,9 +22,17 @@ import {
 import { estimateRewardWithTodayIncomeFallback } from "./todayIncomeRewardService.js";
 import { createAdminSnapshotPersistence } from "./adminSnapshotStore.js";
 import { runUsageAggregationProjectionPass } from "./usageAggregationService.js";
+import { summarizeByCurrency } from "./billing/currencySplit.js";
 
 export type DashboardSummaryPayload = {
   totalBalance: number;
+  /**
+   * S6 / T8.8：人民币口径（逐站换算，汇率未知的站点已排除）。
+   * 可选字段 —— 老快照里没有该键，读取方须按"未知"处理而不是当成 0。
+   */
+  totalBalanceCny?: number;
+  /** 被排除出 CNY 合计的站点数；前端必须提示，不得静默少算。 */
+  balanceExcludedSiteCount?: number;
   totalUsed: number;
   todaySpend: number;
   todayReward: number;
@@ -78,6 +86,28 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   const totalBalance = accounts.reduce(
     (sum, account) => sum + (account.balance || 0),
     0,
+  );
+  // S6 / T8.8：双轨口径 —— USD 合计保持不变，另按站点逐笔换算出 CNY 合计。
+  // 汇率未知的站点不进 CNY，但必须计入 excludedSiteCount 供前端提示（R7）。
+  const billingProfileRowsForSummary = await db.select().from(schema.siteBillingProfiles).all();
+  const cnyRateBySiteId = new Map<number, number | null>();
+  for (const row of billingProfileRowsForSummary) {
+    const rate = Number(row.cnyPerUsd);
+    cnyRateBySiteId.set(row.siteId, Number.isFinite(rate) && rate > 0 ? rate : null);
+  }
+  const balanceBySiteForCurrency = new Map<number, number>();
+  for (const row of accountRows) {
+    balanceBySiteForCurrency.set(
+      row.sites.id,
+      (balanceBySiteForCurrency.get(row.sites.id) || 0) + (row.accounts.balance || 0),
+    );
+  }
+  const currencySplit = summarizeByCurrency(
+    Array.from(balanceBySiteForCurrency.entries()).map(([siteId, usd]) => ({
+      siteId,
+      usd,
+      cnyPerUsd: cnyRateBySiteId.get(siteId) ?? null,
+    })),
   );
   const activeCount = accounts.filter(
     (account) => account.status === "active",
@@ -223,6 +253,9 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
 
   return {
     totalBalance,
+    // S6：CNY 口径与排除计数（USD 字段语义不变，两者并存供前端按开关选择）
+    totalBalanceCny: currencySplit.cnyTotal,
+    balanceExcludedSiteCount: currencySplit.excludedSiteCount,
     totalUsed: toRoundedMicroNumber(totalUsed),
     todaySpend: toRoundedMicroNumber(todaySpend),
     todayReward: toRoundedMicroNumber(todayReward),

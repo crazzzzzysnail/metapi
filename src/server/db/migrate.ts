@@ -87,6 +87,13 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
 
 
 function resolveSqliteDbPath(): string {
+  // 与 db/index.js 的 resolveSqlitePath 保持同一优先级（S6 事故防线）：
+  // 显式的非默认 DATA_DIR 一旦存在，就无条件压过 DB_URL，避免测试隔离被残留值击穿。
+  const explicitDataDir = (process.env.DATA_DIR || '').trim();
+  if (explicitDataDir && resolve(explicitDataDir) !== resolve('./data')) {
+    return resolve(`${explicitDataDir}/hub.db`);
+  }
+
   const raw = (config.dbUrl || '').trim();
   if (!raw) return resolve(`${config.dataDir}/hub.db`);
   if (raw === ':memory:') return raw;
@@ -678,7 +685,73 @@ function bootstrapLegacyDrizzleMigrations(sqlite: Database.Database, migrationsF
   return true;
 }
 
+/** 判断路径是否落回仓库默认 data/hub.db（无隔离测试的危险信号）。 */
+function isDefaultRepoSqlitePath(dbPath: string): boolean {
+  return resolve(dbPath) === resolve('./data/hub.db');
+}
+
+
+
+
+
+/**
+ * vitest 运行时判定。
+ *
+ * **必须同时认环境变量**：`vitest --run` 的 worker 命令行里不含 "vitest"（argv 被 spawn 改写），
+ * 只看 argv/execArgv 会漏判 —— S6 事故防线第一次就栽在这里。
+ */
+function isVitestRuntime(): boolean {
+  if ((process.env.VITEST || '').trim()) return true;
+  if ((process.env.VITEST_POOL_ID || '').trim()) return true;
+  if ((process.env.VITEST_WORKER_ID || '').trim()) return true;
+  const runtimeArgs = [...process.argv, ...process.execArgv].map((v) => String(v || '').toLowerCase());
+  return runtimeArgs.some((v) => v.includes('vitest'));
+}
+/**
+ * 汇总所有可能落回仓库默认库的路径口径，逐一核对。
+ *
+ * S6 事故的机制：db/index.js 的 `resolveSqlitePath()` 有 vitest 隔离兜底
+ * （DB_URL/DATA_DIR 都没设时重定向到 /tmp/metapi-vitest-*），本文件的
+ * `resolveSqliteDbPath()` 没有 —— **测试只设 DATA_DIR、DB_URL 残留 ./data/hub.db 时，
+ * 两边都会命中真实库**。因此这里复刻同一套兜底判据：
+ *   - DB_URL 显式存在 → 以它为准（优先级高于 DATA_DIR）；
+ *   - 只有 DATA_DIR 且非仓库默认 → 用它；
+ *   - 两者皆无/DATA_DIR 就是仓库默认 → 与 index.js 一致落到 per-worker 临时库。
+ * 判据必须与 db/index.ts 保持同步；改动任一侧都要对照另一侧。
+ */
+function collectGuardedSqlitePaths(): string[] {
+  const paths = new Set<string>([resolveSqliteDbPath()]);
+
+  const rawDbUrl = (process.env.DB_URL || '').trim();
+  if (rawDbUrl && rawDbUrl !== ':memory:') {
+    paths.add(rawDbUrl.startsWith('file://')
+      ? decodeURIComponent(new URL(rawDbUrl).pathname)
+      : rawDbUrl.startsWith('sqlite://')
+        ? resolve(rawDbUrl.slice('sqlite://'.length).trim())
+        : resolve(rawDbUrl));
+  }
+
+  return Array.from(paths).filter(Boolean);
+}
+
 export function runSqliteMigrations(): void {
+  // S6 事故复盘：真实开发库被"半隔离"的测试覆盖过 —— 测试设了 DATA_DIR，但 config.dbUrl
+  // 仍指向 ./data/hub.db，于是 sites.subscription-summary.test.ts 把默认站点种进了真库。
+  //
+  // vitest 运行时想动仓库默认库 → **拒绝执行并报错**（不是跳过）：
+  //   - 报错能在测试输出里立刻暴露隔离缺失，静默跳过只会把问题埋到下一次全量运行；
+  //   - 正常 dev server / CLI 迁移不在 vitest 下，完全不受影响，无需额外开关。
+  if (isVitestRuntime()) {
+    for (const candidate of collectGuardedSqlitePaths()) {
+      if (candidate !== ':memory:' && isDefaultRepoSqlitePath(candidate)) {
+        throw new Error(
+          `[db] 已拒绝：vitest 运行时要操作仓库默认库 ${candidate}。` +
+          '请为该测试设置 process.env.DATA_DIR（mkdtempSync 临时目录）；' +
+          '若此前设过 DB_URL，导入其它测试文件后它可能仍残留，需一并清理。',
+        );
+      }
+    }
+  }
   const dbPath = resolveSqliteDbPath();
   const migrationsFolder = resolveMigrationsFolder();
   if (dbPath !== ':memory:') {

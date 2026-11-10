@@ -1,9 +1,11 @@
+import { resolve } from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 import cron from 'node-cron';
-import { db, schema } from '../db/index.js';
+import { db, schema, getCurrentSqliteFilePath } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
+import { getQuotaScale, quotaToUsd } from './billing/quotaScale.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 import { isCheckinDelayUnit } from '../shared/checkinDelayPolicy.js';
@@ -296,13 +298,23 @@ function toIsoString(value: unknown): string {
   return new Date().toISOString();
 }
 
-function normalizeLegacyQuota(raw: unknown): number {
+/**
+ * 兼容 all-api-hub 导出的额度字段：可能是「额度整数」，也可能是已经换算好的 USD。
+ *
+ * 旧实现用 `>= 10_000` 猜除数并恒定按 500_000 折算，对 veloera 会低估 2 倍，
+ * 且把小额度账号误判成 USD。现改为显式标尺 + 阈值判定；
+ * 低于一个标尺单位时无法区分两种口径，保守当作 USD 原值返回（与历史行为一致）。
+ */
+function normalizeLegacyQuota(raw: unknown, platform?: string | null): number {
   const value = asNumber(raw, 0);
   if (!Number.isFinite(value) || value <= 0) return 0;
-  // ref-all-api-hub stores quota in raw units for NewAPI-like sites.
-  // Convert obvious raw values to display currency units.
-  if (value >= 10_000) return value / 500_000;
-  return value;
+  const scale = getQuotaScale(platform);
+  if (value < scale) return roundLegacyUsd(value);
+  return quotaToUsd(value, platform);
+}
+
+function roundLegacyUsd(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function resolveImportedOauthColumns(row: Pick<AccountRow, 'oauthProvider' | 'oauthAccountKey' | 'oauthProjectId' | 'extraConfig'>) {
@@ -677,6 +689,8 @@ function pushDefaultImportedToken(
     name: 'default',
     token,
     tokenGroup: 'default',
+    // 导入/构造出来的行没经过上游令牌同步，链路未知（null ≠ 空数组）。
+    autoGroups: null,
     valueStatus: 'ready',
     source: 'legacy',
     enabled: true,
@@ -852,8 +866,8 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       continue;
     }
 
-    const importedBalance = normalizeLegacyQuota(accountInfo.quota);
-    const importedUsed = normalizeLegacyQuota(accountInfo.today_quota_consumption);
+    const importedBalance = normalizeLegacyQuota(accountInfo.quota, platform);
+    const importedUsed = normalizeLegacyQuota(accountInfo.today_quota_consumption, platform);
     const importedQuota = importedBalance + importedUsed;
     const extraConfigPatch: Record<string, unknown> = {
       credentialMode,
@@ -1055,8 +1069,8 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
     };
 
     const accountId = nextAccountId++;
-    const importedBalance = normalizeLegacyQuota(accountInfo.quota);
-    const importedUsed = normalizeLegacyQuota(accountInfo.today_quota_consumption);
+    const importedBalance = normalizeLegacyQuota(accountInfo.quota, platform);
+    const importedUsed = normalizeLegacyQuota(accountInfo.today_quota_consumption, platform);
     const importedQuota = importedBalance + importedUsed;
 
     accounts.push({
@@ -1091,6 +1105,8 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         name: 'default',
         token: apiToken,
         tokenGroup: 'default',
+        // 遗留导入行未经上游同步，链路未知。
+        autoGroups: null,
         valueStatus: 'ready',
         source: 'legacy',
         enabled: true,
@@ -1302,6 +1318,15 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
   // 签到随机延迟的用户配置与实例种子：恢复时按类型与取值范围校验，脏值直接拒绝落库。
   if (key === 'checkin_delay_enabled') {
     return typeof value === 'boolean';
+  }
+
+  // S6 两开关：导入时同样按枚举校验，脏值拒绝落库。
+  if (key === 'display_currency') {
+    return value === 'USD' || value === 'CNY';
+  }
+
+  if (key === 'pricing_display_mode') {
+    return value === 'official' || value === 'effective';
   }
 
   if (key === 'checkin_delay_min' || key === 'checkin_delay_max') {
@@ -1548,6 +1573,24 @@ function detectImportMetadata(data: RawBackupData): {
   };
 }
 
+/** vitest 运行时判定（与 db/migrate.ts 同一判据：env 优先，argv 兜底）。 */
+function isVitestProcess(): boolean {
+  if ((process.env.VITEST || '').trim()) return true;
+  if ((process.env.VITEST_POOL_ID || '').trim()) return true;
+  if ((process.env.VITEST_WORKER_ID || '').trim()) return true;
+  return [...process.argv, ...process.execArgv]
+    .map((v) => String(v || '').toLowerCase())
+    .some((v) => v.includes('vitest'));
+}
+
+/** 当前 SQLite 连接的物理文件路径（:memory: 原样返回）。 */
+function currentSqliteFilePath(): string {
+  try {
+    return getCurrentSqliteFilePath();
+  } catch {
+    return '';
+  }
+}
 async function importAccountsSection(section: AccountsBackupSection): Promise<void> {
   const runtimeState = await collectCurrentRuntimeStateSnapshot();
   const importedIndexes = buildRuntimeIdentityIndexesFromSection(section);
@@ -1556,6 +1599,13 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
   const shouldReplaceDownstreamApiKeys = Array.isArray(section.downstreamApiKeys);
 
   await db.transaction(async (tx) => {
+    // S6 事故防线（详见 isVitestProcess/currentSqliteFilePath 注释）
+    if (isVitestProcess() && currentSqliteFilePath() === resolve('./data/hub.db')) {
+      throw new Error(
+        '账号导入是**全量替换**操作（清空并重建 sites/accounts/tokens/routes/logs），' +
+        '且当前连接指向仓库默认库 —— 判定为测试隔离失效，已拒绝。',
+      );
+    }
     if (shouldReplaceDownstreamApiKeys) {
       await tx.delete(schema.downstreamApiKeys).run();
     }

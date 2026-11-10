@@ -90,6 +90,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     checkinDelayUnit: env.CHECKIN_DELAY_UNIT === 'hour' ? ('hour' as const) : ('minute' as const),
     balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
     logCleanupCron: env.LOG_CLEANUP_CRON || '0 6 * * *',
+    // S6 双口径两开关（R7）：货币与计价口径彼此正交，默认都不改变现状显示。
+    displayCurrency: env.DISPLAY_CURRENCY === 'CNY' ? ('CNY' as const) : ('USD' as const),
+    pricingDisplayMode: env.PRICING_DISPLAY_MODE === 'effective' ? ('effective' as const) : ('official' as const),
     logCleanupConfigured: false,
     logCleanupUsageLogsEnabled: parseBoolean(env.LOG_CLEANUP_USAGE_LOGS_ENABLED, false),
     logCleanupProgramLogsEnabled: parseBoolean(env.LOG_CLEANUP_PROGRAM_LOGS_ENABLED, false),

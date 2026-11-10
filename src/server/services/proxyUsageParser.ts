@@ -154,7 +154,30 @@ function sumNumericFields(value: unknown): number {
   return Object.values(value).reduce<number>((sum, item) => sum + toPositiveInt(item), 0);
 }
 
+/**
+ * 判定 prompt_tokens 是否**包含**缓存 token。
+ *
+ * ⚠️ 2026-11-09 修正顺序（三-3，VPS 真实账单验证）：
+ * 旧实现先判 Anthropic 字段、再判 OpenAI 明细字段，于是 new-api 家族响应被误判。
+ * 实测 siteA 的 usage 同时包含：
+ *   - `prompt_tokens_details.cached_tokens`（OpenAI 语义：缓存 ⊂ prompt）
+ *   - `claude_cache_creation_5_m_tokens: 0` / `..._1_h_tokens: 0`（恒为 0 的兼容字段）
+ * 旧顺序命中 Anthropic 字段即返回 false，导致 prompt 4441 与缓存 4224 **各算一遍**，
+ * 成本多算约 7 倍（上游扣 245 quota，我们记了 0.003515 美元）。
+ *
+ * 现在 OpenAI 明细字段优先：它们显式声明了"缓存是 prompt 的子集"。
+ */
 function detectPromptTokensIncludeCache(record: Record<string, unknown>): boolean | null {
+  const hasDetailCacheFields = [
+    'prompt_tokens_details',
+    'promptTokensDetails',
+    'input_tokens_details',
+    'inputTokensDetails',
+    'prompt_cache_hit_tokens',
+    'promptCacheHitTokens',
+  ].some((key) => key in record);
+  if (hasDetailCacheFields) return true;
+
   const hasAnthropicCacheFields = [
     'cache_read_input_tokens',
     'cacheReadInputTokens',
@@ -168,16 +191,6 @@ function detectPromptTokensIncludeCache(record: Record<string, unknown>): boolea
     'claudeCacheCreation1hTokens',
   ].some((key) => key in record);
   if (hasAnthropicCacheFields) return false;
-
-  const hasDetailCacheFields = [
-    'prompt_tokens_details',
-    'promptTokensDetails',
-    'input_tokens_details',
-    'inputTokensDetails',
-    'prompt_cache_hit_tokens',
-    'promptCacheHitTokens',
-  ].some((key) => key in record);
-  if (hasDetailCacheFields) return true;
 
   return null;
 }

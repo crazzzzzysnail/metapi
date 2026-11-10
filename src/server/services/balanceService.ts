@@ -1,5 +1,10 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
+import { quotaToUsd } from './billing/quotaScale.js';
+import {
+  orchestrateApiKeyTelemetry,
+  type TelemetryOutcome,
+} from './billing/apiKeyTelemetryService.js';
 import { eq } from 'drizzle-orm';
 import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
@@ -130,10 +135,6 @@ function extractLogTotal(payload: any): number | null {
   return null;
 }
 
-function resolveQuotaConversionFactor(platform?: string | null): number {
-  return (platform || '').toLowerCase() === 'veloera' ? 1_000_000 : 500_000;
-}
-
 async function fetchTodayIncomeFromLogs(params: {
   baseUrl: string;
   accessToken: string;
@@ -146,7 +147,7 @@ async function fetchTodayIncomeFromLogs(params: {
 
   const { fetch } = await import('undici');
   const { start, end } = getTodayUnixSecondsRange();
-  const conversionFactor = resolveQuotaConversionFactor(params.platform);
+  const conversionScale = params.platform;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
@@ -188,7 +189,7 @@ async function fetchTodayIncomeFromLogs(params: {
         for (const item of items) {
           const quotaRaw = parsePositiveNumber(item?.quota);
           if (quotaRaw > 0) {
-            totalIncome += quotaRaw / conversionFactor;
+            totalIncome += quotaToUsd(quotaRaw, conversionScale);
             continue;
           }
           totalIncome += parseIncomeFromContent(item?.content);
@@ -268,6 +269,56 @@ export async function refreshBalance(accountId: number) {
   if (!adapter) return null;
 
   if (isApiKeyConnection(account)) {
+    // T7.5：原先这里直接早退（proxy_only），于是"只有 API key"的通道永远刷不出余额，
+    // 即便上游明明提供 /api/usage/token/。改为真正走一次遥测编排；
+    // 全部失败时仍保持 skipped，且**不写 0**（沿用库里旧值）。
+    let telemetry: TelemetryOutcome | null = null;
+    try {
+      // 代理配置与下方 session 路径同源（此处的 accountProxyUrl 变量在更后面才声明，
+      // 早退分支里必须自己取一次，否则会引用到未定义变量）。
+      const proxyUrlForTelemetry = resolveProxyUrlFromExtraConfig(account.extraConfig);
+      telemetry = await orchestrateApiKeyTelemetry({
+        site: { id: site.id, url: site.url, platform: site.platform },
+        accountId: account.id,
+        sessionBalance: null,
+        fetchJson: async (url, init) => withAccountProxyOverride(proxyUrlForTelemetry, async () => {
+          const { fetch } = await import('undici');
+          const response = await fetch(url, await withSiteProxyRequestInit(url, init as Record<string, unknown>));
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        }),
+      });
+    } catch {
+      telemetry = null;
+    }
+
+    const adopted = telemetry?.adopted ?? null;
+
+    // 判定顺序很关键：**无限配额必须先于"有没有金额"处理**。
+    // 实测 siteC 的 key：unlimited_quota=true 且 total_used≈1546 万额度，
+    // 此时 granted/available 不承载信息。若先走金额分支，
+    // `balanceUsd ?? 0` 会把"没有余额概念"伪造成"余额 $0"——正是本方案要消灭的错误。
+    if (adopted?.unlimitedQuota) {
+      return {
+        balance: account.balance ?? 0,
+        used: adopted.totalUsedUsd ?? account.balanceUsed ?? 0,
+        quota: account.quota ?? 0,
+        skipped: true,
+        source: 'unlimited-quota',
+        reason: '无限配额（该令牌不受额度约束）',
+      };
+    }
+
+    // 只有真正拿到可用余额数字时才写库；仅有"已消耗"不足以构成余额结论。
+    if (adopted && typeof adopted.balanceUsd === 'number') {
+      return {
+        balance: adopted.balanceUsd,
+        used: adopted.totalUsedUsd ?? account.balanceUsed ?? 0,
+        quota: adopted.totalGrantedUsd ?? adopted.balanceUsd,
+        source: 'apikey-telemetry',
+      };
+    }
+
     return {
       balance: account.balance ?? 0,
       used: account.balanceUsed ?? 0,
@@ -363,6 +414,23 @@ export async function refreshBalance(accountId: number) {
     throw new Error('failed to fetch balance');
   }
 
+  // T2.4：上游明确没有余额接口时，绝不写库、也不标不健康。
+  // 旧实现会拿到伪造的 0 并覆盖账户真实余额，界面上显示成"已用尽"。
+  if (balanceInfo.unsupported) {
+    setAccountRuntimeHealth(account.id, {
+      state: 'degraded',
+      reason: balanceInfo.unsupportedReason || 'balance API not supported',
+      source: 'balance',
+    });
+    return {
+      balance: account.balance ?? 0,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+      skipped: true,
+      reason: 'balance_unsupported',
+    };
+  }
+
   if (
     !(typeof balanceInfo.todayIncome === 'number' && Number.isFinite(balanceInfo.todayIncome)) &&
     supportsTodayIncomeLogFallback(site.platform)
@@ -393,6 +461,9 @@ export async function refreshBalance(accountId: number) {
   const existingRuntimeHealth = extractRuntimeHealth(nextExtraConfig);
   const keepUnsupportedCheckinDegraded = isUnsupportedCheckinRuntimeHealth(existingRuntimeHealth);
 
+  // S5d 范围说明（用户确认）：API-key 遥测**只用于没有 session 的通道**
+  // （见上方 isApiKeyConnection 分支）。session 侧本就是账号钱包的权威来源，
+  // 再额外发 2–3 个上游请求只为拿诊断信息不划算，故此处不做任何 key 侧调用。
   const updates: Record<string, unknown> = {
     balance: balanceInfo.balance,
     balanceUsed: balanceInfo.used,

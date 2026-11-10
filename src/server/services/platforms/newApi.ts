@@ -1,9 +1,10 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, normalizeGroupList, type SiteAnnouncement } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 import { fetchJsonWithShieldCookieRetry } from './newApiShield.js';
 import { resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
+import { quotaToUsd } from '../billing/quotaScale.js';
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
@@ -333,6 +334,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
         enabled: status === undefined ? true : status === 1,
       };
       if (rawGroup) tokenInfo.tokenGroup = rawGroup;
+      // 令牌实际链路：只在上游确实给出数组时写入。
+      // 字段缺失留 undefined，不能当成空链路 —— 否则展示层会把"没同步到"显示成"无链路"。
+      const rawAutoGroups = Array.isArray(item?.auto_groups)
+        ? normalizeGroupList(item.auto_groups)
+        : null;
+      if (rawAutoGroups !== null) tokenInfo.autoGroups = rawAutoGroups;
       normalized.push(tokenInfo);
     }
     return normalized;
@@ -348,11 +355,16 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private parseBalance(data: any): BalanceInfo {
-    const quota = (data?.quota || 0) / 500000;
-    const used = (data?.used_quota || 0) / 500000;
+    // new-api 系语义：quota 是剩余额度，used_quota 是已消耗额度，总额 = 两者之和。
+    const quota = quotaToUsd(data?.quota, this.platformName);
+    const used = quotaToUsd(data?.used_quota, this.platformName);
     const total = quota + used;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 500000) : undefined;
-    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? (data.today_quota_consumption / 500000) : undefined;
+    const todayIncome = Number.isFinite(data?.today_income)
+      ? quotaToUsd(data.today_income, this.platformName)
+      : undefined;
+    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption)
+      ? quotaToUsd(data.today_quota_consumption, this.platformName)
+      : undefined;
     return { balance: quota, used, quota: total, todayIncome, todayQuotaConsumption };
   }
 

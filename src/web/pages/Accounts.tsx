@@ -11,6 +11,8 @@ import { MobileCard, MobileField } from "../components/MobileCard.js";
 import { useIsMobile } from "../components/useIsMobile.js";
 import DeleteConfirmModal from "../components/DeleteConfirmModal.js";
 import SiteBadgeLink from "../components/SiteBadgeLink.js";
+// 二-1：账号余额/已用的精度口径收敛到 numberFormat 的单一出口。
+import { formatBalance } from "../numberFormat.js";
 import AccountModelsModal from "./accounts/AccountModelsModal.js";
 import {
   buildAddAccountPrereqHint,
@@ -1956,10 +1958,7 @@ export default function Accounts() {
                               <div>
                                 余额:{" "}
                                 <strong>
-                                  $
-                                  {(verifyResult.balance.balance || 0).toFixed(
-                                    2,
-                                  )}
+                                  {formatBalance(verifyResult.balance.balance)}
                                 </strong>
                               </div>
                             )}
@@ -2724,8 +2723,12 @@ export default function Accounts() {
                   ]}
                   placeholder="状态"
                 />
+                {/* T9.3：原文案「单位成本」既没给单位、也没说明它只是路由权重。
+                    该字段不参与真实扣费（那是 catalog/observed 的口径），只影响通道排序；
+                    且 valueScore 会做归一化，取到极小值后收益饱和，填 0.00001 与 0.001 几乎无差别。 */}
                 <input
-                  placeholder="单位成本（可选）"
+                  placeholder="路由成本权重（越小越优先）"
+                  title="仅用于通道排序的成本权重，不是实际扣费单价。留空则按上游目录价或历史观测值排序。免费账号填 0.001 即可，再小没有额外效果。"
                   value={editForm.unitCost}
                   onChange={(e) =>
                     setEditForm((prev) => ({
@@ -2960,7 +2963,7 @@ export default function Accounts() {
                                   color: "var(--color-text-primary)",
                                 }}
                               >
-                                ${(a.balance || 0).toFixed(2)}
+                                {formatBalance(a.balance)}
                               </div>
                               <div
                                 style={{
@@ -2972,7 +2975,7 @@ export default function Accounts() {
                                   fontWeight: 500,
                                 }}
                               >
-                                +{(a.todayReward || 0).toFixed(2)}
+                                +{formatBalance(a.todayReward).replace("$", "")}
                               </div>
                             </div>
                           }
@@ -2981,7 +2984,7 @@ export default function Accounts() {
                           label="已用"
                           value={
                             <div>
-                              <div>${(a.balanceUsed || 0).toFixed(2)}</div>
+                              <div>{formatBalance(a.balanceUsed)}</div>
                               <div
                                 style={{
                                   fontSize: 11,
@@ -2992,7 +2995,7 @@ export default function Accounts() {
                                   fontWeight: 500,
                                 }}
                               >
-                                -{(a.todaySpend || 0).toFixed(2)}
+                                -{formatBalance(a.todaySpend).replace("$", "")}
                               </div>
                             </div>
                           }
@@ -3315,7 +3318,7 @@ export default function Accounts() {
                                 color: "var(--color-text-primary)",
                               }}
                             >
-                              ${(a.balance || 0).toFixed(2)}
+                              {formatBalance(a.balance)}
                             </div>
                             <div
                               style={{
@@ -3327,7 +3330,7 @@ export default function Accounts() {
                                 fontWeight: 500,
                               }}
                             >
-                              +{(a.todayReward || 0).toFixed(2)}
+                              +{formatBalance(a.todayReward).replace("$", "")}
                             </div>
                           </td>
                           <td
@@ -3336,7 +3339,7 @@ export default function Accounts() {
                               fontSize: 12,
                             }}
                           >
-                            <div>${(a.balanceUsed || 0).toFixed(2)}</div>
+                            <div>{formatBalance(a.balanceUsed)}</div>
                             <div
                               style={{
                                 fontSize: 11,
@@ -3347,7 +3350,7 @@ export default function Accounts() {
                                 fontWeight: 500,
                               }}
                             >
-                              -{(a.todaySpend || 0).toFixed(2)}
+                              -{formatBalance(a.todaySpend).replace("$", "")}
                             </div>
                           </td>
                           <td>

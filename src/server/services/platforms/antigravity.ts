@@ -1,4 +1,4 @@
-import { BasePlatformAdapter, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
+import { BasePlatformAdapter, unsupportedBalance, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
 import {
   ANTIGRAVITY_CLIENT_METADATA,
   ANTIGRAVITY_GOOGLE_API_CLIENT,
@@ -52,7 +52,8 @@ export class AntigravityAdapter extends BasePlatformAdapter {
   }
 
   async getBalance(_baseUrl: string, _accessToken: string): Promise<BalanceInfo> {
-    return { balance: 0, used: 0, quota: 0 };
+    // T2.4：不再伪造 0，改为显式声明无余额接口。
+    return unsupportedBalance('antigravity connections do not expose a balance API');
   }
 
   async getModels(baseUrl: string, accessToken: string): Promise<string[]> {

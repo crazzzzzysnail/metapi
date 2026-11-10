@@ -142,6 +142,13 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.checkinDelayUnit = checkinDelayUnit;
   }
 
+  // S6 两个独立开关（R7）：只认合法枚举值，脏值直接忽略（保持默认），不做猜测性回落。
+  const displayCurrency = parseSettingFromMap<string>(settingsMap, 'display_currency');
+  if (displayCurrency === 'USD' || displayCurrency === 'CNY') config.displayCurrency = displayCurrency;
+
+  const pricingDisplayMode = parseSettingFromMap<string>(settingsMap, 'pricing_display_mode');
+  if (pricingDisplayMode === 'official' || pricingDisplayMode === 'effective') config.pricingDisplayMode = pricingDisplayMode;
+
   const balanceRefreshCron = parseSettingFromMap<string>(settingsMap, 'balance_refresh_cron');
   if (typeof balanceRefreshCron === 'string' && balanceRefreshCron) config.balanceRefreshCron = balanceRefreshCron;
 

@@ -67,6 +67,41 @@ function stringifyDebugValue(value: unknown, maxBytes: number): string | null {
   return buildTruncatedDebugPreview(text, maxBytes, buffer.length);
 }
 
+/**
+ * 需要脱敏的请求/响应头（一）。
+ *
+ * 判据：凡是能直接拿去冒充身份或复放请求的值都算，不只是 Authorization。
+ * new-api 家族的 `x-new-api-*` 之类会带令牌指纹，Cookie 里通常是会话凭据，
+ * 上游返回的 `set-cookie` 同样能拿来冒用登录态。
+ */
+const SENSITIVE_HEADER_KEYS = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'api-key',
+  'x-goog-api-key',
+  'openai-api-key',
+]);
+
+/**
+ * 把敏感头的值替换成掩码。
+ *
+ * 设计取舍：
+ *   - **不留任何原文片段**（连前缀也不留）。前 3 字符虽不足以复用，
+ *     但多个请求拼起来会缩小猜测空间，而它对排障几乎没有价值；
+ *   - 保留原值长度 —— 这样"鉴权头有没有带上、大概多大"仍可判断，
+ *     也让超长头的序列化体积量级不变，不破坏既有的截断契约。
+ */
+function maskSensitiveHeaderValue(key: string, value: unknown): unknown {
+  if (!SENSITIVE_HEADER_KEYS.has(String(key).trim().toLowerCase())) return value;
+  const text = typeof value === 'string' ? value : String(value ?? '');
+  if (!text) return '[空]';
+  // 长度占位符与原值同量级：既不泄露内容，也不改变留痕的体积特征。
+  return `[已隐藏 ${text.length} 字符]${'*'.repeat(Math.min(text.length, 64))}`;
+}
+
 function normalizeHeadersValue(value: HeadersLike): Record<string, unknown> | null {
   if (!value) return null;
 
@@ -74,7 +109,8 @@ function normalizeHeadersValue(value: HeadersLike): Record<string, unknown> | nu
   if (typeof headerEntries.get === 'function' && typeof headerEntries.entries === 'function') {
     return Object.fromEntries(
       [...headerEntries.entries.call(value) as Iterable<[string, string]>]
-        .sort((left, right) => left[0].localeCompare(right[0])),
+        .sort((left, right) => left[0].localeCompare(right[0]))
+        .map(([key, val]) => [key, maskSensitiveHeaderValue(key, val)]),
     );
   }
 
@@ -85,7 +121,8 @@ function normalizeHeadersValue(value: HeadersLike): Record<string, unknown> | nu
   const entries = Object.entries(value)
     .filter(([key]) => !!key)
     .sort((left, right) => left[0].localeCompare(right[0]));
-  return Object.fromEntries(entries);
+  // 一：Authorization / Cookie / x-api-key 等一律不落明文。
+  return Object.fromEntries(entries.map(([key, val]) => [key, maskSensitiveHeaderValue(key, val)]));
 }
 
 function normalizeLimit(rawLimit: number | undefined): number {

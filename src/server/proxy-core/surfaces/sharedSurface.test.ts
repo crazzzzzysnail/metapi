@@ -985,6 +985,10 @@ describe('selectSurfaceChannelForAttempt', () => {
         selfLogBillingMeta: null,
         usageSource: 'self-log',
       },
+      // 三-3：令牌分组是计费的输入之一。本用例的 selected 不带 token 行，
+      // 因此必须是 null（= 未知），而不是被省略——省略会让"没传"与"传了空"无法区分。
+      tokenGroup: null,
+      autoGroups: null,
     });
     expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0.42, 'upstream-model');
     expect(recordDownstreamCost).toHaveBeenCalledWith(0.42);
@@ -1175,7 +1179,10 @@ describe('selectSurfaceChannelForAttempt', () => {
       promptTokens: 10,
       completionTokens: 5,
       totalTokens: 15,
-      estimatedCost: 0,
+      // N2 / T1.23：计费链路抛错意味着「没有价格依据」，落库必须是 null 而不是 0。
+      // 写 0 会让这条日志在统计里被当成"该模型免费"，把整段用量算进零成本档。
+      // 路由侧仍记 0（见上两条断言）—— 那是为了不让缺价虚增 totalCost，与落库口径刻意不同。
+      estimatedCost: null,
       billingDetails: null,
     }));
     expect(result).toEqual({
@@ -1188,7 +1195,8 @@ describe('selectSurfaceChannelForAttempt', () => {
         selfLogBillingMeta: null,
         usageSource: 'upstream',
       },
-      estimatedCost: 0,
+      // 同上：返回值也要把"无价格依据"如实报成 null，交由调用方决定如何记账。
+      estimatedCost: null,
       billingDetails: null,
     });
   });

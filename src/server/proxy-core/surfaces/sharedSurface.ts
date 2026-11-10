@@ -80,7 +80,29 @@ type SurfaceSuccessSelectedChannel = SurfaceSelectedChannel & {
   };
   tokenValue: string;
   tokenName?: string | null;
+  /**
+   * 本次实际使用的令牌（三-3）。
+   * 分组决定这次按哪一档扣钱，所以必须带到计价层；
+   * `autoGroups` 是数据库里的原文（JSON 文本），由调用方解析。
+   */
+  token?: {
+    tokenGroup?: string | null;
+    autoGroups?: string | null;
+  } | null;
 };
+
+/** 解析落库的 auto 链路 JSON；非法/缺失一律按 null（未同步到）处理。 */
+function parseAutoGroupsForBilling(raw: unknown): string[] | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const groups = parsed.map((item) => String(item || '').trim()).filter(Boolean);
+    return groups;
+  } catch {
+    return null;
+  }
+}
 
 type SurfaceUsageSummary = {
   promptTokens: number;
@@ -200,7 +222,7 @@ export async function writeSurfaceProxyLog(input: {
   promptTokens?: number | null;
   completionTokens?: number | null;
   totalTokens?: number | null;
-  estimatedCost?: number;
+  estimatedCost?: number | null;
   billingDetails?: unknown;
   upstreamPath?: string | null;
   usageSource?: 'upstream' | 'self-log' | 'unknown' | null;
@@ -235,7 +257,10 @@ export async function writeSurfaceProxyLog(input: {
       promptTokens: input.promptTokens ?? null,
       completionTokens: input.completionTokens ?? null,
       totalTokens: input.totalTokens ?? null,
-      estimatedCost: input.estimatedCost ?? 0,
+      // N2：这里必须把 null 原样传给可空列，不能 `?? 0`。
+      // 写成 0 会让"没有价格依据"在库里变成"这个模型免费"，
+      // 进而把路由成本与统计一起带偏，S2 的缺价诚实就全盘失效了。
+      estimatedCost: input.estimatedCost ?? null,
       billingDetails: input.billingDetails ?? null,
       clientFamily: input.clientContext?.clientKind || null,
       clientAppId: input.clientContext?.clientAppId || null,
@@ -352,7 +377,7 @@ export async function recordSurfaceSuccess(input: {
     completionTokens?: number | null;
     totalTokens?: number | null;
     usageSource?: 'upstream' | 'self-log' | 'unknown';
-    estimatedCost?: number;
+    estimatedCost?: number | null;
     billingDetails?: unknown;
     upstreamPath?: string | null;
   }) => Promise<void>;
@@ -362,7 +387,7 @@ export async function recordSurfaceSuccess(input: {
   };
 }): Promise<{
   resolvedUsage: SurfaceResolvedUsageSummary;
-  estimatedCost: number;
+  estimatedCost: number | null;
   billingDetails: unknown;
 }> {
   const hasUpstreamUsage = input.upstreamUsagePresent ?? (
@@ -379,7 +404,8 @@ export async function recordSurfaceSuccess(input: {
     selfLogBillingMeta: null,
     usageSource: hasUpstreamUsage ? 'upstream' : 'unknown',
   };
-  let estimatedCost = 0;
+  // 落库用：null = 无价格依据（区别于 0 = 免费）。见 persist 处的 N2 注释。
+  let estimatedCost: number | null = null;
   let billingDetails: unknown = null;
 
   try {
@@ -403,6 +429,9 @@ export async function recordSurfaceSuccess(input: {
       site: input.selected.site,
       account: input.selected.account,
       modelName: input.modelName,
+      // 三-3：令牌分组是计费的输入之一，缺失会让 auto 令牌按错误档位计价。
+      tokenGroup: input.selected.token?.tokenGroup ?? null,
+      autoGroups: parseAutoGroupsForBilling(input.selected.token?.autoGroups),
       parsedUsage: input.parsedUsage,
       resolvedUsage,
     });
@@ -415,13 +444,17 @@ export async function recordSurfaceSuccess(input: {
     console.error(input.bestEffortMetrics.errorLabel, error);
   }
 
+  // N1：路由侧只接受数字。null（无价格依据）按 0 记账，使 totalCost 不因缺价而虚增，
+  // 从而不会把"没价"误判成"有观测成本"去接管用户配置的 unitCost。
+  // 注意与落库口径刻意不同：库里保留 null，这里保留可计算的数值。
+  const routingCost = estimatedCost ?? 0;
   tokenRouter.recordSuccess(
     input.selected.channel.id,
     input.latencyMs,
-    estimatedCost,
+    routingCost,
     input.modelName,
   );
-  input.recordDownstreamCost?.(estimatedCost);
+  input.recordDownstreamCost?.(routingCost);
   const logTokens = resolvedUsage.usageSource === 'unknown'
     ? {
       promptTokens: null,
@@ -489,7 +522,7 @@ export function createSurfaceFailureToolkit(input: {
     completionTokens?: number | null;
     totalTokens?: number | null;
     usageSource?: 'upstream' | 'self-log' | 'unknown';
-    estimatedCost?: number;
+    estimatedCost?: number | null;
     billingDetails?: unknown;
     upstreamPath?: string | null;
   }) => {

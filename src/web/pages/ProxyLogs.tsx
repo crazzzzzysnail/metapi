@@ -13,6 +13,7 @@ import {
   type ProxyDebugTraceDetail,
   type ProxyDebugTraceListItem,
   type ProxyLogBillingDetails,
+  type ProxyLogBillingSummary,
   type ProxyLogClientOption,
   type ProxyLogDetail,
   type ProxyLogListItem,
@@ -33,6 +34,8 @@ import { formatDateTimeLocal } from "./helpers/checkinLogTime.js";
 import ModernSelect from "../components/ModernSelect.js";
 import { parseProxyLogPathMeta } from "./helpers/proxyLogPathMeta.js";
 import { tr } from "../i18n.js";
+import { formatMoney } from "../numberFormat.js";
+import { useCurrency } from "../currencyContext.js";
 
 type ProxyLogRenderItem = ProxyLogListItem & {
   billingDetails?: ProxyLogBillingDetails;
@@ -323,14 +326,75 @@ function formatCompactNumber(value: number, digits = 6) {
   return formatted || "0";
 }
 
-function formatPerMillionPrice(value: number) {
-  return `$${formatCompactNumber(value)} / 1M tokens`;
+/**
+ * 日志页的金额出口（七）。
+ *
+ * 过去这里硬编码 `$${x.toFixed(6)}`，与设置里的「显示货币」完全无关 ——
+ * 同一个请求在模型广场是 ¥、在日志是 $，且 6 位补零。
+ * 现在统一接受一个 `money` 回调：由组件用 CurrencyContext 注入，
+ * 纯函数本身不碰 hook，便于单测直接断言两种币种。
+ */
+export type LogMoneyFormatter = (usd: number | null | undefined) => string;
+
+const defaultUsdMoney: LogMoneyFormatter = (usd) => formatMoney(usd);
+
+function formatPerMillionPrice(value: number, money: LogMoneyFormatter = defaultUsdMoney) {
+  return `${money(value)} / 1M tokens`;
 }
 
 function formatBillingDetailSummary(log: ProxyLogRenderItem) {
   const detail = log.billingDetails;
   if (!detail) return null;
   return `模型倍率 ${formatCompactNumber(detail.pricing.modelRatio)}，输出倍率 ${formatCompactNumber(detail.pricing.completionRatio)}，缓存倍率 ${formatCompactNumber(detail.pricing.cacheRatio)}，缓存创建倍率 ${formatCompactNumber(detail.pricing.cacheCreationRatio)}，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
+}
+
+/**
+ * 「分组/计费」的两行显示（默认即可见，不必展开详情）。
+ *
+ *   第一行：组丁-chs（×0.4）        —— 命中分组 + 分组倍率
+ *   第二行：off_peak · ¥0.4/¥1.6 / 1M        —— 档位 + 输入/输出单价
+ *
+ * 数据来源有两个，必须走同一套渲染，否则"列表看到的"和"展开看到的"会不一致：
+ *   - `billingSummary`（列表接口下发，默认就有）；
+ *   - `billingDetails`（单条详情接口下发，字段更全）。
+ * 缺字段一律省略该行，不补 0、不编造 —— 半截信息比一行占位更误导人。
+ */
+export function buildGroupBillingLines(
+  input: {
+    summary?: ProxyLogBillingSummary | undefined;
+    details?: ProxyLogBillingDetails | undefined | null;
+  },
+  money: LogMoneyFormatter = defaultUsdMoney,
+): string[] {
+  const groupName = (input.details?.pricing?.groupName ?? input.summary?.groupName ?? "")?.trim() || "";
+  const groupRatio = Number.isFinite(input.details?.pricing?.groupRatio as number)
+    ? (input.details!.pricing.groupRatio as number)
+    : (typeof input.summary?.groupRatio === "number" && Number.isFinite(input.summary.groupRatio)
+      ? input.summary.groupRatio
+      : null);
+  const tierName = (input.details?.pricing?.tierName ?? input.summary?.tierName ?? "")?.trim() || "";
+
+  // 单价优先用详情里的 breakdown（与算式同源），退回列表摘要的标量。
+  const rawInput = input.details?.breakdown?.inputPerMillion ?? input.summary?.inputPerMillion ?? null;
+  const rawOutput = input.details?.breakdown?.outputPerMillion ?? input.summary?.outputPerMillion ?? null;
+  const inputPrice = typeof rawInput === "number" && Number.isFinite(rawInput) ? rawInput : null;
+  const outputPrice = typeof rawOutput === "number" && Number.isFinite(rawOutput) ? rawOutput : null;
+
+  const lines: string[] = [];
+
+  if (groupName) {
+    lines.push(groupRatio != null ? `${groupName}（×${formatCompactNumber(groupRatio)}）` : groupName);
+  } else if (groupRatio != null) {
+    lines.push(`×${formatCompactNumber(groupRatio)}`);
+  }
+
+  const priceText = inputPrice != null
+    ? (outputPrice != null ? `${money(inputPrice)}/${money(outputPrice)} / 1M` : `${money(inputPrice)} / 1M`)
+    : "";
+  const secondLine = [tierName, priceText].filter(Boolean).join(" · ");
+  if (secondLine) lines.push(secondLine);
+
+  return lines;
 }
 
 function formatProxyLogUsageSource(
@@ -357,45 +421,50 @@ function renderDownstreamKeySummary(log: ProxyLogRenderItem) {
   return parts.length > 0 ? parts.join("，") : null;
 }
 
-function buildBillingProcessLines(log: ProxyLogRenderItem) {
+/**
+ * 计费算式明细（七）。money 由调用方按站点汇率注入，与列表/摘要同一口径，
+ * 避免出现"摘要显示 ¥、点进算式还是 $"的自相矛盾。
+ */
+function buildBillingProcessLines(log: ProxyLogRenderItem, money: LogMoneyFormatter = defaultUsdMoney) {
   const detail = log.billingDetails;
   if (!detail) return [];
 
   const lines = [
-    `提示价格：${formatPerMillionPrice(detail.breakdown.inputPerMillion)}`,
-    `补全价格：${formatPerMillionPrice(detail.breakdown.outputPerMillion)}`,
+    `提示价格：${formatPerMillionPrice(detail.breakdown.inputPerMillion, money)}`,
+    `补全价格：${formatPerMillionPrice(detail.breakdown.outputPerMillion, money)}`,
   ];
 
   if (detail.usage.cacheReadTokens > 0) {
     lines.push(
-      `缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion)} (缓存倍率: ${formatCompactNumber(detail.pricing.cacheRatio)})`,
+      `缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion, money)} (缓存倍率: ${formatCompactNumber(detail.pricing.cacheRatio)})`,
     );
   }
 
   if (detail.usage.cacheCreationTokens > 0) {
     lines.push(
-      `缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion)} (缓存创建倍率: ${formatCompactNumber(detail.pricing.cacheCreationRatio)})`,
+      `缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion, money)} (缓存创建倍率: ${formatCompactNumber(detail.pricing.cacheCreationRatio)})`,
     );
   }
 
+  // 算式里的单价同样跟随币种；token 数是数量不是金额，保持原样。
   const parts = [
-    `提示 ${detail.usage.billablePromptTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.inputPerMillion)}`,
+    `提示 ${detail.usage.billablePromptTokens.toLocaleString()} tokens / 1M tokens * ${money(detail.breakdown.inputPerMillion)}`,
   ];
 
   if (detail.usage.cacheReadTokens > 0) {
     parts.push(
-      `缓存 ${detail.usage.cacheReadTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheReadPerMillion)}`,
+      `缓存 ${detail.usage.cacheReadTokens.toLocaleString()} tokens / 1M tokens * ${money(detail.breakdown.cacheReadPerMillion)}`,
     );
   }
 
   if (detail.usage.cacheCreationTokens > 0) {
     parts.push(
-      `缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheCreationPerMillion)}`,
+      `缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} tokens / 1M tokens * ${money(detail.breakdown.cacheCreationPerMillion)}`,
     );
   }
 
   parts.push(
-    `补全 ${detail.usage.completionTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.outputPerMillion)} = $${detail.breakdown.totalCost.toFixed(6)}`,
+    `补全 ${detail.usage.completionTokens.toLocaleString()} tokens / 1M tokens * ${money(detail.breakdown.outputPerMillion)} = ${money(detail.breakdown.totalCost)}`,
   );
   lines.push(parts.join(" + "));
 
@@ -756,6 +825,19 @@ function persistDebugTracePanelExpanded(expanded: boolean) {
 export default function ProxyLogs() {
   const location = useLocation();
   const navigate = useNavigate();
+  // 七：日志金额跟随设置里的显示货币，与模型广场同源。
+  const { currency, getSiteRate } = useCurrency();
+  /**
+   * 按站点汇率生成金额格式化器。
+   * 汇率未知时**不换算**（退回美元数字并标注），因为贴个 ¥ 前缀冒充人民币价
+   * 比显示美元更危险 —— 与模型广场 R3 的"缺汇率排除"同一判据。
+   */
+  const makeMoney = useCallback((siteId: number | null | undefined): LogMoneyFormatter => {
+    if (currency === 'USD') return defaultUsdMoney;
+    const rate = getSiteRate(siteId);
+    if (rate == null) return (usd) => `${formatMoney(usd)}（汇率未知）`;
+    return (usd) => formatMoney(Number(usd || 0) * rate, 'CNY', 1);
+  }, [currency, getSiteRate]);
   const initialRouteState = useMemo(
     () => readProxyLogsRouteState(location.search),
     [location.search],
@@ -2608,8 +2690,15 @@ export default function ProxyLogs() {
               const billingDetailSummary = detail
                 ? formatBillingDetailSummary(detailLog)
                 : null;
+              // 分组/计费（移动端卡片）：与桌面表格同一判据、同样默认两行。
+              const logMoney = makeMoney(detailLog.siteId ?? log.siteId);
+              const groupBillingLines = buildGroupBillingLines(
+                { summary: log.billingSummary, details: detail?.billingDetails },
+                logMoney,
+              );
+              const groupBillingSummary = groupBillingLines.join(" · ") || null;
               const billingProcessLines = detail
-                ? buildBillingProcessLines(detailLog)
+                ? buildBillingProcessLines(detailLog, logMoney)
                 : [];
               const downstreamKeySummary =
                 renderDownstreamKeySummary(detailLog);
@@ -2717,7 +2806,7 @@ export default function ProxyLogs() {
                       <div className="mobile-summary-metric-label">花费</div>
                       <div className="mobile-summary-metric-value">
                         {typeof log.estimatedCost === "number"
-                          ? `$${log.estimatedCost.toFixed(6)}`
+                          ? makeMoney(log.siteId)(log.estimatedCost)
                           : "-"}
                       </div>
                     </div>
@@ -2740,6 +2829,19 @@ export default function ProxyLogs() {
                           />
                         }
                       />
+                      {/* 与桌面表格同一判据；两行各自成一行，移动端同样默认可见 */}
+                      {groupBillingLines.length > 0 ? (
+                        <MobileField
+                          label="分组/计费"
+                          value={
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                              {groupBillingLines.map((line, lineIndex) => (
+                                <span key={lineIndex}>{line}</span>
+                              ))}
+                            </div>
+                          }
+                        />
+                      ) : null}
                       {streamModeLabel ? (
                         <MobileField label="模式" value={streamModeLabel} />
                       ) : null}
@@ -2821,6 +2923,8 @@ export default function ProxyLogs() {
                 <th>时间</th>
                 <th>模型</th>
                 <th>站点</th>
+                {/* 三-2：分组/计费紧跟在站点（账号）之后 */}
+                <th>{tr("分组/计费")}</th>
                 <th>客户端</th>
                 <th>{tr("状态")}</th>
                 <th style={{ textAlign: "center" }}>用时</th>
@@ -2843,8 +2947,17 @@ export default function ProxyLogs() {
                 const billingDetailSummary = detail
                   ? formatBillingDetailSummary(detailLog)
                   : null;
+                // 三-2：分组/计费摘要，显示在账号之后。
+                const logMoney = makeMoney(detailLog.siteId ?? log.siteId);
+                // 两行显示优先用列表自带的 billingSummary（默认就有），
+                // 展开后再用详情里的完整数据校正 —— 同一套判据，两个来源。
+                const groupBillingLines = buildGroupBillingLines(
+                  { summary: log.billingSummary, details: detail?.billingDetails },
+                  logMoney,
+                );
+                const groupBillingSummary = groupBillingLines.join(" · ") || null;
                 const billingProcessLines = detail
-                  ? buildBillingProcessLines(detailLog)
+                  ? buildBillingProcessLines(detailLog, logMoney)
                   : [];
                 const downstreamKeySummary =
                   renderDownstreamKeySummary(detailLog);
@@ -2975,6 +3088,32 @@ export default function ProxyLogs() {
                           badgeStyle={{ fontSize: 11 }}
                         />
                       </td>
+                      {/* 分组/计费：默认两行显示，数据来自列表接口的 billingSummary，
+                          无需展开详情。展开后用完整明细校正同一套判据。 */}
+                      <td
+                        style={{
+                          fontSize: 11,
+                          color: "var(--color-text-secondary)",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {groupBillingLines.length > 0 ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            {groupBillingLines.map((line, lineIndex) => (
+                              <span
+                                key={lineIndex}
+                                style={lineIndex === 0
+                                  ? { fontWeight: 500, color: "var(--color-text-primary)" }
+                                  : undefined}
+                              >
+                                {line}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: "var(--color-text-muted)" }}>-</span>
+                        )}
+                      </td>
                       <td
                         style={{
                           fontSize: 12,
@@ -3046,7 +3185,7 @@ export default function ProxyLogs() {
                         }}
                       >
                         {typeof log.estimatedCost === "number"
-                          ? `$${log.estimatedCost.toFixed(6)}`
+                          ? makeMoney(log.siteId)(log.estimatedCost)
                           : "-"}
                       </td>
                       <td style={{ textAlign: "center" }}>
@@ -3195,6 +3334,21 @@ export default function ProxyLogs() {
                                           >
                                             {detailLog.username || "未知账号"}
                                           </strong>
+                                          {/* 三-2：分组/计费紧跟在账号之后，
+                                              让"这次按哪一档扣了多少钱"一眼可查。 */}
+                                          {groupBillingSummary ? (
+                                            <>
+                                              ，分组/计费:{" "}
+                                              <strong
+                                                style={{
+                                                  color:
+                                                    "var(--color-text-primary)",
+                                                }}
+                                              >
+                                                {groupBillingSummary}
+                                              </strong>
+                                            </>
+                                          ) : null}
                                         </>
                                       )}
                                     </div>
@@ -3367,8 +3521,7 @@ export default function ProxyLogs() {
                                                 "var(--color-text-primary)",
                                             }}
                                           >
-                                            $
-                                            {detailLog.estimatedCost.toFixed(6)}
+                                            {makeMoney(detailLog.siteId)(detailLog.estimatedCost)}
                                           </strong>
                                         </>
                                       )}
