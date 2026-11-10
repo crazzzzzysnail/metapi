@@ -10,6 +10,7 @@ import {
   UserInfo,
 } from './base.js';
 import { stripTrailingSlashes } from '../urlNormalization.js';
+import { quotaToUsd, usdToQuota } from '../billing/quotaScale.js';
 import { parseUpstreamUrlMode, resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -679,10 +680,10 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
   /**
    * Convert USD balance to internal quota unit.
-   * Uses the same conversion factor as all-api-hub (500000 per USD).
+   * 标尺由 billing/quotaScale 统一提供（sub2api 归入 new-api 系口径）。
    */
   private usdToQuota(balanceUsd: number): number {
-    return Math.round(Math.max(0, balanceUsd) * 500000);
+    return usdToQuota(balanceUsd, this.platformName);
   }
 
   // --- Login: Not supported (JWT only) ---
@@ -725,9 +726,9 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     const quotaValue = this.usdToQuota(user.balance);
     // Sub2API only provides current balance, no usage breakdown
     return {
-      balance: quotaValue / 500000,
+      balance: quotaToUsd(quotaValue, this.platformName),
       used: 0,
-      quota: quotaValue / 500000,
+      quota: quotaToUsd(quotaValue, this.platformName),
       subscriptionSummary,
     };
   }

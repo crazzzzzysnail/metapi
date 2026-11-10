@@ -91,6 +91,19 @@ export const accountTokens = sqliteTable('account_tokens', {
   name: text('name').notNull(),
   token: text('token').notNull(),
   tokenGroup: text('token_group'),
+  /**
+   * 令牌的实际 auto 链路（JSON 字符串数组）。
+   *
+   * 来源是 `/api/token/` 里每条令牌的 `auto_groups` 字段（2026-11-09 实测确认）。
+   * 必须与站点级 `group_ratio` / `/api/pricing.auto_groups` 区分开：
+   *   - 后者描述**站点默认**链路（siteA 为 [grp-daily, grp-perf]）；
+   *   - 前者才是这个 key 实际会路由到的分组序列
+   *     （实测 test 令牌为 [grp-codex, grp-codex-pro, 组丁-chs]）。
+   *
+   * null = 未同步到（不代表"没有链路"）；'[]' = 上游明确给了空链路。
+   * 两者必须可区分，否则展示层无法判断该显示"未知"还是"无链路"。
+   */
+  autoGroups: text('auto_groups'),
   valueStatus: text('value_status').notNull().default('ready'),
   source: text('source').default('manual'), // 'manual' | 'sync' | 'legacy'
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
@@ -558,3 +571,25 @@ export const events = sqliteTable('events', {
   typeCreatedIdx: index('events_type_created_at_idx').on(table.type, table.createdAt),
   createdAtIdx: index('events_created_at_idx').on(table.createdAt),
 }));
+
+/**
+ * 站点计费参数（S6 / T8.2）。
+ *
+ * 记录"这个站点的钱是怎么算出来的"两类事实：
+ *   1) 额度标尺（quota_per_unit）——上游 /api/status 的 quota_per_unit，缺省按平台默认；
+ *   2) 汇率（cny_per_usd）——切 CNY 时把 USD 换算成人民币。
+ *
+ * rate_source / quota_source 区分自动探测与人工覆盖：
+ * 用户可手动维护汇率补全探测不到的站点（R7 决议），但**绝不允许伪造**——
+ * 两列都允许 null，null 的含义是"未知"，展示层必须如实说"汇率未知"。
+ */
+export const siteBillingProfiles = sqliteTable('site_billing_profiles', {
+  siteId: integer('site_id').primaryKey(),
+  quotaPerUnit: integer('quota_per_unit'), // 500000 / 1000000 / 其它；null = 未探测
+  cnyPerUsd: real('cny_per_usd'),           // 1 USD ≈ N CNY；null = 未知
+  quotaSource: text('quota_source'),        // 'auto' | 'manual' | null
+  rateSource: text('rate_source'),          // 'auto' | 'manual' | null
+  capturedAt: text('captured_at'),          // ISO；最近一次成功探测时间
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+});
+

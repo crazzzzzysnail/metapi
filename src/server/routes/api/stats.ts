@@ -25,6 +25,7 @@ import { estimateRewardWithTodayIncomeFallback } from "../../services/todayIncom
 import {
   getProxyLogBaseSelectFields,
   parseProxyLogBillingDetails,
+  extractProxyLogBillingSummary,
   withProxyLogSelectFields,
 } from "../../services/proxyLogStore.js";
 import {
@@ -56,6 +57,8 @@ import { getSiteStatsSnapshot } from "../../services/siteStatsSnapshotService.js
 import {
   runUsageAggregationProjectionPass,
 } from "../../services/usageAggregationService.js";
+// 费用 SQL 表达式统一由 statsShared 提供，路由层不再保留本地副本（D14 前半）。
+import { proxyCostSqlExpression } from "../../services/statsShared.js";
 
 function parseBooleanFlag(raw?: string): boolean {
   if (!raw) return false;
@@ -126,17 +129,28 @@ function writeModelsMarketplaceCache(
   });
 }
 
-function proxyCostSqlExpression() {
-  return sql<number>`
-    coalesce(
-      ${schema.proxyLogs.estimatedCost},
-      case
-        when lower(coalesce(${schema.sites.platform}, 'new-api')) = 'veloera'
-          then coalesce(${schema.proxyLogs.totalTokens}, 0) / 1000000.0
-        else coalesce(${schema.proxyLogs.totalTokens}, 0) / 500000.0
-      end
-    )
-  `;
+/**
+ * 把站点计费档案行转成模型广场需要的展示结构（T8.6）。
+ * 无档案行 → 全 null，语义是"未探测"，由前端标「汇率未知」；绝不补默认值。
+ */
+function toMarketplaceBillingProfile(
+  row: typeof schema.siteBillingProfiles.$inferSelect | undefined,
+) {
+  const positiveOrNull = (value: unknown): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const sourceLabel = (value: unknown): 'auto' | 'manual' | null => {
+    const v = String(value || '').trim().toLowerCase();
+    return v === 'auto' || v === 'manual' ? v : null;
+  };
+  return {
+    cnyPerUsd: positiveOrNull(row?.cnyPerUsd),
+    rateSource: sourceLabel(row?.rateSource),
+    quotaPerUnit: positiveOrNull(row?.quotaPerUnit),
+    quotaSource: sourceLabel(row?.quotaSource),
+    capturedAt: typeof row?.capturedAt === 'string' ? row.capturedAt : null,
+  };
 }
 
 type ProxyLogStatusFilter = "all" | "success" | "failed";
@@ -587,7 +601,7 @@ function mapProxyLogRow(
       tags?: string | null;
     } | null;
   },
-  options?: { includeBillingDetails?: boolean },
+  options?: { includeBillingDetails?: boolean; includeBillingSummary?: boolean },
 ) {
   const clientMeta = resolveProxyLogClientMeta(row.proxy_logs);
   const legacyMeta = parseProxyLogMessageMeta(
@@ -595,8 +609,13 @@ function mapProxyLogRow(
       ? row.proxy_logs.errorMessage
       : "",
   );
+  // 摘要模式下 billing_details 只作为**服务端解析输入**，不进响应：
+  // 列表一页几十行、每行原文可达数十 KB，且界面已有解析好的摘要。
+  // 必须用解构剔除键本身 —— 置 undefined 仍会留下一个存在的键，
+  // 既骗不过 `not.toHaveProperty`，也会被 JSON 序列化时按平台差异处理。
+  const { billingDetails: _omitInSummaryMode, ...coreColumns } = row.proxy_logs;
   return {
-    ...row.proxy_logs,
+    ...coreColumns,
     isStream:
       row.proxy_logs.isStream == null ? null : Boolean(row.proxy_logs.isStream),
     firstByteLatencyMs:
@@ -606,6 +625,16 @@ function mapProxyLogRow(
     ...(options?.includeBillingDetails
       ? {
           billingDetails: parseProxyLogBillingDetails(
+            row.proxy_logs.billingDetails,
+          ),
+        }
+      : {}),
+    // 列表页的轻量摘要：只带分组名/倍率/档位/单价四个标量。
+    // 原文已由上面的解构剔除，这里不再重复处理；
+    // 需要完整明细的调用方走 includeBillingDetails 分支显式取回。
+    ...(options?.includeBillingSummary
+      ? {
+          billingSummary: extractProxyLogBillingSummary(
             row.proxy_logs.billingDetails,
           ),
         }
@@ -758,7 +787,9 @@ export async function statsRoutes(app: FastifyInstance) {
           .offset(offset)
           .all();
       },
-      { includeBillingDetails: false },
+      // 列表要默认显示「分组/计费」两行，因此带轻量摘要；
+      // 完整 billing_details 仍只在详情接口下发。
+      { includeBillingDetails: false, includeBillingSummary: true },
     )) as Array<{
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
       accounts: { username?: string | null } | null;
@@ -795,7 +826,10 @@ export async function statsRoutes(app: FastifyInstance) {
     const totalRow = await totalQuery.get();
 
     return {
-      items: listRows.map((row) => mapProxyLogRow(row)),
+      // 上面已经按 includeBillingSummary 把 billing_details 查出来了，
+      // 这里必须把同一个开关传给映射函数 —— 否则列查了、字段却不输出，
+      // 表现就是界面永远空白（且不会报错，很难发现）。
+      items: listRows.map((row) => mapProxyLogRow(row, { includeBillingSummary: true })),
       total: Number(totalRow?.total || 0),
       page: Math.floor(offset / limit) + 1,
       pageSize: limit,
@@ -1200,6 +1234,19 @@ export async function statsRoutes(app: FastifyInstance) {
               perCallTotal?: number;
             }
           >;
+          /** auto 聚合分组的下属链路（T4.4）。空数组 = 无 auto 或聚合入口即 default。 */
+          autoGroups?: string[];
+          /**
+           * 站点计费档案（T8.6）。全 null 表示"未探测且未手动维护"，
+           * 前端切 CNY 时必须显示「汇率未知」而不是猜一个汇率。
+           */
+          billingProfile: {
+            cnyPerUsd: number | null;
+            rateSource: 'auto' | 'manual' | null;
+            quotaPerUnit: number | null;
+            quotaSource: 'auto' | 'manual' | null;
+            capturedAt: string | null;
+          };
         }>;
       };
 
@@ -1216,6 +1263,12 @@ export async function statsRoutes(app: FastifyInstance) {
             ),
           )
           .all();
+
+        // T8.6：站点计费档案单独取（左连接语义 —— 没档案的站点也必须出现在结果里，
+        // 只是汇率为 null 由前端标"未知"）。用 innerJoin 会把未探测过的站点整批丢掉。
+        const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
+        const billingProfileBySiteId = new Map<number, typeof schema.siteBillingProfiles.$inferSelect>();
+        for (const row of billingProfileRows) billingProfileBySiteId.set(row.siteId, row);
 
         const metadataResults = await Promise.all(
           activeAccountRows.map(async (row) => {
@@ -1274,6 +1327,13 @@ export async function statsRoutes(app: FastifyInstance) {
               ownerBy: model.ownerBy,
               enableGroups: model.enableGroups,
               groupPricing: model.groupPricing,
+              // T4.4：auto 链路成员分组（如 siteA 的 grp-daily/grp-perf）。
+              // 空数组表示该站点没有 auto 聚合，或聚合入口就是 default。
+              autoGroups: result.catalog.autoGroups ?? [],
+              // T8.6 / T8.7：把该站点的汇率与标尺档案一并带出。
+              // null 的含义是"未探测且未手动维护"，前端必须据此显示"汇率未知"，
+              // 不得用任何默认汇率换算（R3 严禁伪造）。
+              billingProfile: toMarketplaceBillingProfile(billingProfileBySiteId.get(result.site.id)),
             });
           }
         }
@@ -1948,7 +2008,7 @@ export async function statsRoutes(app: FastifyInstance) {
     },
   );
 
-  // Site trend – daily spend/calls broken down by site
+  // Site trend – grp-daily spend/calls broken down by site
   app.get<{ Querystring: { days?: string; refresh?: string } }>(
     "/api/stats/site-trend",
     async (request) => {

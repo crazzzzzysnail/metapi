@@ -1,5 +1,6 @@
 import {
   BasePlatformAdapter,
+  unsupportedBalance,
   type BalanceInfo,
   type CheckinResult,
   type UserInfo,
@@ -54,8 +55,10 @@ export abstract class StandardApiProviderAdapterBase extends BasePlatformAdapter
     };
   }
 
+  // T2.4：这类上游没有余额接口。返回 unsupported 而不是伪造 0，
+  // 否则「读不到」会被显示成「已用尽」，并把账户原有余额覆盖掉。
   override async getBalance(_baseUrl: string, _accessToken: string): Promise<BalanceInfo> {
-    return { balance: 0, used: 0, quota: 0 };
+    return unsupportedBalance('this platform does not expose a balance API');
   }
 
   protected async fetchModelsFromStandardEndpoint(options: FetchModelsOptions): Promise<string[]> {

@@ -19,6 +19,10 @@ describe('sites route subscription summary aggregation', () => {
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-sites-subscription-'));
     process.env.DATA_DIR = dataDir;
+    // S6 事故防线：DB_URL 的优先级高于 DATA_DIR。同一 worker 里先跑过的测试若设过
+    // DB_URL=./data/hub.db（备份往返类用例是这么做的），这里只设 DATA_DIR 根本挡不住，
+    // 连接会落回仓库真实库 —— 那次站点数据被覆盖就是这么来的。必须显式清掉。
+    delete process.env.DB_URL;
 
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');

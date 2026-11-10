@@ -71,16 +71,26 @@ function buildProxyLogStreamTimingSelectFields() {
   };
 }
 
+/**
+ * 列表接口的两个开关刻意分开：
+ *   - includeBillingDetails → 响应里带**完整** billing_details（详情接口用）；
+ *   - includeBillingSummary → 只把该列 **SELECT 出来**，由路由层解析成轻量摘要，
+ *     原文不进响应体（列表页默认显示「分组/计费」两行用）。
+ * 两者都要求该列存在；缺列时下面的降级重试会撤掉对应开关。
+ */
 function buildProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
+  includeBillingSummary?: boolean;
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
 }) {
+  const needsBillingColumn = options?.includeBillingDetails === true
+    || options?.includeBillingSummary === true;
   return {
     ...buildProxyLogCoreSelectFields(),
     ...(options?.includeStreamTimingFields ? buildProxyLogStreamTimingSelectFields() : {}),
     ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
-    ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
+    ...(needsBillingColumn ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
   };
 }
 
@@ -92,6 +102,7 @@ export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogSelectFields>;
 
 export type ResolvedProxyLogSelectFields = {
   includeBillingDetails: boolean;
+  includeBillingSummary: boolean;
   includeClientFields: boolean;
   includeStreamTimingFields: boolean;
   fields: ProxyLogSelectFields;
@@ -99,11 +110,14 @@ export type ResolvedProxyLogSelectFields = {
 
 export async function resolveProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
+  includeBillingSummary?: boolean;
   includeClientFields?: boolean;
   includeStreamTimingFields?: boolean;
 }) {
-  const includeBillingDetails = options?.includeBillingDetails === true
-    && await hasProxyLogBillingDetailsColumn();
+  // 摘要与完整明细共用同一列存在性判断：缺列时两者一起退让，不会出现"查了列却给不出值"。
+  const hasBillingColumn = await hasProxyLogBillingDetailsColumn();
+  const includeBillingDetails = options?.includeBillingDetails === true && hasBillingColumn;
+  const includeBillingSummary = options?.includeBillingSummary === true && hasBillingColumn;
   const includeClientFields = options?.includeClientFields !== false
     && await hasProxyLogClientColumns();
   const includeStreamTimingFields = options?.includeStreamTimingFields !== false
@@ -111,10 +125,12 @@ export async function resolveProxyLogSelectFields(options?: {
 
   return {
     includeBillingDetails,
+    includeBillingSummary,
     includeClientFields,
     includeStreamTimingFields,
     fields: buildProxyLogSelectFields({
       includeBillingDetails,
+      includeBillingSummary,
       includeClientFields,
       includeStreamTimingFields,
     }),
@@ -123,7 +139,7 @@ export async function resolveProxyLogSelectFields(options?: {
 
 export async function withProxyLogSelectFields<T>(
   runner: (selection: ResolvedProxyLogSelectFields) => Promise<T>,
-  options?: { includeBillingDetails?: boolean; includeClientFields?: boolean; includeStreamTimingFields?: boolean },
+  options?: { includeBillingDetails?: boolean; includeBillingSummary?: boolean; includeClientFields?: boolean; includeStreamTimingFields?: boolean },
 ): Promise<T> {
   let selection = await resolveProxyLogSelectFields(options);
 
@@ -131,13 +147,17 @@ export async function withProxyLogSelectFields<T>(
     try {
       return await runner(selection);
     } catch (error) {
-      if (selection.includeBillingDetails && isMissingBillingDetailsColumnError(error)) {
+      // 缺 billing_details 列时，完整明细与轻量摘要**一起**退让 ——
+      // 只撤一个会让下面的条件永远成立，从而在这里死循环重试。
+      if ((selection.includeBillingDetails || selection.includeBillingSummary) && isMissingBillingDetailsColumnError(error)) {
         selection = {
           includeBillingDetails: false,
+          includeBillingSummary: false,
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: false,
+            includeBillingSummary: false,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: selection.includeStreamTimingFields,
           }),
@@ -148,10 +168,12 @@ export async function withProxyLogSelectFields<T>(
       if (selection.includeClientFields && isMissingProxyLogClientColumnsError(error)) {
         selection = {
           includeBillingDetails: selection.includeBillingDetails,
+          includeBillingSummary: selection.includeBillingSummary,
           includeClientFields: false,
           includeStreamTimingFields: selection.includeStreamTimingFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
+            includeBillingSummary: selection.includeBillingSummary,
             includeClientFields: false,
             includeStreamTimingFields: selection.includeStreamTimingFields,
           }),
@@ -162,10 +184,12 @@ export async function withProxyLogSelectFields<T>(
       if (selection.includeStreamTimingFields && isMissingProxyLogStreamTimingColumnsError(error)) {
         selection = {
           includeBillingDetails: selection.includeBillingDetails,
+          includeBillingSummary: selection.includeBillingSummary,
           includeClientFields: selection.includeClientFields,
           includeStreamTimingFields: false,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
+            includeBillingSummary: selection.includeBillingSummary,
             includeClientFields: selection.includeClientFields,
             includeStreamTimingFields: false,
           }),
@@ -191,6 +215,55 @@ export function parseProxyLogBillingDetails(value: unknown): Record<string, unkn
   } catch {
     return null;
   }
+}
+
+/**
+ * 列表页用的轻量计费摘要。
+ *
+ * 为什么不直接把整段 billing_details 下发给列表：
+ *   一条记录的 billing_details 含 usage / pricing / breakdown 三个对象共十几个字段，
+ *   列表一页几十行全部带上会明显放大响应体；而界面只需要分组名、倍率、档位与单价。
+ *   明细仍然走单条详情接口，展开时才取 —— 两个口径各取所需，不是同一份数据的两次搬运。
+ */
+export interface ProxyLogBillingSummary {
+  groupName: string | null;
+  groupRatio: number | null;
+  tierName: string | null;
+  inputPerMillion: number | null;
+  outputPerMillion: number | null;
+}
+
+function toFiniteOrNull(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 从 billing_details（对象或 JSON 文本）抽出列表要显示的几个标量。缺字段一律 null，不补 0。 */
+export function extractProxyLogBillingSummary(value: unknown): ProxyLogBillingSummary | null {
+  const detail = parseProxyLogBillingDetails(value);
+  if (!detail) return null;
+
+  const pricing = (detail.pricing || {}) as Record<string, unknown>;
+  const breakdown = (detail.breakdown || {}) as Record<string, unknown>;
+  const summary: ProxyLogBillingSummary = {
+    groupName: typeof pricing.groupName === 'string' && pricing.groupName.trim()
+      ? pricing.groupName.trim()
+      : null,
+    groupRatio: toFiniteOrNull(pricing.groupRatio),
+    tierName: typeof pricing.tierName === 'string' && pricing.tierName.trim()
+      ? pricing.tierName.trim()
+      : null,
+    inputPerMillion: toFiniteOrNull(breakdown.inputPerMillion),
+    outputPerMillion: toFiniteOrNull(breakdown.outputPerMillion),
+  };
+
+  // 全空说明这条记录压根没有可用计费信息（旧数据或未记账），返回 null 让前端显示占位。
+  const hasAnything = summary.groupName !== null
+    || summary.groupRatio !== null
+    || summary.tierName !== null
+    || summary.inputPerMillion !== null
+    || summary.outputPerMillion !== null;
+  return hasAnything ? summary : null;
 }
 
 function normalizeProxyLogStoreErrorMessage(error: unknown): string {
@@ -269,7 +342,9 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     promptTokens: input.promptTokens ?? null,
     completionTokens: input.completionTokens ?? null,
     totalTokens: input.totalTokens ?? null,
-    estimatedCost: input.estimatedCost ?? 0,
+    // N2 同层第二处：这里也必须原样传 null。
+    // 上一轮改的是 sharedSurface，若此处仍 `?? 0`，缺价照样会以"免费"落库。
+    estimatedCost: input.estimatedCost ?? null,
     errorMessage: input.errorMessage ?? null,
     retryCount: input.retryCount ?? 0,
     createdAt: input.createdAt ?? null,

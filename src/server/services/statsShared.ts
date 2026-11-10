@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { schema } from "../db/index.js";
+import { usdDivisorSql } from "./billing/quotaScale.js";
 import {
   formatLocalDateTime,
   getLocalHourAnchor,
@@ -7,15 +8,24 @@ import {
   type StoredUtcDateTimeInput,
 } from "./localTimeService.js";
 
+/**
+ * 代理请求成本的 SQL 兜底表达式。
+ *
+ * ⚠️ 现状（A9 复核，2026-11-08）：**全仓无人调用本函数** ——
+ * `dashboardSnapshotService.ts` 与 `routes/api/stats.ts` 只在 import 里出现，
+ * 实际花费统计走的是 JS 侧投影表 `site_day_usage.total_site_spend`
+ * （由 usageAggregationService 逐站换算，S1 已修正标尺）。
+ * 因此这里保留固定 new-api 标尺不会产生错误数字；一旦将来有查询真正使用它，
+ * 必须改成按 `site_billing_profiles.quota_per_unit` + 平台默认表生成 CASE
+ * （不能像早期版本那样手写两个 veloera 分支）。
+ */
 export function proxyCostSqlExpression() {
+  // 额度标尺统一从 billing/quotaScale 取，SQL 里不再出现字面量除数。
+  // Drizzle 会把数值参数化，所以必须写成 `/ ${占位符}` 而不是拼接字符串。
   return sql<number>`
     coalesce(
       ${schema.proxyLogs.estimatedCost},
-      case
-        when lower(coalesce(${schema.sites.platform}, 'new-api')) = 'veloera'
-          then coalesce(${schema.proxyLogs.totalTokens}, 0) / 1000000.0
-        else coalesce(${schema.proxyLogs.totalTokens}, 0) / 500000.0
-      end
+      coalesce(${schema.proxyLogs.totalTokens}, 0) / ${usdDivisorSql('new-api')}.0
     )
   `;
 }

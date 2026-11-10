@@ -74,6 +74,9 @@ type RuntimeSettings = {
   checkinDelayMin: number;
   checkinDelayMax: number;
   checkinDelayUnit: CheckinDelayUnit;
+  // S6 / T8.11：两个独立开关（R7）。货币管显示，口径管用哪套价，彼此正交。
+  displayCurrency: 'USD' | 'CNY';
+  pricingDisplayMode: 'official' | 'effective';
   /**
    * 两条「仅提示不拦截」判据的服务端算结果（定稿第 8.2 条与第 4 条）。
    * 可为 null：读库失败时服务端不猜，前端也就不显示提示。
@@ -371,6 +374,8 @@ export default function Settings() {
     checkinDelayMin: CHECKIN_DELAY_DEFAULTS.min,
     checkinDelayMax: CHECKIN_DELAY_DEFAULTS.max,
     checkinDelayUnit: CHECKIN_DELAY_DEFAULTS.unit,
+    displayCurrency: 'USD',
+    pricingDisplayMode: 'official',
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
@@ -710,6 +715,8 @@ export default function Settings() {
         checkinDelayHint: runtimeInfo.checkinDelayHint ?? null,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
+        displayCurrency: runtimeInfo.displayCurrency === 'CNY' ? 'CNY' : 'USD',
+        pricingDisplayMode: runtimeInfo.pricingDisplayMode === 'effective' ? 'effective' : 'official',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
         logCleanupProgramLogsEnabled: !!runtimeInfo.logCleanupProgramLogsEnabled,
         logCleanupRetentionDays: Number(runtimeInfo.logCleanupRetentionDays) >= 1
@@ -836,6 +843,8 @@ export default function Settings() {
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
         logCleanupProgramLogsEnabled: runtime.logCleanupProgramLogsEnabled,
         logCleanupRetentionDays: runtime.logCleanupRetentionDays,
+        displayCurrency: runtime.displayCurrency,
+        pricingDisplayMode: runtime.pricingDisplayMode,
       });
       toast.success('定时任务设置已保存');
     } catch (err: any) {
@@ -1591,6 +1600,32 @@ export default function Settings() {
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
               默认每天早上 6 点执行。按每次定时任务执行时间，清理早于“保留天数”的日志；两个选项都不勾选时不会实际删除日志。
+            </div>
+          </div>
+          {/* S6 / T8.11：货币与计价口径两个独立开关（R7）。 */}
+          <div style={{ borderTop: '1px solid var(--color-border)', margin: '16px 0 12px', paddingTop: 12 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>显示货币与计价口径</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 8 }}>
+              <div style={{ minWidth: 180 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>显示货币</div>
+                <ModernSelect
+                  value={runtime.displayCurrency}
+                  onChange={(value) => setRuntime((prev) => ({ ...prev, displayCurrency: value === 'CNY' ? 'CNY' : 'USD' }))}
+                  options={[{ value: 'USD', label: '美元 USD' }, { value: 'CNY', label: '人民币 CNY' }].map((item) => ({ ...item }))}
+                />
+              </div>
+              <div style={{ minWidth: 200 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>模型价格口径</div>
+                <ModernSelect
+                  value={runtime.pricingDisplayMode}
+                  onChange={(value) => setRuntime((prev) => ({ ...prev, pricingDisplayMode: value === 'effective' ? 'effective' : 'official' }))}
+                  options={[{ value: 'official', label: '官方标准价' }, { value: 'effective', label: '分组实扣价' }].map((item) => ({ ...item }))}
+                />
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6, marginTop: 8 }}>
+              切到人民币会按各站点自己的汇率换算；**探测不到且未手动维护汇率的站点会被排除出合计并提示数量**。
+              「分组实扣价」= 官方价 × 分组倍率；两开关彼此独立。
             </div>
           </div>
           <div style={{ marginTop: 12 }}>

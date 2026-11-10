@@ -21,6 +21,10 @@ export type SiteStatsSnapshotPayload = {
     totalBalance: number;
     totalSpend: number;
     accountCount: number;
+    /** S6 / T8.9：该站点汇率（null = 未知，前端须标「汇率未知」而非换算）。 */
+    cnyPerUsd?: number | null;
+    /** 汇率来源标记，用于列表页区分"自动探测 / 手动覆盖 / 未知"。 */
+    rateSource?: 'auto' | 'manual' | 'unknown';
   }>;
   trend: Array<{
     date: string;
@@ -78,6 +82,14 @@ async function loadSiteStatsSnapshotPayload(
     spendBySiteId.set(row.siteId, Number(row.totalSpend || 0));
   }
 
+  // S6 / T8.8：站点级汇率档案。逐站换算，汇率未知的站点不进 CNY 合计但必须计数。
+  const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
+  const cnyRateBySiteId = new Map<number, number | null>();
+  for (const row of billingProfileRows) {
+    const rate = Number(row.cnyPerUsd);
+    cnyRateBySiteId.set(row.siteId, Number.isFinite(rate) && rate > 0 ? rate : null);
+  }
+
   const distribution = accountDistributionRows.map((row) => ({
     siteId: row.siteId,
     siteName: row.siteName,
@@ -85,6 +97,13 @@ async function loadSiteStatsSnapshotPayload(
     totalBalance: toRoundedMicroNumber(Number(row.totalBalance || 0)),
     totalSpend: toRoundedMicroNumber(spendBySiteId.get(row.siteId) || 0),
     accountCount: Number(row.accountCount || 0),
+    // 该站点的汇率状态（T8.9 列表页要用）：auto / manual / unknown
+    cnyPerUsd: cnyRateBySiteId.get(row.siteId) ?? null,
+    rateSource: (() => {
+      const profile = billingProfileRows.find((p) => p.siteId === row.siteId);
+      const label = String(profile?.rateSource || '').trim().toLowerCase();
+      return label === 'auto' || label === 'manual' ? label : 'unknown';
+    })(),
   }));
 
   const dayMap: Record<

@@ -241,6 +241,30 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
     expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
   });
 
+  it('treats sub2api as pricing-unsupported (T2.5)', async () => {
+    // sub2api 只有订阅摘要与余额，没有任何取价端点。
+    // 它此前被错列为支持定价目录，导致 UI 显示"可查目录"而结果恒为空。
+    const seeded = await seedChannel({
+      route: { modelPattern: 'sub2api-model' },
+      channel: { sourceModel: 'sub2api-model' },
+      site: { platform: 'sub2api' },
+    });
+    getCachedModelPricingCatalogMock.mockReturnValue(null);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${seeded.route.id}/channels`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as any[];
+    expect(body[0].billing).toMatchObject({
+      status: 'unavailable',
+      message: '当前连接不支持计费目录',
+    });
+    expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
+  });
+
   it('does not refresh pricing for disabled or source-unavailable channels', async () => {
     const disabled = await seedChannel({
       route: { modelPattern: 'disabled-refresh-model' },

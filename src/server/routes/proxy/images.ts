@@ -148,7 +148,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         }
 
         const latency = Date.now() - startTime;
-        let estimatedCost = 0;
+        let estimatedCost: number | null = null;
         await recordTokenRouterEventBestEffort('estimate proxy cost', async () => {
           estimatedCost = await estimateProxyCost({
             site: selected.site,
@@ -160,10 +160,10 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           });
         });
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost ?? 0, upstreamModel)
         ));
         await recordTokenRouterEventBestEffort('record downstream cost usage', () => (
-          recordDownstreamCostUsage(request, estimatedCost)
+          recordDownstreamCostUsage(request, estimatedCost ?? 0)
         ));
         logProxy(
           selected,
@@ -371,7 +371,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         }
 
         const latency = Date.now() - startTime;
-        let estimatedCost = 0;
+        let estimatedCost: number | null = null;
         await recordTokenRouterEventBestEffort('estimate proxy cost', async () => {
           estimatedCost = await estimateProxyCost({
             site: selected.site,
@@ -383,10 +383,10 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           });
         });
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost ?? 0, upstreamModel)
         ));
         await recordTokenRouterEventBestEffort('record downstream cost usage', () => (
-          recordDownstreamCostUsage(request, estimatedCost)
+          recordDownstreamCostUsage(request, estimatedCost ?? 0)
         ));
         logProxy(
           selected,
@@ -473,7 +473,7 @@ async function logProxy(
   errorMessage: string | null,
   retryCount: number,
   downstreamApiKeyId: number | null = null,
-  estimatedCost = 0,
+  estimatedCost: number | null = null,
   downstreamPath = '/v1/images/generations',
   clientContext: DownstreamClientContext | null = null,
   isStream = false,

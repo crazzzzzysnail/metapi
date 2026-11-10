@@ -40,7 +40,7 @@ describe('standardApiProvider helpers', () => {
     expect(resolveVersionedModelsUrl('https://api.example.com/v1beta/openai/chat/completions$')).toBe('https://api.example.com/v1beta/openai/models');
   });
 
-  it('provides shared unsupported login/checkin and zero-balance defaults', async () => {
+  it('provides shared unsupported login/checkin and honest balance defaults', async () => {
     const adapter = new TestStandardApiProviderAdapter();
 
     await expect(adapter.login('https://api.example.com', 'user', 'pass')).resolves.toEqual({
@@ -52,11 +52,12 @@ describe('standardApiProvider helpers', () => {
       success: false,
       message: 'checkin endpoint not supported',
     });
-    await expect(adapter.getBalance('https://api.example.com', 'token')).resolves.toEqual({
-      balance: 0,
-      used: 0,
-      quota: 0,
-    });
+    // T2.4：这里原本断言 `{balance:0, used:0, quota:0}`，即把"上游没有余额接口"
+    // 伪装成"余额为零"。那会让界面显示"已用尽"、并让 balanceService 用 0 覆盖真实余额。
+    // 现在必须显式声明 unsupported，且带可展示的原因。
+    const balance = await adapter.getBalance('https://api.example.com', 'token');
+    expect(balance.unsupported).toBe(true);
+    expect(balance.unsupportedReason).toContain('does not expose a balance API');
   });
 
   it('does not swallow mapper bugs while still returning empty lists for network failures', async () => {

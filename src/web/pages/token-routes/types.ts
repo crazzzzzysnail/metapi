@@ -31,7 +31,12 @@ export type RouteChannelRouteUnit = {
 
 export type RouteChannelBilling = {
   status: 'ready' | 'refreshing' | 'unavailable';
+  /** 实际用于查价的链路分组（三-1）。auto 令牌这里是链路末档，不是字面 "auto"。 */
   groupName: string | null;
+  /** auto 链路的全部候选档（三-1）。非 auto 令牌为空 / 不传。 */
+  groupCandidates?: string[];
+  /** 为什么按这个分组计价（三-1）。普通显式分组为 null。 */
+  groupNote?: string | null;
   modelName: string | null;
   pricing: {
     quotaType: number;
@@ -40,6 +45,15 @@ export type RouteChannelBilling = {
     perCallInput?: number;
     perCallOutput?: number;
     perCallTotal?: number;
+    /** 多档动态计费的全部档位（二-3）。 */
+    tiers?: Array<{
+      name: string;
+      input: number;
+      output?: number;
+      cacheRead?: number;
+      cacheCreation?: number;
+      condition?: string | null;
+    }>;
   } | null;
   refreshTaskId?: string | null;
   message: string;

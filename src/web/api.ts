@@ -386,6 +386,9 @@ export type RuntimeSettingsPayload = {
   checkinDelayMin?: number;
   checkinDelayMax?: number;
   checkinDelayUnit?: CheckinDelayUnit;
+  // S6 / T8.11：显示货币与计价口径（两个独立开关，R7）
+  displayCurrency?: 'USD' | 'CNY';
+  pricingDisplayMode?: 'official' | 'effective';
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -444,6 +447,12 @@ export type ProxyLogBillingDetails = {
     cacheRatio: number;
     cacheCreationRatio: number;
     groupRatio: number;
+    /** 实际命中的分组名（三-2）；旧记录可能没有。 */
+    groupName?: string | null;
+    /** 动态计费命中的档位名（T6.4）；非动态口径没有。 */
+    tierName?: string;
+    /** 取价口径；旧记录可能没有。 */
+    evidenceSource?: string;
   };
   breakdown: {
     inputPerMillion: number;
@@ -456,6 +465,19 @@ export type ProxyLogBillingDetails = {
     cacheCreationCost: number;
     totalCost: number;
   };
+} | null;
+
+/**
+ * 列表接口下发的轻量计费摘要（默认显示「分组/计费」两行用）。
+ * 与完整 ProxyLogBillingDetails 分开：这里只有界面要显示的标量，
+ * 算式明细仍走单条详情接口，避免每页几十行都拖着整段 JSON。
+ */
+export type ProxyLogBillingSummary = {
+  groupName: string | null;
+  groupRatio: number | null;
+  tierName: string | null;
+  inputPerMillion: number | null;
+  outputPerMillion: number | null;
 } | null;
 
 export type ProxyLogListItem = {
@@ -487,6 +509,8 @@ export type ProxyLogListItem = {
   promptTokens?: number | null;
   completionTokens?: number | null;
   estimatedCost?: number | null;
+  /** 列表默认显示的分组/计费摘要；旧数据或无计费时为 null。 */
+  billingSummary?: ProxyLogBillingSummary;
 };
 
 export type ProxyLogDetail = ProxyLogListItem & {
@@ -784,6 +808,9 @@ export const api = {
     }),
   getSiteDisabledModels: (siteId: number) =>
     request(`/api/sites/${siteId}/disabled-models`),
+  // S6 / T8.10：站点计费参数 —— mode=probe 走上游探测，mode=manual 写用户覆盖。
+  saveSiteBillingProfile: (siteId: number, data: { mode: 'probe' | 'manual'; cnyPerUsd?: number | null; quotaPerUnit?: number | null }) =>
+    request(`/api/sites/${siteId}/billing-profile`, { method: "POST", body: JSON.stringify(data) }),
   updateSiteDisabledModels: (siteId: number, models: string[]) =>
     request(`/api/sites/${siteId}/disabled-models`, {
       method: "PUT",

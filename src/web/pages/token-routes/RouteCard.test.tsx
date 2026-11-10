@@ -141,7 +141,7 @@ describe('RouteCard', () => {
     expect(text).not.toContain('健康：健康');
     expect(text).toContain('权重：2.50');
     expect(text).toContain('余额：$12.34');
-    expect(text).toContain('vip · 1.2/2.4 USD / 1M');
+    expect(text).toContain('vip · $1.2/$2.4 / 1M');
     expect(text).not.toContain('分组计费：');
   });
 
@@ -199,7 +199,7 @@ describe('RouteCard', () => {
 
     const text = collectText(root.root);
     expect(text).toContain('健康');
-    expect(text).toContain('vip · 1.2/2.4 USD / 1M');
+    expect(text).toContain('vip · $1.2/$2.4 / 1M');
     expect(text).not.toContain('余额：$12.34');
   });
 

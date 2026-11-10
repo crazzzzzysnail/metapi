@@ -1,0 +1,646 @@
+{
+  "success": true,
+  "data": [
+    {
+      "model_name": "Pro/deepseek-ai/DeepSeek-V3.2",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)",
+      "pricing_version": "5a90f2b86c08bd983a9a2e6d66c255f4eaef9c4bc934386d2b6ae84ef0ff1f1f"
+    },
+    {
+      "model_name": "zai-org/GLM-4.5-Air",
+      "vendor_id": 5,
+      "quota_type": 1,
+      "model_ratio": 0,
+      "model_price": 1,
+      "owner_by": "",
+      "completion_ratio": 0,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "zai-org/GLM-4.5V",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "Pro/deepseek-ai/DeepSeek-R1",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "Pro/deepseek-ai/DeepSeek-V3.1-Terminus",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V3.2",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "Pro/moonshotai/Kimi-K2.6",
+      "vendor_id": 8,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "zai-org/GLM-5.2",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "openai/gpt-oss-20b",
+      "vendor_id": 6,
+      "quota_type": 1,
+      "model_ratio": 0,
+      "model_price": 1,
+      "owner_by": "",
+      "completion_ratio": 0,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4-Pro-0813",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4-Pro",
+      "description": "DeepSeek-V4-Pro 是 DeepSeek-V4 系列中的旗舰 MoE 语言模型，拥有 1.6T 总参数、49B 激活参数，原生支持 100 万 tokens 的超长上下文。该模型采用创新的混合注意力架构，结合压缩稀疏注意力（CSA）与高度压缩注意力（HCA），在 1M 上下文下仅需 DeepSeek-V3.2 的 27% 单 token 推理 FLOPs 和 10% KV 缓存。模型还引入流形约束超连接（mHC）增强层间信号传播稳定性，并采用 Muon 优化器加速收敛。DeepSeek-V4-Pro 在超过 32T 高质量多样化 tokens 上预训练，后训练采用“领域专家独立培养 + 在线策略蒸馏统一整合”的两阶段范式。其最大推理强度模式 DeepSeek-V4-Pro-Max 在编程基准上取得顶尖表现，并在推理与 Agentic 任务上大幅缩小与领先闭源模型的差距，是目前最强的开源模型之一，支持 Non-think、Think High、Think Max 三种推理强度模式",
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "zai-org/GLM-5.3-Flash",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "IFM/K2-Horizon-375B-A23B",
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "THUDM/GLM-Z1-9B-0414",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V3",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "Pro/deepseek-ai/DeepSeek-V3",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "Pro/zai-org/GLM-5.1",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "THUDM/GLM-4-32B-0414",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "THUDM/GLM-4-9B-0414",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "zai-org/GLM-5.3",
+      "vendor_id": 5,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "IFM/Jais-3-MoVA-36B-A4B",
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "moonshotai/Kimi-K2.7-Code",
+      "vendor_id": 8,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "openai/gpt-oss-120b",
+      "vendor_id": 6,
+      "quota_type": 1,
+      "model_ratio": 0,
+      "model_price": 1,
+      "owner_by": "",
+      "completion_ratio": 0,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-OCR",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-R1",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 1,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V3.1-Terminus",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"base\", p * 1 + c * 1)"
+    },
+    {
+      "model_name": "deepseek-ai/DeepSeek-V4-Flash",
+      "vendor_id": 2,
+      "quota_type": 0,
+      "model_ratio": 0.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "default"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    }
+  ],
+  "group_ratio": {
+    "default": 1,
+    "vip": 1
+  },
+  "usable_group": {
+    "default": "示例分组 default",
+    "vip": "示例分组 vip"
+  },
+  "auto_groups": [
+    "default"
+  ],
+  "supported_endpoint": {
+    "openai": {
+      "path": "/v1/chat/completions",
+      "method": "POST"
+    }
+  },
+  "vendors": [
+    {
+      "id": 13,
+      "name": "GitHub Copilot"
+    },
+    {
+      "id": 21,
+      "name": "Cloudflare Workers AI"
+    },
+    {
+      "id": 2,
+      "name": "DeepSeek"
+    },
+    {
+      "id": 3,
+      "name": "字节跳动"
+    },
+    {
+      "id": 9,
+      "name": "Meta"
+    },
+    {
+      "id": 26,
+      "name": "Cohere"
+    },
+    {
+      "id": 30,
+      "name": "讯飞"
+    },
+    {
+      "id": 15,
+      "name": "Cortecs"
+    },
+    {
+      "id": 24,
+      "name": "Scaleway"
+    },
+    {
+      "id": 29,
+      "name": "MiniMax"
+    },
+    {
+      "id": 28,
+      "name": "零一万物"
+    },
+    {
+      "id": 12,
+      "name": "Vercel AI Gateway"
+    },
+    {
+      "id": 22,
+      "name": "Venice AI"
+    },
+    {
+      "id": 1,
+      "name": "Anthropic"
+    },
+    {
+      "id": 7,
+      "name": "xAI"
+    },
+    {
+      "id": 14,
+      "name": "Alibaba (China)"
+    },
+    {
+      "id": 6,
+      "name": "OpenAI"
+    },
+    {
+      "id": 8,
+      "name": "Moonshot"
+    },
+    {
+      "id": 19,
+      "name": "OpenCode Zen"
+    },
+    {
+      "id": 25,
+      "name": "AIHubMix"
+    },
+    {
+      "id": 27,
+      "name": "Vidu"
+    },
+    {
+      "id": 4,
+      "name": "Google"
+    },
+    {
+      "id": 10,
+      "name": "Mistral"
+    },
+    {
+      "id": 17,
+      "name": "Zhipu AI Coding Plan"
+    },
+    {
+      "id": 5,
+      "name": "智谱"
+    },
+    {
+      "id": 11,
+      "name": "阿里巴巴"
+    },
+    {
+      "id": 16,
+      "name": "Vertex"
+    },
+    {
+      "id": 18,
+      "name": "OpenRouter"
+    },
+    {
+      "id": 20,
+      "name": "Vultr"
+    },
+    {
+      "id": 23,
+      "name": "Cerebras"
+    }
+  ]
+}

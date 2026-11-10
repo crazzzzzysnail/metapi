@@ -131,6 +131,31 @@ describe('proxyUsageParser', () => {
     });
   });
 
+  /**
+   * 三-3 回归：new-api 家族（siteA）的响应同时带 OpenAI 明细字段与
+   * 恒为 0 的 `claude_cache_creation_*` 兼容字段。
+   * 旧实现先判 Anthropic 字段，把这些请求误判成"prompt 不含缓存"，
+   * 于是缓存 token 被重复计费（实测 4441 prompt + 4224 cache 各算一遍）。
+   */
+  it('OpenAI 明细字段优先于恒为 0 的 claude 兼容字段', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        prompt_tokens: 4387,
+        completion_tokens: 12,
+        total_tokens: 4399,
+        prompt_tokens_details: { cached_tokens: 4224, text_tokens: 0, audio_tokens: 0, image_tokens: 0 },
+        input_tokens: 4387,
+        input_tokens_details: null,
+        claude_cache_creation_5_m_tokens: 0,
+        claude_cache_creation_1_h_tokens: 0,
+      },
+    });
+
+    expect(usage.promptTokensIncludeCache).toBe(true);
+    expect(usage.cacheReadTokens).toBe(4224);
+    expect(usage.promptTokens).toBe(4387);
+  });
+
   it('merges usage snapshots by keeping richer values', () => {
     const merged = mergeProxyUsage(
       {

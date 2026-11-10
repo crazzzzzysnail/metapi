@@ -1,0 +1,579 @@
+{
+  "success": true,
+  "data": [
+    {
+      "model_name": "claude-opus-4-6",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-perf-max",
+        "grp-perf-k",
+        "grp-enterprise",
+        "grp-perf-x",
+        "grp-daily",
+        "grp-kiro",
+        "grp-anti",
+        "grp-perf"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ],
+      "pricing_version": "5a90f2b86c08bd983a9a2e6d66c255f4eaef9c4bc934386d2b6ae84ef0ff1f1f"
+    },
+    {
+      "model_name": "deepseek-v4.1-flash",
+      "vendor_id": 28,
+      "quota_type": 0,
+      "model_ratio": 1,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 4,
+      "cache_ratio": 0.02,
+      "enable_groups": [
+        "组丁-chs"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "weekday(\"UTC\") >= 1 && weekday(\"UTC\") <= 5 && ((hour(\"UTC\") >= 9 && hour(\"UTC\") < 12) || (hour(\"UTC\") >= 14 && hour(\"UTC\") < 18)) ? tier(\"peak\", p * 2 + cr * 0.04 + c * 8) : tier(\"off_peak\", p * 1 + cr * 0.02 + c * 4)"
+    },
+    {
+      "model_name": "claude-sonnet-5-5",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "grp-perf-max",
+        "grp-perf-k",
+        "grp-perf",
+        "grp-anti",
+        "grp-daily"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"standard\", p * 2 + cr * 0.2 + cc * 2.5 + cc1h * 4 + c * 10)"
+    },
+    {
+      "model_name": "glm-5.2",
+      "vendor_id": 26,
+      "quota_type": 0,
+      "model_ratio": 4,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 3.5,
+      "cache_ratio": 0.25,
+      "enable_groups": [
+        "组丁"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "claude-haiku-5-5",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "grp-perf",
+        "grp-perf-max",
+        "grp-perf-k"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 100000 ? tier(\"0_100k\", p * 0.1 + cr * 0.01 + cc * 0.125 + cc1h * 0.2 + c * 0.5) : tier(\"100k_plus\", p * 0.5 + cr * 0.05 + cc * 0.625 + cc1h * 1 + c * 2.5)"
+    },
+    {
+      "model_name": "claude-fable-5",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-perf",
+        "grp-perf-max"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "glm-5.3-flash",
+      "vendor_id": 26,
+      "quota_type": 0,
+      "model_ratio": 0.4,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 3.5,
+      "cache_ratio": 0.2875,
+      "enable_groups": [
+        "组丁"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "gemini-3.8-flash",
+      "vendor_id": 27,
+      "quota_type": 0,
+      "model_ratio": 0.375,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.09999999999999999,
+      "enable_groups": [
+        "grp-gemini",
+        "grp-perf"
+      ],
+      "supported_endpoint_types": [
+        "gemini",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "gemini-4-argon",
+      "vendor_id": 27,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 4,
+      "enable_groups": [
+        "grp-gemini",
+        "grp-perf"
+      ],
+      "supported_endpoint_types": [
+        "gemini",
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"standard\", p * 2 + cr * 0.1 + ai * 2 + c * 10)"
+    },
+    {
+      "model_name": "sample-model-len",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro",
+        "grp-codex",
+        "disc-codex"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 272000 ? tier(\"0_272k\", p * 4 + cr * 0.4 + cc * 5 + c * 20) : tier(\"272k_plus\", p * 8 + cr * 0.8 + cc * 10 + c * 30)"
+    },
+    {
+      "model_name": "sample-model-ratio-compact",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 1,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "gpt-6-astra",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 2,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro",
+        "grp-codex"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 272000 ? tier(\"0_272k\", p * 10 + cr * 1 + cc * 12.5 + c * 50) : tier(\"272k_plus\", p * 20 + cr * 2 + cc * 25 + c * 75)"
+    },
+    {
+      "model_name": "claude-opus-4-8",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-perf-k",
+        "grp-enterprise",
+        "grp-daily",
+        "grp-kiro",
+        "grp-perf",
+        "grp-perf-max"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "claude-opus-5-5",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "grp-perf-max",
+        "grp-perf-k",
+        "grp-perf",
+        "grp-daily",
+        "grp-kiro",
+        "grp-anti"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "tier(\"standard\", p * 4 + cr * 0.2 + cc * 5 + cc1h * 8 + c * 20)"
+    },
+    {
+      "model_name": "gpt-6-sol",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 2,
+      "enable_groups": [
+        "grp-codex",
+        "grp-codex-pro"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 272000 ? tier(\"0_272k\", p * 2 + cr * 0.2 + cc * 2.5 + c * 10) : tier(\"272k_plus\", p * 4 + cr * 0.4 + cc * 5 + c * 15)"
+    },
+    {
+      "model_name": "gpt-6.1-sol",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 2,
+      "enable_groups": [
+        "grp-codex",
+        "grp-codex-pro"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 272000 ? tier(\"0_272k\", p * 2 + cr * 0.1 + cc * 2.5 + c * 10) : tier(\"272k_plus\", p * 4 + cr * 0.2 + cc * 5 + c * 15)"
+    },
+    {
+      "model_name": "sample-model-cal",
+      "vendor_id": 28,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "组丁-chs"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "weekday(\"UTC\") >= 1 && weekday(\"UTC\") <= 5 && ((hour(\"UTC\") >= 9 && hour(\"UTC\") < 12) || (hour(\"UTC\") >= 14 && hour(\"UTC\") < 18)) ? tier(\"peak\", p * 2 + cr * 0.04 + c * 8) : tier(\"off_peak\", p * 1 + cr * 0.02 + c * 4)"
+    },
+    {
+      "model_name": "glm-5.3",
+      "vendor_id": 26,
+      "quota_type": 0,
+      "model_ratio": 4,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 3.5,
+      "cache_ratio": 0.25,
+      "enable_groups": [
+        "组丁"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "gpt-5.5-openai-compact",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 0.1,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "codex-auto-review",
+      "quota_type": 0,
+      "model_ratio": 1,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-codex-pro",
+        "grp-codex"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "grok-4.7",
+      "vendor_id": 31,
+      "quota_type": 0,
+      "model_ratio": 37.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 1,
+      "enable_groups": [
+        "grp-grok"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ],
+      "billing_mode": "tiered_expr",
+      "billing_expr": "len <= 200000 ? tier(\"0_200k\", p * 2 + cr * 0.5 + c * 6) : tier(\"200k_plus\", p * 4 + cr * 1 + c * 12)"
+    },
+    {
+      "model_name": "gpt-5.4",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 1.25,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "enable_groups": [
+        "grp-daily"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "claude-sonnet-4-6",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 1.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "enable_groups": [
+        "grp-enterprise",
+        "grp-perf-x",
+        "grp-daily",
+        "grp-kiro",
+        "grp-anti"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "claude-fable-5-1",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-perf",
+        "grp-perf-max"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "sample-model-ratio",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 1,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.125,
+      "create_cache_ratio": 1.5625,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro",
+        "grp-codex",
+        "disc-codex"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "claude-opus-4-7",
+      "vendor_id": 24,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 5,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "grp-daily",
+        "grp-kiro",
+        "grp-perf",
+        "grp-perf-max",
+        "grp-perf-k",
+        "grp-enterprise",
+        "grp-perf-x"
+      ],
+      "supported_endpoint_types": [
+        "anthropic",
+        "openai"
+      ]
+    },
+    {
+      "model_name": "sample-model-len-compact",
+      "vendor_id": 25,
+      "quota_type": 0,
+      "model_ratio": 2.5,
+      "model_price": 0,
+      "owner_by": "",
+      "completion_ratio": 6,
+      "cache_ratio": 0.1,
+      "create_cache_ratio": 1.25,
+      "enable_groups": [
+        "disc-codex-pro",
+        "grp-codex-pro",
+        "grp-codex"
+      ],
+      "supported_endpoint_types": [
+        "openai"
+      ]
+    },
+    {
+      "model_name": "gpt-image-2",
+      "vendor_id": 25,
+      "quota_type": 1,
+      "model_ratio": 0,
+      "model_price": 1,
+      "owner_by": "",
+      "completion_ratio": 0,
+      "enable_groups": [
+        "grp-codex-pro",
+        "grp-codex",
+        "grp-image"
+      ],
+      "supported_endpoint_types": [
+        "image-generation",
+        "openai"
+      ]
+    }
+  ],
+  "group_ratio": {
+    "auto": 1,
+    "grp-daily": 0.7,
+    "grp-anti": 0.5,
+    "grp-codex": 0.15,
+    "grp-codex-pro": 0.3,
+    "grp-gemini": 0.3,
+    "grp-grok": 0.2,
+    "grp-image": 0.12,
+    "grp-kiro": 0.2,
+    "grp-perf": 1.5,
+    "grp-perf-k": 0.5,
+    "grp-perf-max": 1.5,
+    "组丁": 0.6,
+    "组丁-chs": 0.4
+  },
+  "usable_group": {
+    "auto": "此分组无效，仅作为默认键占位",
+    "grp-daily": "示例分组 grp-daily",
+    "grp-anti": "示例分组 grp-anti",
+    "grp-codex": "示例分组 grp-codex",
+    "grp-codex-pro": "示例分组 grp-codex-pro",
+    "grp-gemini": "示例分组 grp-gemini",
+    "grp-grok": "示例分组 grp-grok",
+    "grp-image": "示例分组 grp-image",
+    "grp-kiro": "示例分组 grp-kiro",
+    "default": "示例分组 default",
+    "grp-perf": "示例分组 grp-perf",
+    "grp-perf-k": "示例分组 grp-perf-k",
+    "grp-perf-max": "示例分组 grp-perf-max",
+    "组丁": "示例分组 组丁",
+    "组丁-chs": "示例分组 组丁-chs"
+  },
+  "auto_groups": [
+    "grp-daily",
+    "grp-perf"
+  ]
+}

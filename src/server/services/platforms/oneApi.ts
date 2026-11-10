@@ -1,5 +1,6 @@
 import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, CreateApiTokenOptions } from './base.js';
 import { resolveModelDiscoveryUrl } from '../../proxy-core/orchestration/upstreamRequest.js';
+import { quotaToUsd } from '../billing/quotaScale.js';
 
 type CreateApiTokenPayload = {
   name: string;
@@ -70,11 +71,17 @@ export class OneApiAdapter extends BasePlatformAdapter {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     const data = res?.data;
-    const quota = (data?.quota || 0) / 500000;
-    const used = (data?.used_quota || 0) / 500000;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 500000) : undefined;
-    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption) ? (data.today_quota_consumption / 500000) : undefined;
-    return { balance: quota - used, used, quota, todayIncome, todayQuotaConsumption };
+    // one-api 的 quota 字段语义是「剩余额度」（与 new-api 一致），
+    // 旧实现又减了一次 used，导致余额被双扣、总额少算一半。
+    const quota = quotaToUsd(data?.quota, this.platformName);
+    const used = quotaToUsd(data?.used_quota, this.platformName);
+    const todayIncome = Number.isFinite(data?.today_income)
+      ? quotaToUsd(data.today_income, this.platformName)
+      : undefined;
+    const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption)
+      ? quotaToUsd(data.today_quota_consumption, this.platformName)
+      : undefined;
+    return { balance: quota, used, quota: quota + used, todayIncome, todayQuotaConsumption };
   }
 
   async getModels(baseUrl: string, apiToken: string, _platformUserId?: number): Promise<string[]> {

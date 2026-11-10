@@ -1,5 +1,6 @@
 import { OneHubAdapter } from './oneHub.js';
 import type { BalanceInfo, CheckinResult, SiteAnnouncement } from './base.js';
+import { quotaToUsd } from '../billing/quotaScale.js';
 
 export class DoneHubAdapter extends OneHubAdapter {
   readonly platformName: string = 'done-hub';
@@ -22,12 +23,14 @@ export class DoneHubAdapter extends OneHubAdapter {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     const data = res?.data ?? res;
-    const quotaRemaining = (data?.quota || 0) / 500000;
-    const used = (data?.used_quota || 0) / 500000;
+    const quotaRemaining = quotaToUsd(data?.quota, this.platformName);
+    const used = quotaToUsd(data?.used_quota, this.platformName);
     const total = quotaRemaining + used;
-    const todayIncome = Number.isFinite(data?.today_income) ? (data.today_income / 500000) : undefined;
+    const todayIncome = Number.isFinite(data?.today_income)
+      ? quotaToUsd(data.today_income, this.platformName)
+      : undefined;
     const todayQuotaConsumption = Number.isFinite(data?.today_quota_consumption)
-      ? (data.today_quota_consumption / 500000)
+      ? quotaToUsd(data.today_quota_consumption, this.platformName)
       : undefined;
     return { balance: quotaRemaining, used, quota: total, todayIncome, todayQuotaConsumption };
   }

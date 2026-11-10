@@ -35,6 +35,28 @@ export interface BalanceInfo {
   todayIncome?: number;
   todayQuotaConsumption?: number;
   subscriptionSummary?: SubscriptionSummary;
+  /**
+   * 上游根本没有余额接口时置为 true（T2.4）。
+   *
+   * 旧做法是返回 `{balance:0, used:0, quota:0}`，这让"读不到"在界面上与
+   * "余额已用尽"完全无法区分，还会把账户真实余额覆盖成 0。
+   * 现在调用方见到 unsupported 就跳过写库并给出原因，而不是记一个假数。
+   */
+  unsupported?: boolean;
+  /** unsupported 的说明文案，用于 UI 提示与日志。 */
+  unsupportedReason?: string;
+  /**
+   * 余额来源标记（S5d / T7.6）。
+   * session 与 API-key 遥测并存时，这里记录**最终采用值**的来源，
+   * 便于排查"为什么这个通道显示 X 而那个显示 Y"——两者语义本就不同
+   * （账号钱包 vs 令牌配额），不做数值合并。
+   */
+  source?: 'session' | 'apikey-telemetry' | 'unlimited-quota' | 'unknown';
+}
+
+/** 构造一个"该平台无余额接口"的结果；数值一律留空而非伪造 0。 */
+export function unsupportedBalance(reason: string): BalanceInfo {
+  return { balance: 0, used: 0, quota: 0, unsupported: true, unsupportedReason: reason };
 }
 
 interface LoginResult {
@@ -59,11 +81,37 @@ export interface TokenVerifyResult {
   models?: string[];
 }
 
+/**
+ * 分组名单的规范化：只接受字符串与有限数字，去空白、按首次出现去重、保持顺序。
+ *
+ * 不用 `String(item)` —— `String({})` 会得到 "[object Object]"，
+ * 那是能通过非空过滤的垃圾分组名，会一路污染落库与展示。
+ * 适配器、同步服务、路由解析三处共用本实现，避免各写一套而判据漂移。
+ */
+export function normalizeGroupList(values: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  for (const item of values) {
+    if (typeof item === 'string') {
+      const group = item.trim();
+      if (group) seen.add(group);
+    } else if (typeof item === 'number' && Number.isFinite(item)) {
+      seen.add(String(item));
+    }
+  }
+  return Array.from(seen);
+}
+
 export interface ApiTokenInfo {
   name: string;
   key: string;
   enabled?: boolean;
   tokenGroup?: string | null;
+  /**
+   * 令牌的实际 auto 链路（`/api/token/` 的 `auto_groups`）。
+   * undefined = 上游没给这个字段；空数组 = 上游明确给了空链路。
+   * 两者不可合并 —— 落库与展示都要区分"未知"与"无链路"。
+   */
+  autoGroups?: string[];
 }
 
 export interface SiteAnnouncement {

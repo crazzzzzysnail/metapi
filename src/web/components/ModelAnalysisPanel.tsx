@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { InlineBrandIcon } from './BrandIcon.js';
-import { formatCompactTokenMetric } from '../numberFormat.js';
+import { formatCompactTokenMetric, formatMoney } from '../numberFormat.js';
 import { useThemeLabelColor } from './useThemeLabelColor.js';
 
 type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
@@ -35,11 +35,9 @@ function toSafeNumber(value: unknown): number {
   return value;
 }
 
+// T8.1 / N3：委托统一实现，保留组件内调用名（5 处引用）。
 function formatCurrency(value: number): string {
-  const n = toSafeNumber(value);
-  if (n >= 1000) return `$${n.toFixed(2)}`;
-  if (n >= 1) return `$${n.toFixed(3)}`;
-  return `$${n.toFixed(6)}`;
+  return formatMoney(value);
 }
 
 function formatPercent(value: number): string {

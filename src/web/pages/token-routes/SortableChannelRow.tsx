@@ -8,7 +8,9 @@ import {
   resolveTokenBindingConnectionMode,
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
-import { renderGroupPricingValue } from '../helpers/modelPricingPresentation.js';
+import { renderGroupPricingValue, describeTierDetails, type ModelGroupPricingPresentation } from '../helpers/modelPricingPresentation.js';
+import { formatMoney } from '../../numberFormat.js';
+import { useCurrency, type CurrencyContextValue } from '../../currencyContext.js';
 
 function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
   return strategy === 'stick_until_unavailable' ? '单个用到不可用再切' : '轮询';
@@ -37,29 +39,91 @@ function getHealthBadgeClass(status: string | undefined): string {
   return 'badge-muted';
 }
 
-function buildBillingLabel(channel: SortableChannelRowProps['channel']): string {
+/**
+ * 路由通道的计费文案（3 / 4）。
+ *
+ * 卡片一行很窄，过去把完整档位条件塞进正文会被截断，所以：
+ *   - 正文只留**紧凑价**（`$0.8/$3.2 / 1M（peak） ｜ $0.4/$1.6 / 1M（off_peak）`）；
+ *   - 适用条件、链路、口径来源全部移到悬停 title。
+ * 币种与模型广场同源（CurrencyContext），不再固定美元；
+ * 换算沿用与模型广场同一个 convert 出口，保证两处同形（¥0.8/¥3.2 / 1M）。
+ */
+function buildBillingLabel(
+  channel: SortableChannelRowProps['channel'],
+  currencyCtx: CurrencyContextValue,
+): string {
   const billing = channel.billing;
   if (!billing) return '计费不可用';
   const groupName = billing.groupName?.trim() || '未知分组';
-  if (billing.status === 'refreshing') return `${groupName} · 刷新中`;
-  if (billing.status !== 'ready' || !billing.pricing) return `${groupName} · 计费不可用`;
-  return `${groupName} · ${renderGroupPricingValue(billing.pricing)}`;
+  // 三-1：auto 令牌显示的不是字面 "auto"，而是链路里实际用于计价的那一档。
+  // 加个标记让用户知道这个分组名是从链路推导出来的，不是令牌上直接写的。
+  const isDerived = (billing.groupCandidates?.length ?? 0) > 1;
+  const displayGroup = isDerived ? `${groupName}（auto）` : groupName;
+  if (billing.status === 'refreshing') return `${displayGroup} · 刷新中`;
+  // T1.30：把"不可用"说清楚是哪一种不可用，否则用户无法判断该补令牌还是等解析。
+  if (billing.status !== 'ready' || !billing.pricing) {
+    const detail = billing.message?.trim();
+    return `${displayGroup} · 计费不可用${detail ? `（${detail}）` : ''}`;
+  }
+  return `${displayGroup} · ${renderChannelPrice(billing.pricing, channel.site?.id, currencyCtx)}`;
 }
 
-function buildBillingTooltip(channel: SortableChannelRowProps['channel'], label: string): string {
-  const message = channel.billing?.message?.trim();
-  return message ? `${label}；${message}` : label;
+/** 与模型广场同一渲染出口，只是多带一个按站点汇率的换算回调 + compact 精简。 */
+function renderChannelPrice(
+  pricing: NonNullable<NonNullable<SortableChannelRowProps['channel']>['billing']>['pricing'],
+  siteId: number | null | undefined,
+  currencyCtx: CurrencyContextValue,
+): string {
+  const { currency, getSiteRate } = currencyCtx;
+  if (currency === 'USD') {
+    return renderGroupPricingValue(pricing as ModelGroupPricingPresentation, undefined, undefined, { compact: true });
+  }
+  const rate = getSiteRate(siteId);
+  const convert = (_ignoredSiteId: number, usd: number | undefined) => (
+    usd == null || rate == null ? null : formatMoney(usd * rate, 'CNY', 1)
+  );
+  return renderGroupPricingValue(
+    pricing as ModelGroupPricingPresentation,
+    Number.isFinite(Number(siteId)) ? Number(siteId) : 1,
+    convert,
+    { compact: true },
+  );
+}
+
+function buildBillingTooltip(
+  channel: SortableChannelRowProps['channel'],
+  label: string,
+  currencyCtx: CurrencyContextValue,
+): string {
+  const billing = channel.billing;
+  const parts: string[] = [label];
+  const message = billing?.message?.trim();
+  if (message) parts.push(message);
+  // 三-1：把整条 auto 链路列出来，用户才能核对"为什么用这个价"。
+  const chain = billing?.groupCandidates;
+  if (chain && chain.length > 1) parts.push(`链路：${chain.join(' → ')}`);
+  // 三-3：正文省掉的档位适用条件在悬停里补回。
+  if (billing?.pricing) {
+    const details = describeTierDetails(billing.pricing as ModelGroupPricingPresentation);
+    if (details) parts.push(details);
+    if (currencyCtx.currency === 'CNY') {
+      const rate = currencyCtx.getSiteRate(channel.site?.id);
+      parts.push(rate != null ? `按站点汇率 ×${rate} 换算` : '该站点汇率未知');
+    }
+  }
+  return parts.join('；');
 }
 
 function renderChannelInsightBadges(
   channel: SortableChannelRowProps['channel'],
   suppressTooltips: boolean,
+  currencyCtx: CurrencyContextValue,
 ) {
   const routeUnit = channel.routeUnit ?? null;
   const health = channel.health;
   const billing = channel.billing;
   const shouldShowHealth = !!health && health.status !== 'unavailable' && channel.enabled !== false;
-  const billingLabel = buildBillingLabel(channel);
+  const billingLabel = buildBillingLabel(channel, currencyCtx);
 
   return (
     <>
@@ -97,7 +161,7 @@ function renderChannelInsightBadges(
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
         }}
-        data-tooltip={suppressTooltips ? undefined : buildBillingTooltip(channel, billingLabel)}
+        data-tooltip={suppressTooltips ? undefined : buildBillingTooltip(channel, billingLabel, currencyCtx)}
       >
         {billingLabel}
       </span>
@@ -131,6 +195,8 @@ export function SortableChannelRow({
   onToggleSelected,
   onSiteBlockModel,
 }: SortableChannelRowProps) {
+  // 币种与站点汇率来自共享 Provider，与模型广场同源（四-4 / 四-7）。
+  const currencyCtx = useCurrency();
   const resolvedPriority = displayPriority ?? channel.priority ?? 0;
   const managementLocked = readOnly || channelManagementDisabled;
   const suppressTooltips = dragInProgress || dragging;
@@ -332,7 +398,7 @@ export function SortableChannelRow({
                 </span>
               ) : null}
 
-              {renderChannelInsightBadges(channel, suppressTooltips)}
+              {renderChannelInsightBadges(channel, suppressTooltips, currencyCtx)}
 
               {routeUnit ? (
                 <>
@@ -601,7 +667,7 @@ export function SortableChannelRow({
           <span className="badge badge-muted" style={{ fontSize: 10 }}>禁用</span>
         ) : null}
 
-        {renderChannelInsightBadges(channel, suppressTooltips)}
+        {renderChannelInsightBadges(channel, suppressTooltips, currencyCtx)}
 
         {routeUnit ? (
           <>

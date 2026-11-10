@@ -82,6 +82,9 @@ interface RuntimeSettingsBody {
   checkinDelayMin?: number;
   checkinDelayMax?: number;
   checkinDelayUnit?: CheckinDelayUnit;
+  // S6 / T8.5：显示货币与计价口径，两个彼此正交的开关（R7）
+  displayCurrency?: 'USD' | 'CNY';
+  pricingDisplayMode?: 'official' | 'effective';
   balanceRefreshCron?: string;
   logCleanupCron?: string;
   logCleanupUsageLogsEnabled?: boolean;
@@ -384,6 +387,17 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'checkin_delay_enabled': {
       if (typeof value !== 'boolean') return;
       config.checkinDelayEnabled = value;
+      return;
+    }
+    // S6 两开关的导入回灌：只认合法枚举，脏值忽略（与 hydration 同一判据）。
+    case 'display_currency': {
+      const next = String(value ?? '').trim().toUpperCase();
+      if (next === 'USD' || next === 'CNY') config.displayCurrency = next as 'USD' | 'CNY';
+      return;
+    }
+    case 'pricing_display_mode': {
+      const next = String(value ?? '').trim().toLowerCase();
+      if (next === 'official' || next === 'effective') config.pricingDisplayMode = next as 'official' | 'effective';
       return;
     }
     case 'checkin_delay_min': {
@@ -771,6 +785,8 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     checkinScheduleMode: config.checkinScheduleMode,
     checkinIntervalHours: config.checkinIntervalHours,
     // 回显「原值 + 单位」而不是换算后的毫秒：设置页要能把用户填的数原样显示出来。
+    displayCurrency: config.displayCurrency,
+    pricingDisplayMode: config.pricingDisplayMode,
     checkinDelayEnabled: config.checkinDelayEnabled,
     checkinDelayMin: config.checkinDelayMin,
     checkinDelayMax: config.checkinDelayMax,
@@ -1170,6 +1186,31 @@ export async function settingsRoutes(app: FastifyInstance) {
       await upsertSetting('checkin_delay_max', config.checkinDelayMax);
       await upsertSetting('checkin_delay_unit', config.checkinDelayUnit);
       updateCheckinDelaySettings();
+    }
+
+    // S6 / T8.5：两个独立开关（R7）。各自单独校验、单独落库，互不牵连。
+    if (body.displayCurrency !== undefined) {
+      const next = String(body.displayCurrency ?? '').trim().toUpperCase();
+      if (next !== 'USD' && next !== 'CNY') {
+        return reply.code(400).send({ success: false, message: '货币仅支持 USD 或 CNY' });
+      }
+      if (next !== config.displayCurrency) {
+        changedLabels.push(`显示货币（${config.displayCurrency} -> ${next}）`);
+        config.displayCurrency = next as 'USD' | 'CNY';
+        await upsertSetting('display_currency', config.displayCurrency);
+      }
+    }
+
+    if (body.pricingDisplayMode !== undefined) {
+      const next = String(body.pricingDisplayMode ?? '').trim().toLowerCase();
+      if (next !== 'official' && next !== 'effective') {
+        return reply.code(400).send({ success: false, message: '计价口径仅支持 official 或 effective' });
+      }
+      if (next !== config.pricingDisplayMode) {
+        changedLabels.push(`计价口径（${config.pricingDisplayMode} -> ${next}）`);
+        config.pricingDisplayMode = next as 'official' | 'effective';
+        await upsertSetting('pricing_display_mode', config.pricingDisplayMode);
+      }
     }
 
     if (body.balanceRefreshCron !== undefined) {

@@ -78,6 +78,14 @@ function buildListResponse(overrides?: Partial<{
         downstreamKeyName: '移动端灰度',
         downstreamKeyGroupName: '项目A',
         downstreamKeyTags: ['VIP', '灰度'],
+        // 列表接口下发的轻量计费摘要：分组/计费两行默认就靠它渲染。
+        billingSummary: {
+          groupName: '组丁-chs',
+          groupRatio: 0.4,
+          tierName: 'off_peak',
+          inputPerMillion: 0.4,
+          outputPerMillion: 1.6,
+        },
       },
     ],
     total: 1,
@@ -283,6 +291,38 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('下游 Key: 移动端灰度');
       expect(text).toContain('流式');
       expect(text).toContain('首字');
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+    }
+  });
+
+  /**
+   * 「分组/计费」两行必须**默认渲染**，不依赖展开详情。
+   * 这里刻意不调用任何展开动作 —— 只要 getProxyLogDetail 没被叫到、
+   * 两行却已出现，就证明数据来自列表接口的 billingSummary 而不是详情。
+   */
+  it('renders the group/billing two lines without expanding the row', async () => {
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('组丁-chs（×0.4）');
+      expect(text).toContain('off_peak · $0.4/$1.6 / 1M');
+      // 未展开 → 不该去请求单条详情
+      expect(apiMock.getProxyLogDetail).not.toHaveBeenCalled();
     } finally {
       await act(async () => {
         root?.unmount();

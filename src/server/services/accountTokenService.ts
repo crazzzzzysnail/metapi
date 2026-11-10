@@ -2,12 +2,15 @@
 import { db, schema } from '../db/index.js';
 import { getInsertedRowId } from '../db/insertHelpers.js';
 import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
+import { normalizeGroupList } from './platforms/base.js';
 
 type UpstreamApiToken = {
   name?: string | null;
   key?: string | null;
   enabled?: boolean | null;
   tokenGroup?: string | null;
+  /** 令牌实际 auto 链路；undefined 表示上游未提供该字段。 */
+  autoGroups?: string[] | null;
 };
 
 type AccountTokenRow = typeof schema.accountTokens.$inferSelect;
@@ -328,7 +331,22 @@ export type TokenSyncUndistinguishable = {
 export type TokenSyncMeta = {
   name?: string;
   tokenGroup?: string;
+  /**
+   * 令牌实际 auto 链路的规范化结果。
+   * undefined = 上游没给（不写库，保留旧值）；数组（可为空）= 上游给了，如实落库。
+   */
+  autoGroups?: string[];
 };
+
+/**
+ * 规范化 auto 链路：剔除空白项、去重、保持上游顺序。
+ * 顺序有意义 —— `cross_group_retry` 场景下这就是重试次序。
+ * 实现委托给 platforms/base 的 normalizeGroupList，与适配器、路由解析共用同一判据。
+ */
+export function normalizeAutoGroups(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return normalizeGroupList(value);
+}
 
 /**
  * 决策 2/3 的唯一实现：从上游项提取可写字段。
@@ -348,14 +366,20 @@ export function resolveIncomingTokenMeta(upstream: UpstreamApiToken): TokenSyncM
     if (group) meta.tokenGroup = group;
   }
 
+  // 令牌实际链路：上游没给就不写（保留旧值），给了就如实落，包括空数组。
+  const autoGroups = normalizeAutoGroups(upstream.autoGroups);
+  if (autoGroups !== undefined) meta.autoGroups = autoGroups;
+
   return meta;
 }
 
 /** 「有值才写」的落库补丁：只包含 meta 中真实存在的键。 */
-function buildTokenMetaPatch(meta: TokenSyncMeta): { name?: string; tokenGroup?: string } {
-  const patch: { name?: string; tokenGroup?: string } = {};
+function buildTokenMetaPatch(meta: TokenSyncMeta): { name?: string; tokenGroup?: string; autoGroups?: string | null } {
+  const patch: { name?: string; tokenGroup?: string; autoGroups?: string | null } = {};
   if (meta.name !== undefined) patch.name = meta.name;
   if (meta.tokenGroup !== undefined) patch.tokenGroup = meta.tokenGroup;
+  // 存 JSON 字符串；undefined 不动列，[] 存成 '[]'（与"未知"的 null 区分）
+  if (meta.autoGroups !== undefined) patch.autoGroups = JSON.stringify(meta.autoGroups);
   return patch;
 }
 
@@ -605,6 +629,8 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
       if (target) {
         if (metaPatch.name !== undefined) target.name = metaPatch.name;
         if (metaPatch.tokenGroup !== undefined) target.tokenGroup = metaPatch.tokenGroup;
+        // 内存行同步：后续轮次可能再读这批行，不同步会拿到旧链路。
+        if (metaPatch.autoGroups !== undefined) target.autoGroups = metaPatch.autoGroups;
         target.valueStatus = ACCOUNT_TOKEN_VALUE_STATUS_READY;
         target.enabled = plan.enabled;
         target.source = 'sync';
@@ -673,6 +699,7 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
         name: plan.meta.name!,
         token: plan.tokenValue,
         ...(plan.meta.tokenGroup !== undefined ? { tokenGroup: plan.meta.tokenGroup } : {}),
+        ...(plan.meta.autoGroups !== undefined ? { autoGroups: JSON.stringify(plan.meta.autoGroups) } : {}),
         valueStatus: plan.nextValueStatus,
         source: 'sync',
         enabled: plan.nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY ? plan.enabled : false,
