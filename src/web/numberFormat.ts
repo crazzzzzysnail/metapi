@@ -179,29 +179,3 @@ export function formatPricePair(input: number | undefined, output: number | unde
   if (output == null) return `${formatPrice(input)}${suffix}`;
   return `${formatPrice(input)}/${formatPrice(output)}${suffix}`;
 }
-
-/**
- * 按币种与站点汇率渲染一对单价（供模型广场 / 路由通道 / 日志共用）。
- * 汇率未知时返回 null —— 由调用方决定显示"汇率未知"还是回退美元，绝不静默按 ¥ 前缀贴美元数。
- */
-export function formatPricePairWithCurrency(
-  input: number | undefined,
-  output: number | undefined,
-  unit: 'perMillion' | 'perCall',
-  currency: DisplayCurrency,
-  cnyPerUsd?: number | null,
-): string | null {
-  if (currency === 'USD') {
-    const suffix = unit === 'perMillion' ? ' / 1M' : ' / call';
-    if (input == null) return `—${suffix}`;
-    if (output == null) return `${formatMoney(input, 'USD')}${suffix}`;
-    return `${formatMoney(input, 'USD')}/${formatMoney(output, 'USD')}${suffix}`;
-  }
-  const rate = Number(cnyPerUsd);
-  if (!Number.isFinite(rate) || rate <= 0) return null;
-  const suffix = unit === 'perMillion' ? ' / 1M' : ' / call';
-  if (input == null) return `—${suffix}`;
-  const convertedInput = formatMoney(input * rate, 'CNY', 1);
-  if (output == null) return `${convertedInput}${suffix}`;
-  return `${convertedInput}/${formatMoney(output * rate, 'CNY', 1)}${suffix}`;
-}

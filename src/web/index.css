@@ -2393,7 +2393,9 @@ body[data-tooltip-portal="true"] [data-tooltip]::before {
   font-weight: 500;
   line-height: 1.45;
   text-align: left;
-  white-space: normal;
+  /* normal → pre-line：让文本里的换行符真正分行
+     （路由通道计费详情按语义分段）。既有 tooltip 均不含换行符，行为不变。 */
+  white-space: pre-line;
   pointer-events: none;
   z-index: 20000;
   opacity: 0;
@@ -2420,6 +2422,7 @@ body[data-tooltip-portal="true"] [data-tooltip]::before {
   border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 22%, transparent);
   transition: opacity 0.18s ease;
 }
+
 
 [data-tooltip][data-tooltip-side="bottom"]::after {
   top: calc(100% + 10px);
@@ -6907,4 +6910,56 @@ textarea {
   .route-card-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ===== 路由通道计费详情弹层 =====
+   不用 [data-tooltip] 伪元素的原因：content: attr() 不解释属性值里的换行符，
+   多段文本必然挤成一行（已实测确认）。这里改成真 DOM，每行一个块级子元素。 */
+.billing-badge-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.billing-detail-pop {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  /* 盖住 badge 与相邻行的既有层级体系（badge/tooltip 用 20000） */
+  z-index: 20001;
+  display: none;
+  flex-direction: column;
+  gap: 3px;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(560px, calc(100vw - 40px));
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: left;
+  /* 关键：真 DOM 才能靠 normal 自然换行 + 每个子元素独占一行 */
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  color: color-mix(in srgb, var(--color-text-primary) 90%, #0f172a);
+  background: color-mix(in srgb, #ffffff 92%, var(--color-primary) 8%);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 22%, transparent);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.14);
+}
+
+[data-theme="dark"] .billing-detail-pop {
+  background: color-mix(in srgb, var(--color-bg-card) 92%, #0f172a 8%);
+}
+
+.billing-detail-line {
+  display: block;
+}
+
+/* hover 与键盘聚焦都展开：pointer-events:none 避免弹层自身抢悬停导致闪烁 */
+.billing-badge-wrap:hover .billing-detail-pop,
+.billing-badge-wrap:focus-within .billing-detail-pop {
+  display: flex;
+  opacity: 1;
 }

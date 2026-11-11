@@ -8,8 +8,8 @@ import {
   resolveTokenBindingConnectionMode,
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
-import { renderGroupPricingValue, describeTierDetails, type ModelGroupPricingPresentation } from '../helpers/modelPricingPresentation.js';
-import { formatMoney } from '../../numberFormat.js';
+import { renderGroupPricingValue, type ModelGroupPricingPresentation } from '../helpers/modelPricingPresentation.js';
+import { formatMoney, type DisplayCurrency } from '../../numberFormat.js';
 import { useCurrency, type CurrencyContextValue } from '../../currencyContext.js';
 
 function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
@@ -40,13 +40,15 @@ function getHealthBadgeClass(status: string | undefined): string {
 }
 
 /**
- * 路由通道的计费文案（3 / 4）。
+ * 路由通道的计费文案（1 / 3）。
  *
- * 卡片一行很窄，过去把完整档位条件塞进正文会被截断，所以：
- *   - 正文只留**紧凑价**（`$0.8/$3.2 / 1M（peak） ｜ $0.4/$1.6 / 1M（off_peak）`）；
- *   - 适用条件、链路、口径来源全部移到悬停 title。
- * 币种与模型广场同源（CurrencyContext），不再固定美元；
- * 换算沿用与模型广场同一个 convert 出口，保证两处同形（¥0.8/¥3.2 / 1M）。
+ * 卡片一行很窄，所以正文只留**分组 + 第一档代表价**：
+ *   `grp-codex（auto） · ¥0.3/¥1.5 / 1M`
+ * 其余档位、适用条件、链路、口径来源全部移到悬停弹层（见 buildBillingTooltipLines）。
+ *
+ * ⚠️ 币种必须跟随设置里的显示货币（三-3 曾把它写死成 $）：
+ * 早版的 USD 分支不传 convert，于是落到 formatPrice() 那个固定美元的出口，
+ * 表现就是"设置已切到人民币、正文仍是 $"。现在两个分支都走同一个带币种的出口。
  */
 function buildBillingLabel(
   channel: SortableChannelRowProps['channel'],
@@ -68,50 +70,87 @@ function buildBillingLabel(
   return `${displayGroup} · ${renderChannelPrice(billing.pricing, channel.site?.id, currencyCtx)}`;
 }
 
-/** 与模型广场同一渲染出口，只是多带一个按站点汇率的换算回调 + compact 精简。 */
+/** 生成一个按站点汇率换算的金额回调；USD 下汇率为 null，等价于原样显示美元。 */
+function makeChannelMoney(
+  currency: DisplayCurrency,
+  rate: number | null,
+): (usd: number | undefined) => string | null {
+  return (usd: number | undefined) => {
+    if (usd == null) return null;
+    if (currency === 'USD') return formatMoney(usd);
+    // CNY 但汇率未知：返回 null 让上层显式标注，绝不贴 ¥ 冒充人民币价。
+    if (rate == null) return null;
+    return formatMoney(usd * rate, 'CNY', 1);
+  };
+}
+
+/**
+ * 渲染通道价格。两种币种走同一条 convert 通路（三-3 的修复点）：
+ * 差异只在换算系数与符号，由 makeChannelMoney 统一决定。
+ */
 function renderChannelPrice(
   pricing: NonNullable<NonNullable<SortableChannelRowProps['channel']>['billing']>['pricing'],
   siteId: number | null | undefined,
   currencyCtx: CurrencyContextValue,
 ): string {
   const { currency, getSiteRate } = currencyCtx;
-  if (currency === 'USD') {
-    return renderGroupPricingValue(pricing as ModelGroupPricingPresentation, undefined, undefined, { compact: true });
-  }
-  const rate = getSiteRate(siteId);
-  const convert = (_ignoredSiteId: number, usd: number | undefined) => (
-    usd == null || rate == null ? null : formatMoney(usd * rate, 'CNY', 1)
-  );
+  const rate = currency === 'USD' ? null : getSiteRate(siteId);
+  const money = makeChannelMoney(currency, rate);
+  // 占位 siteId 恒等于第二参数：换算已在 money 里按站点汇率做完。
   return renderGroupPricingValue(
     pricing as ModelGroupPricingPresentation,
-    Number.isFinite(Number(siteId)) ? Number(siteId) : 1,
-    convert,
-    { compact: true },
+    CHANNEL_PRICE_SITE_SLOT,
+    (_slot, usd) => money(usd),
+    { compact: true, firstTierOnly: true },
   );
 }
 
-function buildBillingTooltip(
+/** convert 回调形参要求一个数值站点位；真实取数在 money 闭包里完成。 */
+const CHANNEL_PRICE_SITE_SLOT = 1;
+
+/**
+ * 路由通道计费的悬停详情（2 / 4）。
+ *
+ * 返回**行数组**而不是拼好的长串，每行一条语义。顺序按用户实测反馈定为
+ *   ① 逐档：档位名（适用条件）：价格
+ *   ② 口径来源
+ *   ③ auto 分组链路（仅多候选时）
+ *   ④ 汇率换算说明（仅人民币）
+ * 正文那行（分组 + 首档价）不重复放进来——卡片上已经看得见。
+ */
+function buildBillingTooltipLines(
   channel: SortableChannelRowProps['channel'],
-  label: string,
   currencyCtx: CurrencyContextValue,
-): string {
+): string[] {
   const billing = channel.billing;
-  const parts: string[] = [label];
-  const message = billing?.message?.trim();
-  if (message) parts.push(message);
-  // 三-1：把整条 auto 链路列出来，用户才能核对"为什么用这个价"。
-  const chain = billing?.groupCandidates;
-  if (chain && chain.length > 1) parts.push(`链路：${chain.join(' → ')}`);
-  // 三-3：正文省掉的档位适用条件在悬停里补回。
-  if (billing?.pricing) {
-    const details = describeTierDetails(billing.pricing as ModelGroupPricingPresentation);
-    if (details) parts.push(details);
-    if (currencyCtx.currency === 'CNY') {
-      const rate = currencyCtx.getSiteRate(channel.site?.id);
-      parts.push(rate != null ? `按站点汇率 ×${rate} 换算` : '该站点汇率未知');
+  if (!billing) return [];
+  const lines: string[] = [];
+
+  // ① 逐档一行；价格按当前币种换算，与正文同一出口（三-3）。
+  const rate = currencyCtx.currency === 'USD' ? null : currencyCtx.getSiteRate(channel.site?.id);
+  const money = makeChannelMoney(currencyCtx.currency, rate);
+  const tiers = billing.pricing ? (billing.pricing as ModelGroupPricingPresentation).tiers : undefined;
+  if (tiers && tiers.length > 0) {
+    for (const tier of tiers) {
+      const price = [money(tier.input), money(tier.output)].filter((x): x is string => x != null).join('/');
+      if (!price) continue;
+      lines.push(`${tier.name}${tier.condition ? `（${tier.condition}）` : ''}：${price} / 1M`);
     }
   }
-  return parts.join('；');
+
+  // ② 口径来源（后端给的说明文本）。
+  const message = billing.message?.trim();
+  if (message) lines.push(message);
+
+  // ③ 三-1：把整条 auto 链路列出来，用户才能核对"为什么用这个价"。
+  const chain = billing.groupCandidates;
+  if (chain && chain.length > 1) lines.push(`auto 分组链路：${chain.join(' → ')}`);
+
+  // ④ 四：只有切到人民币才需要解释换算；美元是目录原值，没有"换算"可言。
+  if (currencyCtx.currency === 'CNY') {
+    lines.push(rate != null ? `以上价格按站点汇率 ×${rate} 换算` : '该站点汇率未知，未做换算');
+  }
+  return lines;
 }
 
 function renderChannelInsightBadges(
@@ -124,6 +163,8 @@ function renderChannelInsightBadges(
   const billing = channel.billing;
   const shouldShowHealth = !!health && health.status !== 'unavailable' && channel.enabled !== false;
   const billingLabel = buildBillingLabel(channel, currencyCtx);
+  // 详情行数组：真 DOM 渲染，一行一条（见下方弹层注释）。
+  const billingTooltipLines = buildBillingTooltipLines(channel, currencyCtx);
 
   return (
     <>
@@ -152,18 +193,40 @@ function renderChannelInsightBadges(
           余额：{formatBalance(channel.account?.balance)}
         </span>
       ) : null}
-      <span
-        className={billing?.status === 'ready' ? 'badge badge-info' : 'badge badge-muted'}
-        style={{
-          fontSize: 10,
-          maxWidth: 280,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-        data-tooltip={suppressTooltips ? undefined : buildBillingTooltip(channel, billingLabel, currencyCtx)}
-      >
-        {billingLabel}
+      {/*
+        计费详情弹层（方案 A）。
+
+        为什么不用 data-tooltip：这套 CSS tooltip 靠 `content: attr(...)` 取文本，
+        而 attr() 不解释属性值里的换行符 —— 已实测确认（DOM 属性里确有 \n、
+        两个浏览器观感都不分行），改 white-space / 加 !important / 动宿主样式均无效。
+        所以详情改用真 DOM 渲染，每行一个 <div>，天然分段。
+
+        结构要点：badge 自身带 overflow:hidden（为单行 ellipsis 服务），
+        会把内部元素一起裁掉；因此弹层必须是 badge 的**兄弟节点**，
+        由这层不裁剪的 wrapper 提供 position:relative 定位上下文。
+      */}
+      <span className="billing-badge-wrap">
+        <span
+          className={`badge ${billing?.status === 'ready' ? 'badge-info' : 'badge-muted'}`}
+          style={{
+            fontSize: 10,
+            maxWidth: 280,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {billingLabel}
+        </span>
+        {!suppressTooltips && billingTooltipLines.length > 0 ? (
+          <span className="billing-detail-pop" role="tooltip">
+            {billingTooltipLines.map((line, lineIndex) => (
+              <span className="billing-detail-line" key={lineIndex}>
+                {line}
+              </span>
+            ))}
+          </span>
+        ) : null}
       </span>
     </>
   );
