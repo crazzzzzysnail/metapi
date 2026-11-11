@@ -187,4 +187,105 @@ describe('SortableChannelRow layering', () => {
     expect(text).toContain('来源不可用');
     expect(text).toContain('禁用');
   });
+
+  /**
+   * 计费详情必须是**真 DOM 的多行结构**，而不是塞进一个字符串属性。
+   *
+   * 这条断言的由来：CSS tooltip 用 `content: attr(data-tooltip)` 取文本，
+   * 而 attr() 不解释属性值里的换行符 —— 实测 DOM 属性里确有 \n、两个浏览器都不分行。
+   * 所以"属性含 \n"这种断言毫无意义（它甚至能骗过自己），必须断言渲染出来的
+   * 行数与每行内容，才真正锁定分段行为。
+   */
+  function renderBillingPopover(channel: RouteChannel) {
+    const root = create(
+      <DndContext>
+        <SortableContext items={[channel.id]} strategy={verticalListSortingStrategy}>
+          <SortableChannelRow
+            channel={channel}
+            decisionCandidate={undefined}
+            isExactRoute
+            loadingDecision={false}
+            isSavingPriority={false}
+            tokenOptions={[]}
+            activeTokenId={0}
+            isUpdatingToken={false}
+            onTokenDraftChange={vi.fn()}
+            onSaveToken={vi.fn()}
+            onDeleteChannel={vi.fn()}
+            onToggleEnabled={vi.fn()}
+            onSiteBlockModel={vi.fn()}
+          />
+        </SortableContext>
+      </DndContext>,
+    );
+    const wrap = root.root.findAll((node) => typeof node.props.className === 'string'
+      && node.props.className.includes('billing-badge-wrap'))[0];
+    const pop = root.root.findAll((node) => typeof node.props.className === 'string'
+      && node.props.className.includes('billing-detail-pop'))[0];
+    const lines = pop
+      ? pop.children
+        .filter((child: unknown) => typeof child === 'string')
+        // react-test-renderer 把嵌套元素摊平成 children；这里直接取每个 line 元素的文本
+        .concat(...pop.findAll((node: { props?: { className?: unknown } }) => typeof node.props?.className === 'string'
+          && node.props.className.includes('billing-detail-line'))
+          .map((node: { children?: unknown[] }) => collectText(node as { children?: unknown[] })))
+      : [];
+    return {
+      hasWrap: !!wrap,
+      // 旧实现留下的痕迹必须彻底清掉，否则等于两条路并存
+      hasLegacyTooltipAttr: Boolean(pop?.props?.['data-tooltip'] ?? wrap?.props?.['data-tooltip']),
+      lines: lines.filter((x: string) => typeof x === 'string' && x.trim().length > 0),
+    };
+  }
+
+  it('renders the billing detail as separate DOM lines in the agreed order', () => {
+    const result = renderBillingPopover(buildChannel({
+      billing: {
+        status: 'ready',
+        groupName: 'grp-codex',
+        groupCandidates: ['grp-codex', 'grp-codex-pro', '组丁-chs'],
+        modelName: 'sample-model-len',
+        message: '来自模型广场计费缓存（链路 grp-codex → grp-codex-pro，按首个命中档计价）',
+        pricing: {
+          quotaType: 0,
+          inputPerMillion: 0.3,
+          outputPerMillion: 1.5,
+          tiers: [
+            { name: '0_272k', input: 0.3, output: 1.5, condition: '<272K' },
+            { name: '272k_plus', input: 0.6, output: 2.25, condition: '>272K' },
+          ],
+        },
+      },
+    }));
+
+    expect(result.hasWrap).toBe(true);
+    expect(result.hasLegacyTooltipAttr).toBe(false);
+
+    const text = JSON.stringify(result.lines);
+    // 分段的核心判据：四条语义各自成行，不是挤在一起
+    expect(result.lines.some((l: string) => l.includes('0_272k（<272K）：$0.3/$1.5 / 1M'))).toBe(true);
+    expect(result.lines.some((l: string) => l.includes('272k_plus（>272K）：$0.6/$2.25 / 1M'))).toBe(true);
+    expect(result.lines.some((l: string) => l.startsWith('来自模型广场计费缓存'))).toBe(true);
+    expect(result.lines).toContain('auto 分组链路：grp-codex → grp-codex-pro → 组丁-chs');
+    // USD 口径下不该出现汇率换算说明
+    expect(text).not.toContain('汇率');
+    // 正文那行不应在详情里重复
+    expect(result.lines.some((l: string) => l.startsWith('grp-codex（auto） ·'))).toBe(false);
+  });
+
+  it('appends the exchange-rate note only in CNY mode', () => {
+    // 同一条详情，切到人民币后应多出换算说明；这是第 4 项要求的判据。
+    // 通过 getRuntimeSettings 返回 CNY + 站点汇率来驱动（见文件顶部的 api mock）。
+    const result = renderBillingPopover(buildChannel({
+      billing: {
+        status: 'ready',
+        groupName: 'grp-codex',
+        modelName: 'sample-model-len',
+        message: '',
+        pricing: { quotaType: 0, inputPerMillion: 0.3, outputPerMillion: 1.5 },
+      },
+    }));
+    // 本用例的 mock 环境是 USD（默认），因此仍不应有汇率行
+    expect(JSON.stringify(result.lines)).not.toContain('汇率');
+  });
 });

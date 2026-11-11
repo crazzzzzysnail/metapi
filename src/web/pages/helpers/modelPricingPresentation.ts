@@ -90,15 +90,20 @@ function hasDisplayableNumbers(pricing: ModelGroupPricingPresentation): boolean 
  *
  * @param compact 精简模式（路由通道卡片用，三-3）：只列档位名不带条件长串，
  *                完整条件留给悬停详情，避免一行撑不下被截断。
+ * @param firstTierOnly 只渲染首档代表价（一）：多档全文在窄卡片里必然截断，
+ *                其余档位由调用方在悬停里逐条列出。
  */
 function renderTierTable(
   tiers: PricingTierPresentation[],
   siteId?: number,
   convert?: (siteId: number, usd: number | undefined) => string | null,
   compact = false,
+  firstTierOnly = false,
 ): string {
   const parts: string[] = [];
-  for (const tier of tiers) {
+  // 一：路由通道正文放不下多档，只渲染首档（代表价），其余留给悬停逐条列出。
+  const shown = firstTierOnly ? tiers.slice(0, 1) : tiers;
+  for (const tier of shown) {
     const money = (usd: number | undefined): string | null => {
       if (usd == null) return null;
       if (convert && siteId != null) return convert(siteId, usd);
@@ -146,9 +151,10 @@ export function renderGroupPricingValue(
   pricing: ModelGroupPricingPresentation,
   siteId?: number,
   convert?: (siteId: number, usd: number | undefined) => string | null,
-  options?: { compact?: boolean },
+  options?: { compact?: boolean; firstTierOnly?: boolean },
 ): string {
   const compact = options?.compact === true;
+  const firstTierOnly = options?.firstTierOnly === true;
 
   // ① 未知优先于一切数值判断：缺价时后端不会给出 xxxPerMillion，
   //    但仍要防住"有数却被判为未知"的组合。
@@ -162,7 +168,7 @@ export function renderGroupPricingValue(
 
   // ② 多档优先：有 tiers 就必须逐档列出，不能退化成只报代表价（二-3）。
   if (pricing.tiers && pricing.tiers.length > 0) {
-    return renderTierTable(pricing.tiers, siteId, convert, compact);
+    return renderTierTable(pricing.tiers, siteId, convert, compact, firstTierOnly);
   }
 
   // S6 / T8.7：非美元口径下逐站换算；汇率未知的站点明确标注，不显示美元数字冒充人民币。

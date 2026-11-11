@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { formatMoney } from '../../numberFormat.js';
 import {
   describeGroupPricing,
   describePriceReason,
   isAuthoritativePricing,
   renderGroupPricingValue,
+  type ModelGroupPricingPresentation,
 } from './modelPricingPresentation.js';
 
 /**
@@ -110,5 +112,58 @@ describe('辅助函数', () => {
     });
     expect(text).toContain('动态计费未解析');
     expect(text).toContain('tier("base", p * 1 + c * 1)');
+  });
+});
+
+/**
+ * 路由通道正文的多档精简与币种跟随（VPS 实测返工）。
+ *
+ * 两条判据各自对应一个真实缺陷：
+ *   - firstTierOnly：多档全文在窄卡片里必然截断；
+ *   - 币种跟随：早版 USD 分支不传 convert，落到固定美元的出口，
+ *     于是"设置已切人民币、正文仍是 $"。用两种币种各跑一遍才能抓住它。
+ */
+describe('renderGroupPricingValue 的 compact / firstTierOnly', () => {
+  const multi = {
+    quotaType: 0,
+    inputPerMillion: 0.3,
+    outputPerMillion: 1.5,
+    tiers: [
+      { name: '0_272k', input: 0.3, output: 1.5, condition: '<272K' },
+      { name: '272k_plus', input: 0.6, output: 2.25, condition: '>272K' },
+    ],
+  } as ModelGroupPricingPresentation;
+
+  it('firstTierOnly 只渲染首档，其余留给悬停', () => {
+    const text = renderGroupPricingValue(multi, undefined, undefined, { compact: true, firstTierOnly: true });
+    expect(text).toBe('$0.3/$1.5 / 1M（0_272k）');
+    expect(text).not.toContain('272k_plus');
+    // 条件不进正文，避免撑长
+    expect(text).not.toContain('<272K');
+  });
+
+  it('不带 firstTierOnly 时仍逐档列出（模型广场口径不变）', () => {
+    const text = renderGroupPricingValue(multi);
+    expect(text).toContain('0_272k · <272K');
+    expect(text).toContain('272k_plus · >272K');
+  });
+
+  it('币种由 convert 决定：USD 出 $、CNY 出 ¥，不会写死', () => {
+    const usdMoney = (_s: number, u?: number) => (u == null ? null : formatMoney(u));
+    const cnyMoney = (_s: number, u?: number) => (u == null ? null : formatMoney(u * 7.3, 'CNY', 1));
+
+    const usd = renderGroupPricingValue(multi, 1, usdMoney, { compact: true, firstTierOnly: true });
+    const cny = renderGroupPricingValue(multi, 1, cnyMoney, { compact: true, firstTierOnly: true });
+
+    expect(usd).toBe('$0.3/$1.5 / 1M（0_272k）');
+    expect(cny).toBe('¥2.19/¥10.95 / 1M（0_272k）');
+    // 关键：两者不得互相串币符
+    expect(usd).not.toContain('¥');
+    expect(cny).not.toContain('$');
+  });
+
+  it('CNY 且汇率未知时整行标注，不贴 ¥ 冒充人民币价', () => {
+    const unknown = renderGroupPricingValue(multi, 1, () => null, { compact: true, firstTierOnly: true });
+    expect(unknown).toBe('汇率未知');
   });
 });
