@@ -13,6 +13,7 @@ import {
   USER_PROFILE_STORAGE_KEY,
 } from './appLocalState.js';
 import { I18nProvider, useI18n } from './i18n.js';
+import { useCurrency } from './currencyContext.js';
 import { resolveLoginErrorMessage } from './loginError.js';
 import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
@@ -453,6 +454,8 @@ function RouteLoadingFallback() {
 
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
+  // 顶栏货币按钮的读写源；与全站价格显示共用同一个 Provider，避免两处状态分叉。
+  const currencyCtx = useCurrency();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -669,13 +672,37 @@ function AppShell() {
           ))}
         </nav>
         <div className="topbar-right">
+          {/*
+            顶栏货币切换（取代设置页里的「显示货币」下拉）。
+            与语言按钮同用 .topbar-icon-btn，只靠 minWidth/fontSize 对齐字形宽度。
+            按钮显示**当前**币种；悬停说明要点出**将切到**哪个，否则"看到 USD"
+            会被读成"点下去变 USD"，与实际相反。
+          */}
           <button
             className="topbar-icon-btn"
-            aria-label={language === 'zh' ? 'Switch to English' : '切换到中文'}
+            aria-label={t('切换货币')}
+            title={currencyCtx.toggling
+              ? t('切换中…')
+              : (currencyCtx.currency === 'USD' ? t('切换货币为人民币 CNY') : t('切换货币为美元 USD'))}
+            onClick={() => {
+              void currencyCtx.toggleCurrency().catch(() => {
+                toast.error(t('货币切换失败，请稍后重试'));
+              });
+            }}
+            disabled={currencyCtx.toggling}
+            style={{ minWidth: 36, fontSize: 12, fontWeight: 700 }}
+          >
+            {currencyCtx.currency === 'USD' ? 'USD' : 'CNY'}
+          </button>
+          <button
+            className="topbar-icon-btn"
+            aria-label={language === 'zh' ? t('切换语言') : 'Switch language'}
+            title={language === 'zh' ? t('切换语言为英文 EN') : t('切换语言为中文')}
             onClick={toggleLanguage}
             style={{ minWidth: 36, fontSize: 12, fontWeight: 700 }}
           >
-            {language === 'zh' ? 'EN' : '中'}
+            {/* 显示当前语言（原实现显示的是目标语言，与货币按钮语义不一致，已统一） */}
+            {language === 'zh' ? '中' : 'EN'}
           </button>
           <button className="topbar-search-trigger" aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>

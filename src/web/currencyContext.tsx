@@ -20,6 +20,13 @@ export interface CurrencyContextValue {
   loaded: boolean;
   /** 设置页保存后重新拉取，让币种切换立即生效。 */
   refresh: () => Promise<void>;
+  /**
+   * 在 USD / CNY 之间切换并落库（顶栏按钮用）。
+   * 返回 Promise 以便调用方在失败时提示——币种是服务端配置，不是纯前端开关。
+   */
+  toggleCurrency: () => Promise<void>;
+  /** 切换进行中；用于禁用按钮避免连点写乱。 */
+  toggling: boolean;
 }
 
 const EMPTY_CONTEXT: CurrencyContextValue = {
@@ -27,6 +34,8 @@ const EMPTY_CONTEXT: CurrencyContextValue = {
   getSiteRate: () => null,
   loaded: false,
   refresh: async () => {},
+  toggleCurrency: async () => {},
+  toggling: false,
 };
 
 const CurrencyContext = createContext<CurrencyContextValue>(EMPTY_CONTEXT);
@@ -43,6 +52,9 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
   const [loaded, setLoaded] = useState(false);
   // 并发保护：多个挂载点同时触发 refresh 时只发一轮请求。
   const inflight = useRef<Promise<void> | null>(null);
+  // 防止连点切换把服务端写成中间态。
+  const togglingRef = useRef(false);
+  const [toggling, setToggling] = useState(false);
 
   const refresh = useCallback(async () => {
     if (inflight.current) return inflight.current;
@@ -86,9 +98,33 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
     return ratesBySiteId.get(id) ?? null;
   }, [ratesBySiteId]);
 
+  /**
+   * 顶栏货币切换：先乐观改本地（全站价格立刻跟着变），再落库；
+   * 落库失败则回滚到原值并抛出，由调用方提示。
+   * 之所以乐观：等接口回来再改会让按钮"点了没反应"，而这是纯显示配置，
+   * 短暂不一致的代价远小于无反馈。
+   */
+  const toggleCurrency = useCallback(async () => {
+    if (togglingRef.current) return;
+    const next: DisplayCurrency = currency === 'USD' ? 'CNY' : 'USD';
+    togglingRef.current = true;
+    setToggling(true);
+    setCurrency(next);
+    try {
+      await api.updateRuntimeSettings({ displayCurrency: next } as any);
+    } catch (error) {
+      // 回滚，避免界面显示 ¥ 而服务端仍是 USD。
+      setCurrency(currency);
+      throw error;
+    } finally {
+      togglingRef.current = false;
+      setToggling(false);
+    }
+  }, [currency]);
+
   const value = useMemo<CurrencyContextValue>(
-    () => ({ currency, getSiteRate, loaded, refresh }),
-    [currency, getSiteRate, loaded, refresh],
+    () => ({ currency, getSiteRate, loaded, refresh, toggleCurrency, toggling }),
+    [currency, getSiteRate, loaded, refresh, toggleCurrency, toggling],
   );
 
   return <CurrencyContext.Provider value={value}>{props.children}</CurrencyContext.Provider>;

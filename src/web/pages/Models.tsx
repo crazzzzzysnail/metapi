@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { api } from '../api.js';
+import { useCurrency } from '../currencyContext.js';
 import { formatMoney } from '../numberFormat.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
@@ -159,24 +160,21 @@ export default function Models() {
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
-  // S6 / T8.7–T8.9：显示货币（USD/CNY）与站点汇率档案。
-  // 汇率未知绝不猜测换算；合计处排除并提示数量。
-  const [displayCurrency, setDisplayCurrency] = useState<'USD' | 'CNY'>('USD');
-  const [pricingDisplayMode, setPricingDisplayMode] = useState<'official' | 'effective'>('official');
+  // S6 / T8.7–T8.9：显示货币与站点汇率档案。
+  // 币种取自 CurrencyContext（顶栏按钮即写这里），不再自持一份 state——
+  // 否则顶栏切了 CNY，本页面仍是挂载时快照的 USD，两处显示互相矛盾。
+  // 汇率仍用本页的 billingProfiles：它要区分"汇率未知(null)"来统计被排除的站点数，
+  // context 的 getSiteRate 只返回有效值，承载不了这个三态语义。
+  const { currency: displayCurrency } = useCurrency();
+
   const [billingProfiles, setBillingProfiles] = useState<Map<number, number | null>>(new Map());
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [runtimeInfo, sitesRes] = await Promise.all([
-          api.getRuntimeSettings().catch(() => null),
-          api.getSites().catch(() => [] as any[]),
-        ]);
+        // 只需站点列表拿汇率；币种由 context 提供，不再重复请求运行时配置。
+        const sitesRes = await api.getSites().catch(() => [] as any[]);
         if (cancelled) return;
-        const currency = String((runtimeInfo as any)?.displayCurrency || 'USD').toUpperCase();
-        setDisplayCurrency(currency === 'CNY' ? 'CNY' : 'USD');
-        const mode = String((runtimeInfo as any)?.pricingDisplayMode || 'official').toLowerCase();
-        setPricingDisplayMode(mode === 'effective' ? 'effective' : 'official');
         const list = Array.isArray(sitesRes) ? sitesRes : ((sitesRes as any)?.sites || []);
         const map = new Map<number, number | null>();
         for (const site of list) {
