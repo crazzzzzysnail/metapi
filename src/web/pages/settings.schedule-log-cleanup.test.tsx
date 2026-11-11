@@ -119,11 +119,13 @@ describe('Settings log cleanup schedule', () => {
         logCleanupUsageLogsEnabled: true,
         logCleanupProgramLogsEnabled: true,
         logCleanupRetentionDays: 14,
-        // S6 / T8.11：两个新开关随「保存定时任务」一并提交。本用例的 getRuntimeSettings
-        // 回显里没有这两个键，因此按默认回落：USD / official —— 与改动前的显示行为一致。
-        displayCurrency: 'USD',
-        pricingDisplayMode: 'official',
+        // displayCurrency / pricingDisplayMode 已不再随「保存定时任务」提交：
+        // 币种改由顶栏按钮单独读写（回写挂载时快照会覆盖用户刚切的币种），
+        // 计价口径从未被消费方读取。这里刻意断言 payload 里没有这两个键。
       });
+      const savedPayload = apiMock.updateRuntimeSettings.mock.calls[0][0] as Record<string, unknown>;
+      expect(savedPayload).not.toHaveProperty('displayCurrency');
+      expect(savedPayload).not.toHaveProperty('pricingDisplayMode');
     } finally {
       root?.unmount();
     }
