@@ -14,6 +14,7 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
+import { clearSnapshotCache, readSnapshotCache } from '../snapshotCacheService.js';
 
 export interface SiteBillingProfileRow {
   siteId: number;
@@ -126,6 +127,10 @@ export async function probeAndPersistSiteBillingProfile(
       .run();
   }
 
+  // 汇率/标尺一变，全站金额显示就得重算：让轻量端点的缓存立刻作废，
+  // 否则用户填完要等最多 60 秒才看到变化，会被当成"设置没生效"。
+  invalidateSiteCurrencyRatesCache();
+
   return getSiteBillingProfile(site.id);
 }
 
@@ -153,5 +158,91 @@ export async function setManualBillingOverrides(input: {
     .onConflictDoUpdate({ target: schema.siteBillingProfiles.siteId, set: patch as any })
     .run();
 
+  // 同上：手动覆盖也要让汇率缓存作废。
+  invalidateSiteCurrencyRatesCache();
+
   return getSiteBillingProfile(input.siteId);
+}
+
+/**
+ * 全站汇率档案的轻量读取（B1）。
+ *
+ * 为什么单独开一个入口而不是让前端搭 `/api/sites` 的便车：
+ *   显示币种换算只需要 `{siteId, cnyPerUsd}` 两个数，而站点表里带着
+ *   url / api_key / extra_config / custom_headers 等大字段。为了让金额
+ *   带上 ¥ 符号去拉全量站点行，在 MySQL 部署下是不必要的 IO 与传输。
+ *
+ * ⚠️ F3 修正：**以活跃站点为基准输出**，没有档案行的站点给 null。
+ *   原先只返回 site_billing_profiles 里已有的行 —— 实测 8 个活跃站只有 4 行档案，
+ *   另外 4 个（OAuth 类）压根不在表里。那样前端无法区分"这站没设汇率"和
+ *   "这站不存在"，也就算不出"有多少站被排除出人民币合计"。
+ *
+ * 语义与 getSiteBillingProfile 一致：null = 未知，绝不填默认汇率。
+ */
+export interface SiteCurrencyRate {
+  siteId: number;
+  /** 1 USD ≈ N CNY；null 表示该站点汇率未知，调用方须排除出合计并提示。 */
+  cnyPerUsd: number | null;
+}
+
+export async function listSiteCurrencyRates(): Promise<SiteCurrencyRate[]> {
+  const [profileRows, activeSites] = await Promise.all([
+    db.select({
+      siteId: schema.siteBillingProfiles.siteId,
+      cnyPerUsd: schema.siteBillingProfiles.cnyPerUsd,
+    }).from(schema.siteBillingProfiles).all(),
+    // 只统计活跃站点：禁用站不参与任何金额合计，把它们算进"未设汇率"会虚增提示数量
+    db.select({ id: schema.sites.id }).from(schema.sites)
+      .where(eq(schema.sites.status, 'active')).all(),
+  ]);
+
+  const rateBySiteId = new Map<number, number | null>();
+  for (const row of profileRows) {
+    const rate = Number(row.cnyPerUsd);
+    rateBySiteId.set(
+      Number(row.siteId),
+      Number.isFinite(rate) && rate > 0 ? rate : null,
+    );
+  }
+
+  return (activeSites ?? [])
+    .map((site) => ({ siteId: Number(site.id) }))
+    .filter((item) => Number.isFinite(item.siteId) && item.siteId > 0)
+    .map((item) => ({ siteId: item.siteId, cnyPerUsd: rateBySiteId.get(item.siteId) ?? null }))
+    .sort((left, right) => left.siteId - right.siteId);
+}
+
+/**
+ * 带缓存的汇率档案读取（B1）。
+ *
+ * 必须挂缓存的原因：这个端点是全站金额显示的前置依赖，页面加载即触发。
+ * 不缓存的话，"为了避免拉全量站点数据"就退化成每次加载多打一次 MySQL 往返 ——
+ * 远程库的成本几乎全在 RTT 上，那样反而比搭 getSites 便车更慢。
+ *
+ * TTL 取 60s：汇率是人工/探测维护的低频数据，分钟级陈旧完全可接受；
+ * 而用户在站点编辑里保存汇率时会显式失效（见 invalidateCurrencyRateCache），
+ * 所以"改完立刻可见"这条体验不受 TTL 影响。
+ */
+const CURRENCY_RATES_TTL_MS = 60_000;
+
+export async function getSiteCurrencyRatesSnapshot(options?: {
+  forceRefresh?: boolean;
+}) {
+  return readSnapshotCache<SiteCurrencyRate[]>({
+    namespace: 'site-currency-rates',
+    key: 'default',
+    ttlMs: CURRENCY_RATES_TTL_MS,
+    forceRefresh: options?.forceRefresh,
+    loader: listSiteCurrencyRates,
+  });
+}
+
+/**
+ * 让汇率缓存立即失效。
+ * 调用时机：站点保存了手动汇率、或自动探测写回了新值。
+ * 不做这件事的话，用户填完汇率要等最多 60 秒才能看到价格变化，
+ * 会被当成"设置没生效"。
+ */
+export function invalidateSiteCurrencyRatesCache(): void {
+  clearSnapshotCache('site-currency-rates');
 }

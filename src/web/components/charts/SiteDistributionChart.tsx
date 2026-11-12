@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { useThemeLabelColor } from '../useThemeLabelColor.js';
+import { useCurrency } from '../../currencyContext.js';
+import { formatAmountInCurrency } from '../../numberFormat.js';
 
 interface SiteDistributionData {
   siteName: string;
@@ -8,6 +10,13 @@ interface SiteDistributionData {
   totalBalance: number;
   totalSpend: number;
   accountCount: number;
+  /**
+   * F3：后端站点统计快照本来就带这两个字段（siteStatsSnapshotService 的
+   * distribution 行），此前被这里的 props 类型挡在门外，于是图表只能硬编码 $。
+   * 有 siteId 才能按站取汇率；cnyPerUsd 是后端给的该站汇率快照，作为兜底来源。
+   */
+  siteId?: number;
+  cnyPerUsd?: number | null;
 }
 
 interface SiteDistributionChartProps {
@@ -92,16 +101,36 @@ function EmptyState() {
 export default function SiteDistributionChart({ data, loading }: SiteDistributionChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('balance');
   const labelColor = useThemeLabelColor();
+  const { currency, getSiteRate } = useCurrency();
+
+  /**
+   * F3：按站点汇率把美元换算成当前显示币种。
+   *
+   * 汇率优先取 context（顶栏切换后全站同一份），退回快照行里带的 cnyPerUsd。
+   * 汇率未知时**保留美元并标注**，不贴 ¥ —— 与模型广场、日志同一判据：
+   * 一个看起来可信的错数比"这是美元"更危险。
+   */
+  const formatSiteValue = (item: SiteDistributionData, usd: number): string => {
+    if (currency === 'USD') return formatAmountInCurrency(usd, 'USD');
+    const rate = getSiteRate(item.siteId) ?? (Number(item.cnyPerUsd) > 0 ? Number(item.cnyPerUsd) : null);
+    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（汇率未知）`;
+    return formatAmountInCurrency(usd * rate, 'CNY');
+  };
 
   const chartData = useMemo(() => {
     if (!data || data.length === 0) return [];
     return data.map((item) => ({
       siteName: item.siteName,
       platform: item.platform,
+      // 图表内部比较/排序仍用美元原值；只有展示文本才换算（否则不同汇率的站会被混着排）
       value: safeNumber(viewMode === 'balance' ? item.totalBalance : item.totalSpend),
       accountCount: safeNumber(item.accountCount),
+      // tooltip 换算要用到站点汇率，所以把原始行一起带上（不展示，仅供格式化取值）
+      source: item,
     }));
-  }, [data, viewMode]);
+    // currency/getSiteRate 进入依赖：切币种后 tooltip 文本必须重算，
+    // 否则图例已变、悬停仍是旧币种。
+  }, [data, viewMode, currency, getSiteRate]);
 
   const hasData = chartData.length > 0 && chartData.some((d) => d.value > 0);
 
@@ -131,7 +160,8 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
               value: (datum: unknown) => {
                 const item = coerceDatumRecord(datum);
                 const val = safeNumber(item.value);
-                return `$${val.toFixed(2)}`;
+                // F3：按该站汇率换算，不再硬编码 $
+                return formatSiteValue(item.source as SiteDistributionData, val);
               },
             },
             {
@@ -157,12 +187,6 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
       background: 'transparent',
     };
   }, [chartData, hasData, labelColor]);
-
-  const formatValue = (value: number): string => {
-    if (value >= 1000) return `$${value.toFixed(2)}`;
-    if (value >= 1) return `$${value.toFixed(3)}`;
-    return `$${value.toFixed(6)}`;
-  };
 
   return (
     <div
@@ -275,7 +299,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: PIE_COLORS[idx % PIE_COLORS.length], flexShrink: 0 }} />
                 <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.siteName}</span>
                 <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: 'var(--color-text-primary)' }}>
-                  {formatValue(d.value)}
+                  {formatSiteValue(d.source, d.value)}
                 </span>
               </span>
             ))}

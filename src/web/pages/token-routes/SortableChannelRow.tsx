@@ -9,7 +9,7 @@ import {
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
 import { renderGroupPricingValue, type ModelGroupPricingPresentation } from '../helpers/modelPricingPresentation.js';
-import { formatMoney, type DisplayCurrency } from '../../numberFormat.js';
+import { formatMoney, formatBalance as formatBalanceShared, type DisplayCurrency } from '../../numberFormat.js';
 import { useCurrency, type CurrencyContextValue } from '../../currencyContext.js';
 
 function getRouteUnitStrategyLabel(strategy: string | null | undefined): string {
@@ -22,9 +22,23 @@ function formatRouteUnitMemberLabel(member: { accountId: number; username: strin
   return siteLabel ? `${accountLabel} @ ${siteLabel}` : accountLabel;
 }
 
-function formatBalance(value: number | null | undefined): string {
+/**
+ * F3：删除本文件自造的 formatBalance（原来硬编码 `$${balance.toFixed(2)}`）。
+ *
+ * 它遮蔽了 numberFormat 里的同名共享出口，于是"设置切到人民币、通道卡片仍是 $"
+ * ——而且这类局部实现每加一处，全站一致性就多一个失守点。
+ * 现在余额按该账号所属站点的汇率换算；汇率未知则保留美元并标注，不贴 ¥ 冒充。
+ */
+function formatChannelBalance(
+  value: number | null | undefined,
+  currencyCtx: CurrencyContextValue,
+  siteId: number | null | undefined,
+): string {
   const balance = typeof value === 'number' && Number.isFinite(value) ? value : 0;
-  return `$${balance.toFixed(2)}`;
+  if (currencyCtx.currency === 'USD') return formatBalanceShared(balance);
+  const rate = currencyCtx.getSiteRate(siteId);
+  if (rate == null) return `${formatBalanceShared(balance)}（汇率未知）`;
+  return formatBalanceShared(balance * rate, 'CNY', 1);
 }
 
 function formatSiteWeight(value: number | null | undefined): string {
@@ -190,7 +204,7 @@ function renderChannelInsightBadges(
           style={{ fontSize: 10 }}
           data-tooltip={suppressTooltips ? undefined : '当前账号余额'}
         >
-          余额：{formatBalance(channel.account?.balance)}
+          余额：{formatChannelBalance(channel.account?.balance, currencyCtx, channel.site?.id)}
         </span>
       ) : null}
       {/*

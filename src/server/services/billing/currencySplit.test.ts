@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   convertSiteUsdToCny,
+  maxExcludedSiteCount,
   resolveEffectiveQuotaScale,
+  splitMetricBySite,
   summarizeByCurrency,
 } from './currencySplit.js';
 
@@ -111,5 +113,83 @@ describe('resolveEffectiveQuotaScale', () => {
   it('非法档案值不采信，仍走默认', () => {
     expect(resolveEffectiveQuotaScale(0, 'new-api')).toBe(500_000);
     expect(resolveEffectiveQuotaScale(-500000, 'new-api')).toBe(500_000);
+  });
+});
+
+/**
+ * B2：仪表盘把四个金额指标改成「按站点分组 → 双币拆分」后依赖的两个纯函数。
+ *
+ * 这里最要紧的是守住那条等价性不变式：**usdSum 必须包含汇率未知的站点**。
+ * 一旦哪天有人"顺手"把缺汇率的站也从 USD 合计里剔掉，美元总额会凭空变小，
+ * 而这恰好是 CNY 改造过程中最容易写错的方向 —— 所以下面第一条就专门盯它。
+ */
+describe('splitMetricBySite', () => {
+  const rates = new Map<number, number | null>([
+    [1, 7.3],
+    [2, 1],
+    [3, null],        // 汇率未知
+    [4, -1],          // 非法
+  ]);
+
+  it('USD 合计包含汇率未知与非法的站点（美元不需要汇率）', () => {
+    const result = splitMetricBySite([
+      { siteId: 1, usd: 100 },
+      { siteId: 2, usd: 50 },
+      { siteId: 3, usd: 15 },   // 缺汇率，但美元照计
+      { siteId: 4, usd: 5 },    // 非法汇率，同样照计
+    ], rates);
+
+    expect(result.usdTotal).toBe(170);
+    expect(result.usdSum).toBe(170);
+    // CNY 只累计汇率已知的两站
+    expect(result.cnyTotal).toBe(100 * 7.3 + 50 * 1);
+    expect(result.includedSiteCount).toBe(2);
+    expect(result.excludedSiteCount).toBe(2);
+  });
+
+  it('CNY 合计逐站用各自汇率，不套用同一个数', () => {
+    const result = splitMetricBySite([
+      { siteId: 1, usd: 10 },   // ×7.3
+      { siteId: 2, usd: 10 },   // ×1
+    ], rates);
+    expect(result.cnyTotal).toBe(83);
+  });
+
+  it('非有限金额按 0 处理而不是污染合计', () => {
+    const result = splitMetricBySite([
+      { siteId: 1, usd: Number.NaN },
+      { siteId: 1, usd: 20 },
+    ], rates);
+    expect(result.usdSum).toBe(20);
+  });
+
+  it('空输入给出全零而不抛异常', () => {
+    const result = splitMetricBySite([], rates);
+    expect(result.usdSum).toBe(0);
+    expect(result.cnyTotal).toBe(0);
+    expect(result.excludedSiteCount).toBe(0);
+  });
+
+  it('无汇率档案的站点也计入 USD、并被记为 rate-unknown', () => {
+    const result = splitMetricBySite([{ siteId: 99, usd: 7 }], rates);
+    expect(result.usdSum).toBe(7);
+    expect(result.excludedSites).toEqual([{ siteId: 99, reason: 'rate-unknown' }]);
+  });
+});
+
+/**
+ * 方案 a1：四个指标的排除数取最大值。
+ * 相加会把同几个站在四个指标上重复计数四次，夸大问题规模。
+ */
+describe('maxExcludedSiteCount', () => {
+  it('取最大值而非相加', () => {
+    expect(maxExcludedSiteCount(1, 1, 1, 1)).toBe(1);
+    expect(maxExcludedSiteCount(0, 2, 1, 0)).toBe(2);
+  });
+
+  it('忽略非有限值，全空给 0', () => {
+    expect(maxExcludedSiteCount(Number.NaN, 3, undefined as unknown as number)).toBe(3);
+    expect(maxExcludedSiteCount()).toBe(0);
+    expect(maxExcludedSiteCount(-1, 0)).toBe(0);
   });
 });

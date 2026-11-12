@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
+import { useCurrency } from '../../currencyContext.js';
+import { formatAmountInCurrency } from '../../numberFormat.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -7,7 +9,8 @@ import { VChart } from '@visactor/react-vchart';
 
 interface SiteTrendData {
   date: string;
-  sites: Record<string, { spend: number; calls: number }>;
+  /** siteId 由后端 trend 带上（F3），用于按站取汇率；老快照可能缺这个字段。 */
+  sites: Record<string, { spend: number; calls: number; siteId?: number }>;
 }
 
 interface SiteTrendChartProps {
@@ -43,6 +46,19 @@ const COLOR_PALETTE = [
 
 export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
   const [metric, setMetric] = useState<Metric>('spend');
+  const { currency, getSiteRate } = useCurrency();
+
+  /**
+   * F3：spend 按该站汇率换算成当前显示币种。
+   * calls 是次数不是金额，绝不参与换算。
+   * 缺 siteId（老快照）或汇率未知时保留美元并标注，不贴 ¥ 冒充人民币。
+   */
+  const formatSpend = (usd: number, siteId?: number): string => {
+    if (currency === 'USD') return formatAmountInCurrency(usd, 'USD');
+    const rate = getSiteRate(siteId ?? null);
+    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（汇率未知）`;
+    return formatAmountInCurrency(usd * rate, 'CNY');
+  };
 
   /* ---------- data transform ---------- */
 
@@ -53,6 +69,8 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
         date: d.date,
         site,
         value: metric === 'spend' ? v.spend : v.calls,
+        // tooltip 换算要用站点标识，随值一起带下去
+        siteId: v.siteId,
       })),
     );
   }, [data, metric]);
@@ -118,7 +136,10 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
             key: (datum: Record<string, unknown>) => datum?.site ?? '',
             value: (datum: Record<string, unknown>) => {
               const v = Number(datum?.value ?? 0);
-              return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
+              // F3：金额走按站换算的出口；次数保持原样
+              return metric === 'spend'
+                ? formatSpend(v, datum?.siteId as number | undefined)
+                : String(v);
             },
           },
         ],
@@ -130,7 +151,9 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
             key: (datum: Record<string, unknown>) => datum?.site ?? '',
             value: (datum: Record<string, unknown>) => {
               const v = Number(datum?.value ?? 0);
-              return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
+              return metric === 'spend'
+                ? formatSpend(v, datum?.siteId as number | undefined)
+                : String(v);
             },
           },
         ],

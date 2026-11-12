@@ -53,6 +53,7 @@ import {
   stopModelAvailabilityProbeScheduler,
 } from '../../services/modelAvailabilityProbeService.js';
 import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
+import { getSiteCurrencyRatesSnapshot } from '../../services/billing/siteBillingProfileService.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -930,6 +931,23 @@ export async function settingsRoutes(app: FastifyInstance) {
 
   app.get('/api/settings/brand-list', async () => {
     return { brands: getAllBrandNames() };
+  });
+
+  /**
+   * 全站汇率档案（B1）。
+   *
+   * 顶栏切到人民币后，所有金额显示都要靠它换算。单独开这个轻量端点而不是让前端
+   * 去翻 `/api/sites`：站点行里有 url / api_key / extra_config 等大字段，
+   * 而换算只需要 siteId + cnyPerUsd 两个数。
+   * 服务端已挂 60s 缓存，页面反复加载不会变成每次打库。
+   */
+  app.get('/api/settings/currency-rates', async () => {
+    const snapshot = await getSiteCurrencyRatesSnapshot();
+    return {
+      rates: snapshot.payload,
+      generatedAt: snapshot.generatedAt,
+      cacheStatus: snapshot.cacheStatus,
+    };
   });
 
   app.post<{ Body: unknown }>('/api/settings/system-proxy/test', async (request, reply) => {

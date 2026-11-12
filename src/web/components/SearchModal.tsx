@@ -5,6 +5,8 @@ import { formatDateLocal, formatDateTimeMinuteLocal } from '../pages/helpers/che
 import { buildAccountFocusPath, buildSiteFocusPath, buildTokenFocusPath } from '../pages/helpers/navigationFocus.js';
 import { useI18n } from '../i18n.js';
 import { useAnimatedVisibility } from './useAnimatedVisibility.js';
+import { formatBalance } from '../numberFormat.js';
+import { useCurrency } from '../currencyContext.js';
 
 interface SiteResult {
   id: number;
@@ -18,7 +20,12 @@ interface AccountResult {
   status?: string | null;
   balance?: number | null;
   segment?: 'session' | 'apikey';
-  site?: { name: string } | null;
+  /**
+   * F3：后端搜索接口返回的是完整站点行（`site: r.sites`），此前这里只声明了
+   * name，于是拿不到 siteId —— 而按站汇率换算必须要 id。补齐而不是靠名字反查
+   * （站点名可重复、可改名，后端还用 "unknown" 兜底空名）。
+   */
+  site?: { id: number; name: string } | null;
 }
 
 interface AccountTokenResult {
@@ -67,6 +74,15 @@ interface SearchResult {
 
 export default function SearchModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useI18n();
+  const { currency, getSiteRate } = useCurrency();
+
+  /**
+   * F3：搜索结果里的账号余额按该账号所属站点的汇率换算。
+   * 汇率未知时保留美元并标注 —— 与站点页、日志同一判据，不贴 ¥ 冒充人民币。
+   */
+  const formatAccountBalance = (balance: number, siteId?: number): string =>
+    // 汇率未知时由 formatBalance 统一输出 `$X（汇率未知）`，不再各页手拼后缀。
+    formatBalance(balance, currency, getSiteRate(siteId ?? null));
   const presence = useAnimatedVisibility(open, 180);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult | null>(null);
@@ -221,7 +237,8 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                       {a.site?.name || t('未关联站点')}
                       {a.segment === 'apikey' ? ` · ${t('API Key 连接')}` : ''}
                       {' · '}
-                      {t('余额')} ${(a.balance || 0).toFixed(2)}
+                      {/* F3：按该账号所属站点的汇率换算，不再硬编码 $ */}
+                      {t('余额')} {formatAccountBalance(a.balance || 0, a.site?.id)}
                     </div>
                   </div>
                 </button>

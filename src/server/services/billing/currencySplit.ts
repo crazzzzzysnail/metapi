@@ -94,6 +94,63 @@ export function convertSiteUsdToCny(
 }
 
 /**
+ * 一个指标在各站点的美元金额 + 双币合计（B2）。
+ *
+ * 放在这里而不是留在仪表盘服务里的理由：它的判据就是"逐站换算 + 排除计数"，
+ * 与 summarizeByCurrency 同源；放这儿可直接复用本模块的既有测试范式，
+ * 也便于站点统计快照等其它汇总点共用同一套规则。
+ */
+export interface SiteAmount {
+  siteId: number;
+  /** 该站点在某指标上的美元金额。 */
+  usd: number;
+}
+
+export interface MetricCurrencySplit extends CurrencySplitSummary {
+  /** USD 合计（= usdTotal，语义上更贴合"由 per-site 行求和"这一来源）。 */
+  usdSum: number;
+}
+
+/**
+ * 把「按站点分组的某指标金额」换算成双币口径。
+ *
+ * @param amounts 每站一条（来自 GROUP BY siteId 的聚合结果）
+ * @param rateBySiteId 站点 → 汇率；缺键或非法值一律按"未知"处理
+ *
+ * 关键不变式：**usdSum 必须等于全部站点之和（含汇率未知站点）**。
+ * 美元不需要汇率，所以把缺汇率的站从 USD 里剔掉才是错的。
+ */
+export function splitMetricBySite(
+  amounts: SiteAmount[],
+  rateBySiteId: Map<number, number | null>,
+): MetricCurrencySplit {
+  const normalized = (amounts ?? []).map((item) => ({
+    siteId: Number(item?.siteId),
+    usd: Number.isFinite(Number(item?.usd)) ? Number(item.usd) : 0,
+    cnyPerUsd: rateBySiteId.get(Number(item?.siteId)) ?? null,
+  })).filter((item) => Number.isFinite(item.siteId));
+
+  const summary = summarizeByCurrency(normalized);
+  return {
+    ...summary,
+    usdSum: summary.usdTotal,
+  };
+}
+
+/**
+ * 多个指标的"被排除站点数"合并。
+ *
+ * 取最大值而非相加：缺汇率通常就是同几个站在四个指标上都缺，
+ * 相加会把同一批站点重复计数、夸大问题规模（方案 a1）。
+ */
+export function maxExcludedSiteCount(...counts: number[]): number {
+  return counts.reduce((max, count) => {
+    const n = Number(count);
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+}
+
+/**
  * 取某站点的有效额度标尺：档案里的 quota_per_unit 优先，其次平台默认表。
  * （A9 的正解：标尺来自数据而不是硬编码分支。）
  */
