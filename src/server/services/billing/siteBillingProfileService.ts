@@ -7,7 +7,7 @@
  *
  * 诚实性约定（R7 / 决策"失败即留空，不写默认值"）：
  *   - 探测不到汇率就留 null，**绝不回退 7.2 之类的猜测值**；
- *   - 用户手动覆盖（manual）永远优先于自动探测（auto）；
+ *   - 后台静默探测不覆盖手动值（manual）；用户显式点探测时例外，以上游为准；
  *   - 展示层读到 null 必须说"汇率未知"，不得显示换算后的数字。
  */
 
@@ -89,14 +89,28 @@ export async function getSiteBillingProfile(siteId: number): Promise<SiteBilling
   };
 }
 
+export interface ProbeSiteBillingProfileOptions {
+  /**
+   * 显式探测（用户点「探测上游汇率」/「重新探测」）允许用上游值覆盖手动维护值。
+   *
+   * 两种调用的意图不同，必须分开：
+   *   - 站点保存后的**后台静默**探测：不能让上游悄悄改掉用户手填的汇率，
+   *     否则表现为"我刚保存的值自己变了"，故 overrideManual 缺省 false；
+   *   - 用户**显式点探测**按钮：意图就是"以上游为准"，此时仍拒写就会
+   *     出现"点了探测，数字纹丝不动、来源还标着手动"的假死现象。
+   */
+  overrideManual?: boolean;
+}
+
 /**
  * 自动探测并合并写库。规则：
- *   - manual 来源的值不被 auto 覆盖；
+ *   - 默认 manual 来源的值不被 auto 覆盖；显式探测（overrideManual）例外；
  *   - 探测失败的字段保持原状（包括保持 null），不会写入猜测值。
  */
 export async function probeAndPersistSiteBillingProfile(
   site: { id: number; url: string },
   requestJson: (url: string, init?: UndiciRequestInit) => Promise<unknown>,
+  options: ProbeSiteBillingProfileOptions = {},
 ): Promise<SiteBillingProfileRow> {
   const normalizedBase = (site.url || '').replace(/\/+$/, '');
   const statusData = await fetchSiteStatus(normalizedBase, requestJson);
@@ -106,12 +120,14 @@ export async function probeAndPersistSiteBillingProfile(
     .where(eq(schema.siteBillingProfiles.siteId, site.id)).get();
 
   const next: typeof schema.siteBillingProfiles.$inferInsert = { siteId: site.id };
+  // 显式探测时用户就是要以上游为准：手动值也允许被覆盖，并如实改回 auto。
+  const canOverrideManual = options.overrideManual === true;
 
-  if (extracted.cnyPerUsd !== null && existing?.rateSource !== 'manual') {
+  if (extracted.cnyPerUsd !== null && (canOverrideManual || existing?.rateSource !== 'manual')) {
     next.cnyPerUsd = extracted.cnyPerUsd;
     next.rateSource = 'auto';
   }
-  if (extracted.quotaPerUnit !== null && existing?.quotaSource !== 'manual') {
+  if (extracted.quotaPerUnit !== null && (canOverrideManual || existing?.quotaSource !== 'manual')) {
     next.quotaPerUnit = extracted.quotaPerUnit;
     next.quotaSource = 'auto';
   }
