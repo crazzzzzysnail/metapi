@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { formatDateTimeMinuteLocal } from '../../pages/helpers/checkinLogTime.js';
+import { formatMoney } from '../../numberFormat.js';
 
 type Metric = 'tokens' | 'requests' | 'cost';
 
@@ -131,7 +132,17 @@ export default function DownstreamKeyTrendChart({
             key: () => METRIC_OPTIONS.find((opt) => opt.key === metric)?.label || 'Value',
             value: (datum: Record<string, unknown>) => {
               const value = Number(datum?.value ?? 0);
-              if (metric === 'cost') return `$${value.toFixed(6)}`;
+              /**
+               * F3：成本轴保持美元口径，且**不跟随显示货币切换**。
+               *
+               * 原因是数据粒度不够：一个下游密钥的成本天然跨站聚合（同一密钥可
+               * 走多个站点），buckets 里既没有 siteId、也没有按站拆分的明细，
+               * 而汇率是逐站维护的。这种情况下若硬套一个"代表汇率"去乘 ¥，
+               * 得到的是一个看起来精确、实则没有任何依据的数 ——
+               * 这比显示美元更危险，也是本任务一直在消灭的那类错误。
+               * 要支持换算，得先让后端把 buckets 按站点拆开（尚未做）。
+               */
+              if (metric === 'cost') return formatMoney(value, 'USD', null, { trim: false });
               return value.toLocaleString();
             },
           },

@@ -1,9 +1,12 @@
-import { Suspense, lazy, useEffect, useState, useCallback } from "react";
+import { Suspense, lazy, useEffect, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
+import { buildUnknownRateSitesPath } from "./helpers/navigationFocus.js";
+import { useCurrency } from "../currencyContext.js";
 import { useToast } from "../components/Toast.js";
 import { useIsMobile } from "../components/useIsMobile.js";
-import { formatCompactTokenMetric } from "../numberFormat.js";
+import { formatCompactTokenMetric, formatAmountInCurrency, stripSymbol } from "../numberFormat.js";
+import { tr } from "../i18n.js";
 
 const ModelAnalysisPanel = lazy(
   () => import("../components/ModelAnalysisPanel.js"),
@@ -310,6 +313,37 @@ export default function Dashboard({
     load();
   }, [load]);
 
+  /**
+   * F2：显示货币一变，立刻拉一次绕过缓存的快照。
+   *
+   * 后端余额/消耗的 CNY 口径随快照算好（B2），而快照有 12 秒 TTL。
+   * 不主动刷新的话，用户在顶栏切到人民币后仪表盘最长 12 秒仍显示旧币种数值——
+   * 数字"看起来正常但币种不对"比直接报错更容易被当成 bug 报回来。
+   *
+   * 方向刻意是这样：由 Dashboard 订阅币种变化，而不是让 currencyContext 去调
+   * 仪表盘的 API —— 后者会让通用展示层反向依赖具体业务端点，且登录页等
+   * 没有仪表盘的场合会白发请求。
+   *
+   * 这里不复用 load(true)：那个分支叫 silent 但其实会 setRefreshing 转圈、
+   * 失败还弹 toast。切币种是后台重算，用户没点任何按钮，不该有这两种反馈。
+   */
+  const { currency: dashboardCurrency, unknownRateSiteIds } = useCurrency();
+  const lastCurrencyRef = useRef(dashboardCurrency);
+  useEffect(() => {
+    if (lastCurrencyRef.current === dashboardCurrency) return;
+    lastCurrencyRef.current = dashboardCurrency;
+    let cancelled = false;
+    void api
+      .getDashboardSnapshot({ refresh: true })
+      .then((next) => {
+        if (!cancelled) setData(next);
+      })
+      .catch(() => {
+        // 静默失败：下一次轮询会补上，不值得为后台刷新打断用户。
+      });
+    return () => { cancelled = true; };
+  }, [dashboardCurrency]);
+
   useEffect(() => {
     void loadInsights();
   }, [loadInsights]);
@@ -495,10 +529,27 @@ export default function Dashboard({
     );
   }
 
-  const totalBalance = safeNumber(data?.totalBalance);
-  const totalUsed = safeNumber(data?.totalUsed || 0);
-  const todaySpend = safeNumber(data?.todaySpend || 0);
-  const todayReward = safeNumber(data?.todayReward || 0);
+  /**
+   * F3：四个金额指标按显示货币择一取数（B2 已在快照里并列给出 CNY 口径）。
+   *
+   * 取不到 CNY 字段时退回 USD 而不是显示 0 —— 老快照没这些键，
+   * 当成 0 会把"后端还没算"谎报成"没钱"。
+   */
+  const pickAmount = (usdKey: string, cnyKey: string): number => {
+    if (dashboardCurrency === 'CNY') {
+      const cny = (data as any)?.[cnyKey];
+      if (typeof cny === 'number' && Number.isFinite(cny)) return cny;
+    }
+    return safeNumber((data as any)?.[usdKey] || 0);
+  };
+  const totalBalance = pickAmount('totalBalance', 'totalBalanceCny');
+  const totalUsed = pickAmount('totalUsed', 'totalUsedCny');
+  const todaySpend = pickAmount('todaySpend', 'todaySpendCny');
+  const todayReward = pickAmount('todayReward', 'todayRewardCny');
+  /** 因汇率未知被排除出 CNY 合计的站点数；仅人民币模式下才有提示意义。 */
+  const currencyExcludedSiteCount = dashboardCurrency === 'CNY'
+    ? safeNumber(data?.currencyExcludedSiteCount || 0)
+    : 0;
   const activeAccounts = safeNumber(data?.activeAccounts);
   const totalAccounts = safeNumber(data?.totalAccounts);
   const todaySuccess = safeNumber(data?.todayCheckin?.success);
@@ -654,7 +705,7 @@ export default function Dashboard({
             <div className="dashboard-stat-content">
               <div className="stat-label">当前余额</div>
               <div className="stat-value animate-count-up">
-                ${totalBalance.toFixed(2)}
+                {formatAmountInCurrency(totalBalance, dashboardCurrency)}
               </div>
               <div
                 style={{
@@ -667,8 +718,33 @@ export default function Dashboard({
                   marginTop: 2,
                 }}
               >
-                今日 +{todayReward.toFixed(2)}
+                今日 +{stripSymbol(formatAmountInCurrency(todayReward, dashboardCurrency))}
               </div>
+              {/*
+                F4 前置：人民币模式下若站点汇率未维护，后端会把它们排除出 CNY 合计
+                （B2 / R7）。这里必须说明"这个数偏小是有原因的"，否则用户只会认为
+                切币种把余额算错了。美元模式不需要提示 —— 美元合计包含所有站点。
+              */}
+              {/*
+                F4：这一行是可点击入口，直达站点管理页处理缺汇率的站点。
+                单站点进编辑弹窗的汇率框，多站点逐个滚动高亮（见 navigationFocus）。
+              */}
+              {currencyExcludedSiteCount > 0 ? (
+                <Link
+                  to={buildUnknownRateSitesPath(unknownRateSiteIds)}
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--color-warning, #d97706)',
+                    marginTop: 2,
+                    display: 'inline-block',
+                    cursor: 'pointer',
+                    textDecoration: 'none',
+                  }}
+                  title={tr('点击查看并设置这些站点的汇率')}
+                >
+                  {`${tr('已排除')} ${currencyExcludedSiteCount} ${tr('个汇率未知的站点')}`}
+                </Link>
+              ) : null}
             </div>
           </div>
           <div className="stat-card-row">
@@ -691,7 +767,7 @@ export default function Dashboard({
             <div className="dashboard-stat-content">
               <div className="stat-label">累计消耗</div>
               <div className="stat-value animate-count-up">
-                ${totalUsed.toFixed(2)}
+                {formatAmountInCurrency(totalUsed, dashboardCurrency)}
               </div>
               <div
                 style={{
@@ -704,7 +780,7 @@ export default function Dashboard({
                   marginTop: 2,
                 }}
               >
-                今日 -{todaySpend.toFixed(2)}
+                今日 -{stripSymbol(formatAmountInCurrency(todaySpend, dashboardCurrency))}
               </div>
             </div>
           </div>

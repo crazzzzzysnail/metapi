@@ -28,7 +28,8 @@ export type SiteStatsSnapshotPayload = {
   }>;
   trend: Array<{
     date: string;
-    sites: Record<string, { spend: number; calls: number }>;
+    /** siteId 供前端按站取汇率换算（F3）；老读取方可忽略这个新增字段。 */
+    sites: Record<string, { spend: number; calls: number; siteId: number }>;
   }>;
   sites: Array<typeof schema.sites.$inferSelect>;
 };
@@ -108,7 +109,7 @@ async function loadSiteStatsSnapshotPayload(
 
   const dayMap: Record<
     string,
-    Record<string, { spend: number; calls: number }>
+    Record<string, { spend: number; calls: number; siteId: number }>
   > = {};
   const activeSiteById = new Map<number, (typeof schema.sites.$inferSelect)>(
     sites.map((site) => [site.id, site]),
@@ -121,12 +122,19 @@ async function loadSiteStatsSnapshotPayload(
 
     if (!dayMap[date]) dayMap[date] = {};
     if (!dayMap[date][siteName])
-      dayMap[date][siteName] = { spend: 0, calls: 0 };
+      dayMap[date][siteName] = { spend: 0, calls: 0, siteId: Number(site.id) };
 
     dayMap[date][siteName].spend += Number(row.totalSiteSpend || 0);
     dayMap[date][siteName].calls += Number(row.totalCalls || 0);
   }
 
+  /**
+   * F3：trend 每个站点值带上 siteId。
+   *
+   * 为什么不让前端按站点名反查汇率：名字可重复、可改名，后端在这里还用
+   * `"unknown"` 兜底空名 —— 拿它当汇率键会静默算错某些站的趋势金额。
+   * siteId 才是稳定标识。新增字段不破坏既有读取方（老代码只读 spend/calls）。
+   */
   const trend = Object.entries(dayMap)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([date, value]) => ({
@@ -137,6 +145,7 @@ async function loadSiteStatsSnapshotPayload(
           {
             spend: toRoundedMicroNumber(stats.spend),
             calls: stats.calls,
+            siteId: stats.siteId,
           },
         ]),
       ),

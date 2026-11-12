@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { buildUnknownRateSitesPath } from './helpers/navigationFocus.js';
 import { useCurrency } from '../currencyContext.js';
 import { formatMoney } from '../numberFormat.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
@@ -42,6 +43,8 @@ interface ModelPricingSource {
 interface ModelAccountInfo {
   id: number;
   site: string;
+  /** F3：余额按该站汇率换算需要站点标识（后端同名字段一并补上）。 */
+  siteId?: number;
   username: string | null;
   latency: number | null;
   balance: number;
@@ -160,53 +163,59 @@ export default function Models() {
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
-  // S6 / T8.7–T8.9：显示货币与站点汇率档案。
-  // 币种取自 CurrencyContext（顶栏按钮即写这里），不再自持一份 state——
-  // 否则顶栏切了 CNY，本页面仍是挂载时快照的 USD，两处显示互相矛盾。
-  // 汇率仍用本页的 billingProfiles：它要区分"汇率未知(null)"来统计被排除的站点数，
-  // context 的 getSiteRate 只返回有效值，承载不了这个三态语义。
-  const { currency: displayCurrency } = useCurrency();
-
-  const [billingProfiles, setBillingProfiles] = useState<Map<number, number | null>>(new Map());
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // 只需站点列表拿汇率；币种由 context 提供，不再重复请求运行时配置。
-        const sitesRes = await api.getSites().catch(() => [] as any[]);
-        if (cancelled) return;
-        const list = Array.isArray(sitesRes) ? sitesRes : ((sitesRes as any)?.sites || []);
-        const map = new Map<number, number | null>();
-        for (const site of list) {
-          const id = Number(site?.id);
-          if (!Number.isFinite(id) || id <= 0) continue;
-          const rate = Number(site?.billingProfile?.cnyPerUsd);
-          map.set(id, Number.isFinite(rate) && rate > 0 ? rate : null);
-        }
-        setBillingProfiles(map);
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, []);
+  /**
+   * S6 / T8.7–T8.9 → F3：显示货币与站点汇率全部取自 CurrencyContext。
+   *
+   * 原先本页为算"有多少站没设汇率"而单独拉 getSites() 建了一份 billingProfiles，
+   * 于是和 context 的汇率表成了两个数据源 —— 站点改完汇率，两边刷新时机不同
+   * 就会出现"换算用了旧汇率、计数用了新状态"这类对不上的数字。
+   * 现在汇率端点以活跃站点为基准返回三态（数值 / null=未维护），
+   * 一个来源同时支撑换算与计数，本页不再自己拉站点表。
+   */
+  const {
+    currency: displayCurrency,
+    getSiteRate,
+    unknownRateSiteCount,
+    unknownRateSiteIds: contextUnknownRateSiteIds,
+  } = useCurrency();
   /**
    * 按站点汇率把美元单价换算成展示金额字符串。
    * 汇率未知时返回 null —— 调用方必须显式渲染"汇率未知"，不得回退原数字加 ¥。
    */
   const convertSitePrice = useCallback((siteId: number, usd: number | undefined): string | null => {
-    if (displayCurrency === 'USD') {
-      return usd == null ? null : formatMoney(usd);
-    }
-    const rate = billingProfiles.get(Number(siteId));
-    if (usd == null || rate == null) return null;
+    if (usd == null) return null;
+    if (displayCurrency === 'USD') return formatMoney(usd);
+    // getSiteRate 对"未维护 / 非法 / 缺档案"统一返回 null，这里据此显示"汇率未知"
+    const rate = getSiteRate(siteId);
+    if (rate == null) return null;
     return formatMoney(usd * rate, 'CNY', 1);
-  }, [displayCurrency, billingProfiles]);
+  }, [displayCurrency, getSiteRate]);
   /** CNY 下汇率未知的站点数，用于列表页顶部的排除提示（R3：逐站换算，缺汇率排除）。 */
-  const unknownRateSiteCount = useMemo(() => {
-    if (displayCurrency !== 'CNY') return 0;
-    let count = 0;
-    for (const rate of billingProfiles.values()) if (rate == null) count += 1;
-    return count;
-  }, [displayCurrency, billingProfiles]);
+  const excludedUnknownRateSiteCount = displayCurrency === 'CNY' ? unknownRateSiteCount : 0;
+  /**
+   * F4：提示里可跳转的缺汇率站点 id。
+   *
+   * 直接取 context 的全集，不跟本页数据里的站点取交集 —— 交集口径会让「已排除 5 个」
+   * 点过去只处理 2 个，用户以为剩下的不存在。context 与计数同源同 Map 派生，
+   * 两者必然一致；本页也不该再持一份站点表（F1/B1 的单一真相）。
+   */
+  const unknownRateSiteIds = displayCurrency === 'CNY' ? contextUnknownRateSiteIds : [];
+
+  /**
+   * F3：账号余额的显示值。
+   *
+   * 原先这里直接写 `$${(a.balance || 0).toFixed(2)}`：既固定美元，又绕过共享精度规则
+   * （moneyDisplay.architecture.test 收紧检测器后抓出来的那几处之一）。
+   *
+   * ⚠️ 复用 convertSitePrice 而不是另写一份换算 —— 它已经是模型广场价格的唯一出口，
+   * 两处各算各的会让同一屏出现「价格 ¥、余额 $」这种自相矛盾。
+   * 它返回 null 表示该站汇率未知；此处不留空而是明确标注，避免被读成"没余额"。
+   */
+  const renderAccountBalance = useCallback((account: ModelAccountInfo): string => {
+    const text = convertSitePrice(Number(account.siteId ?? 0), Number(account.balance || 0));
+    if (text != null) return text;
+    return `${formatMoney(Number(account.balance || 0))}（汇率未知）`;
+  }, [convertSitePrice]);
   const location = useLocation();
   const siteIdByName = useMemo(() => {
     const index = new Map<string, number>();
@@ -595,11 +604,18 @@ export default function Models() {
               <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
                 {tr('共')} {filteredModels.length} {tr('个模型')}
               </span>
-              {/* S6 / T8.7：CNY 下汇率未知的站点必须显式说明被排除，不能静默少算。 */}
-              {unknownRateSiteCount > 0 && (
-                <span className="badge badge-warning" style={{ fontSize: 12, fontWeight: 500 }}>
-                  {`${tr('已排除')} ${unknownRateSiteCount} ${tr('个汇率未知的站点')}`}
-                </span>
+              {/* S6 / T8.7：CNY 下汇率未知的站点必须显式说明被排除，不能静默少算。
+                  F4：这一串同时是可点击入口 —— 已知具体站点就逐个滚动高亮并把第一个
+                  送进编辑弹窗的汇率框；拿不到 id（本页不持站点表）则退化成跳站点管理页。 */}
+              {excludedUnknownRateSiteCount > 0 && (
+                <Link
+                  to={buildUnknownRateSitesPath(unknownRateSiteIds)}
+                  className="badge badge-warning"
+                  style={{ fontSize: 12, fontWeight: 500, cursor: 'pointer', textDecoration: 'none' }}
+                  title={tr('点击查看并设置这些站点的汇率')}
+                >
+                  {`${tr('已排除')} ${excludedUnknownRateSiteCount} ${tr('个汇率未知的站点')}`}
+                </Link>
               )}
             </h2>
             {(activeBrand || activeSite) && (
@@ -841,7 +857,7 @@ export default function Models() {
                               </div>
                               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12 }}>
                                 <span style={{ color: 'var(--color-text-muted)' }}>{tr('余额')}</span>
-                                <span style={{ fontVariantNumeric: 'tabular-nums' }}>${(a.balance || 0).toFixed(2)}</span>
+                                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{renderAccountBalance(a)}</span>
                               </div>
                               <div style={{ display: 'grid', gap: 6 }}>
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('令牌')}</span>
@@ -881,7 +897,7 @@ export default function Models() {
                                   <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{a.latency}ms</span>
                                 ) : '—'}
                               </td>
-                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
+                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{renderAccountBalance(a)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1039,7 +1055,7 @@ export default function Models() {
                                     <td style={{ padding: 8, color: a.latency != null ? getMetricColor(a.latency) : 'var(--color-text-muted)' }}>
                                       {a.latency != null ? `${a.latency}ms` : '—'}
                                     </td>
-                                    <td style={{ padding: 8 }}>${(a.balance || 0).toFixed(2)}</td>
+                                    <td style={{ padding: 8 }}>{renderAccountBalance(a)}</td>
                                   </tr>
                                 ))}
                               </tbody>

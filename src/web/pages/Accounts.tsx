@@ -12,7 +12,8 @@ import { useIsMobile } from "../components/useIsMobile.js";
 import DeleteConfirmModal from "../components/DeleteConfirmModal.js";
 import SiteBadgeLink from "../components/SiteBadgeLink.js";
 // 二-1：账号余额/已用的精度口径收敛到 numberFormat 的单一出口。
-import { formatBalance } from "../numberFormat.js";
+import { formatBalanceInline, stripSymbol } from "../numberFormat.js";
+import { useCurrency } from "../currencyContext.js";
 import AccountModelsModal from "./accounts/AccountModelsModal.js";
 import {
   buildAddAccountPrereqHint,
@@ -137,6 +138,9 @@ export default function Accounts() {
   );
   const [expandedAccountIds, setExpandedAccountIds] = useState<number[]>([]);
   const isMobile = useIsMobile();
+  // 账号余额/已用都是所属站点自己的美元账，必须按该站汇率换算；
+  // 汇率未知时退回纯美元数字（每条记录都带站点徽标，逐格再标「汇率未知」过于臃肿）。
+  const { currency, getSiteRate } = useCurrency();
   const [showMobileTools, setShowMobileTools] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [addMode, setAddMode] = useState<"token" | "login">("token");
@@ -1958,7 +1962,11 @@ export default function Accounts() {
                               <div>
                                 余额:{" "}
                                 <strong>
-                                  {formatBalance(verifyResult.balance.balance)}
+                                  {formatBalanceInline(
+                                    verifyResult.balance.balance,
+                                    currency,
+                                    getSiteRate(tokenForm.siteId),
+                                  )}
                                 </strong>
                               </div>
                             )}
@@ -2840,6 +2848,7 @@ export default function Accounts() {
                     const capabilities = resolveAccountCapabilities(a);
                     const connectionMode = resolveAccountCredentialMode(a);
                     const health = resolveRuntimeHealth(a);
+                    const accountRate = getSiteRate(a.site?.id ?? a.siteId);
                     const isExpanded = expandedAccountIds.includes(a.id);
                     const hintMessage =
                       a.status === "expired" && !capabilities.proxyOnly
@@ -2963,7 +2972,7 @@ export default function Accounts() {
                                   color: "var(--color-text-primary)",
                                 }}
                               >
-                                {formatBalance(a.balance)}
+                                {formatBalanceInline(a.balance, currency, accountRate)}
                               </div>
                               <div
                                 style={{
@@ -2975,7 +2984,7 @@ export default function Accounts() {
                                   fontWeight: 500,
                                 }}
                               >
-                                +{formatBalance(a.todayReward).replace("$", "")}
+                                +{stripSymbol(formatBalanceInline(a.todayReward, currency, accountRate))}
                               </div>
                             </div>
                           }
@@ -2984,7 +2993,7 @@ export default function Accounts() {
                           label="已用"
                           value={
                             <div>
-                              <div>{formatBalance(a.balanceUsed)}</div>
+                              <div>{formatBalanceInline(a.balanceUsed, currency, accountRate)}</div>
                               <div
                                 style={{
                                   fontSize: 11,
@@ -2995,7 +3004,7 @@ export default function Accounts() {
                                   fontWeight: 500,
                                 }}
                               >
-                                -{formatBalance(a.todaySpend).replace("$", "")}
+                                -{stripSymbol(formatBalanceInline(a.todaySpend, currency, accountRate))}
                               </div>
                             </div>
                           }
@@ -3212,6 +3221,7 @@ export default function Accounts() {
                     {visibleAccounts.map((a: any, i: number) => {
                       const capabilities = resolveAccountCapabilities(a);
                       const connectionMode = resolveAccountCredentialMode(a);
+                      const accountRate = getSiteRate(a.site?.id ?? a.siteId);
                       return (
                         <tr
                           key={a.id}
@@ -3318,7 +3328,7 @@ export default function Accounts() {
                                 color: "var(--color-text-primary)",
                               }}
                             >
-                              {formatBalance(a.balance)}
+                              {formatBalanceInline(a.balance, currency, accountRate)}
                             </div>
                             <div
                               style={{
@@ -3330,7 +3340,7 @@ export default function Accounts() {
                                 fontWeight: 500,
                               }}
                             >
-                              +{formatBalance(a.todayReward).replace("$", "")}
+                              +{stripSymbol(formatBalanceInline(a.todayReward, currency, accountRate))}
                             </div>
                           </td>
                           <td
@@ -3339,7 +3349,7 @@ export default function Accounts() {
                               fontSize: 12,
                             }}
                           >
-                            <div>{formatBalance(a.balanceUsed)}</div>
+                            <div>{formatBalanceInline(a.balanceUsed, currency, accountRate)}</div>
                             <div
                               style={{
                                 fontSize: 11,
@@ -3350,7 +3360,7 @@ export default function Accounts() {
                                 fontWeight: 500,
                               }}
                             >
-                              -{formatBalance(a.todaySpend).replace("$", "")}
+                              -{stripSymbol(formatBalanceInline(a.todaySpend, currency, accountRate))}
                             </div>
                           </td>
                           <td>

@@ -1348,6 +1348,8 @@ export async function statsRoutes(app: FastifyInstance) {
             {
               id: number;
               site: string;
+              /** F3：余额按站点汇率换算所需（site 只有名字，不足以定位汇率）。 */
+              siteId: number;
               username: string | null;
               latency: number | null;
               unitCost: number | null;
@@ -1383,6 +1385,8 @@ export async function statsRoutes(app: FastifyInstance) {
           modelMap[m.modelName].accountsById.set(a.id, {
             id: a.id,
             site: s.name,
+            // F3：前端要按站点汇率换算余额，只有名字换不了（名字可重复、可改名）
+            siteId: s.id,
             username: a.username,
             latency: m.latencyMs,
             unitCost: a.unitCost,
@@ -1425,6 +1429,8 @@ export async function statsRoutes(app: FastifyInstance) {
           modelMap[m.modelName].accountsById.set(a.id, {
             id: a.id,
             site: s.name,
+            // F3：同上，余额换算需要站点标识
+            siteId: s.id,
             username: a.username,
             latency: m.latencyMs,
             unitCost: a.unitCost,

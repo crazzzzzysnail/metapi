@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatAmountInCurrency,
   formatBalance,
+  formatBalanceInline,
   formatCompactTokenMetric,
+  formatCostFixed,
   formatMoney,
   formatRateNumber,
+  stripSymbol,
   trimMoneyZeros,
 } from './numberFormat.js';
 
@@ -103,5 +107,104 @@ describe('formatMoney 币种与汇率', () => {
 
   it('负汇率同样视为不可用', () => {
     expect(formatMoney(2, 'CNY', -7)).toContain('汇率未知');
+  });
+});
+
+/**
+ * 2026-11-12：站点管理与连接管理接币种时暴露的口径漏洞。
+ *
+ * 原先「汇率未知」分支用的是当前币种符号，于是 `¥75.00（汇率未知）`
+ * ——数字根本没换算，却顶着一个 ¥。用户看到的第一反应是"人民币才 75 元"。
+ * 判据：汇率未知 = 保留美元符号 + 标注，和 SearchModal / 图表同一口径。
+ */
+describe('CNY 汇率未知时保留美元符号', () => {
+  it('formatBalance 不得给未换算的美元数字贴 ¥', () => {
+    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（汇率未知）');
+    expect(formatBalance(75, 'CNY', 0)).toBe('$75.00（汇率未知）');
+    expect(formatBalance(0, 'CNY', null)).toBe('$0.00（汇率未知）');
+    expect(formatBalance(0.8, 'CNY', null)).toBe('$0.8（汇率未知）');
+  });
+
+  it('formatMoney / formatCostFixed 同一判据', () => {
+    expect(formatMoney(2, 'CNY', null)).toBe('$2（汇率未知）');
+    expect(formatCostFixed(0.5, 6, 'CNY', null)).toBe('$0.500000（汇率未知）');
+  });
+
+  it('汇率有效时仍按汇率换算', () => {
+    expect(formatBalance(100, 'CNY', 7.2)).toBe('¥720.00');
+    expect(formatCostFixed(0.5, 6, 'CNY', 7.2)).toBe('¥3.600000');
+  });
+
+  /**
+   * F6 修订（2026-11-12）：站点管理有独立汇率列、连接管理每条记录带站点徽标，
+   * 汇率未知在别处已可见；金额后面再缀「（汇率未知）」会让整列被重复文字淹没。
+   * 内联出口在同样场景下只退回 `$` 数字，不加后缀。
+   */
+  it('formatBalanceInline 汇率未知时不追加后缀', () => {
+    expect(formatBalanceInline(75, 'CNY', null)).toBe('$75.00');
+    expect(formatBalanceInline(75, 'CNY', 0)).toBe('$75.00');
+    expect(formatBalanceInline(0.8, 'CNY', null)).toBe('$0.8');
+    // 与带标注版本形成对照：同一个入参，只有后缀差异
+    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（汇率未知）');
+  });
+
+  it('formatBalanceInline 汇率有效时与 formatBalance 完全一致', () => {
+    expect(formatBalanceInline(100, 'CNY', 7.2)).toBe('¥720.00');
+    expect(formatBalanceInline(100, 'CNY', 7.2)).toBe(formatBalance(100, 'CNY', 7.2));
+    expect(formatBalanceInline(100, 'USD')).toBe('$100.00');
+  });
+});
+
+/**
+ * F3：给"后端已逐站换算好的金额"加符号的专用出口。
+ *
+ * 立这个文件的直接原因是我差点写出二次换算的 bug：仪表盘的 totalBalanceCny
+ * 已经是人民币值（B2 里按各站汇率算过），若复用 formatBalance(x,'CNY',rate)
+ * 会再乘一次汇率，¥736 直接变成 ¥5374 这种量级。
+ * 所以这里最要紧的一条断言是：**传多大的汇率都不会改变数值**。
+ */
+describe('formatAmountInCurrency（不做换算）', () => {
+  it('CNY 只加符号，绝不乘任何系数', () => {
+    expect(formatAmountInCurrency(736.34, 'CNY')).toBe('¥736.34');
+    // 与 formatBalance 的关键差异：后者带 rate 会换算，这里没有 rate 参数可用
+    expect(Number(formatAmountInCurrency(736.34, 'CNY').replace('¥', ''))).toBe(736.34);
+  });
+
+  it('USD 与不带币种调用结果一致', () => {
+    expect(formatAmountInCurrency(100)).toBe('$100.00');
+    expect(formatAmountInCurrency(100, 'USD')).toBe('$100.00');
+  });
+
+  it('精度沿用余额口径：≥1 两位、<1 展开有效位', () => {
+    expect(formatAmountInCurrency(0.8, 'CNY')).toBe('¥0.8');
+    expect(formatAmountInCurrency(0.00001, 'CNY')).toBe('¥0.00001');
+    expect(formatAmountInCurrency(0, 'CNY')).toBe('¥0.00');
+  });
+
+  it('非零极小值不被裁成 0（$0 的语义是免费）', () => {
+    expect(formatAmountInCurrency(1e-7, 'CNY')).toBe('¥0.000000');
+    expect(formatAmountInCurrency(1e-7, 'CNY')).not.toBe('¥0');
+  });
+
+  it('非法输入回落到 0 表示而非 NaN', () => {
+    expect(formatAmountInCurrency(Number.NaN, 'CNY')).toBe('¥0.00');
+    expect(formatAmountInCurrency(null, 'USD')).toBe('$0.00');
+    expect(formatAmountInCurrency(undefined, 'USD')).toBe('$0.00');
+  });
+});
+
+describe('stripSymbol', () => {
+  it('只剥开头符号，保留正负号与数字', () => {
+    expect(stripSymbol('$1.50')).toBe('1.50');
+    expect(stripSymbol('¥0.8')).toBe('0.8');
+    expect(stripSymbol('$0.00')).toBe('0.00');
+    // 「今日 +¥X」这类要先去符号再拼 +/-，否则会出现 +$ 双符号
+    expect(`+${stripSymbol(formatAmountInCurrency(2.5, 'CNY'))}`).toBe('+2.50');
+  });
+
+  it('无符号串原样返回，空值不抛', () => {
+    expect(stripSymbol('abc')).toBe('abc');
+    expect(stripSymbol('')).toBe('');
+    expect(stripSymbol(undefined as unknown as string)).toBe('');
   });
 });

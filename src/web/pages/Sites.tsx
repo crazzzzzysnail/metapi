@@ -19,9 +19,10 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
-import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
+import { buildSiteFocusPath, clearFocusParams, readFocusSiteId, readPendingSiteIds, readSiteEditorIntent } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
-import { formatBalance } from '../numberFormat.js';
+import { formatBalanceInline, type DisplayCurrency } from '../numberFormat.js';
+import { useCurrency } from '../currencyContext.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
@@ -150,9 +151,16 @@ function buildSiteApiEndpointSummary(site?: Pick<SiteRow, 'apiEndpoints'> | null
 // T8.1 / N3：改为转调统一的金额格式化，保留函数名以免动到 7 处调用点。
 // 精度从"恒定 2 位"变成按量级分档（≥1000→2、≥1→3、否则 6），
 // 这样 $0.00001/M 这类极小单价不会全显示成 $0.00。
-function formatUsd(value?: number | null): string {
+function formatUsd(
+  value: number | null | undefined,
+  currency: DisplayCurrency,
+  rate: number | null,
+): string {
   // 一-1：余额列固定 2 位小数，只有小于 1 才展开有效位数。
-  return formatBalance(value);
+  // 2026-11-12：余额与订阅额度都属于"站点自己的美元账"，必须按该站汇率换算；
+  // 汇率未知时退回纯美元数字——本页有独立「汇率」列做黄色提示，金额后面
+  // 再缀「（汇率未知）」会让整列被重复文字淹没（用户实测反馈）。
+  return formatBalanceInline(value, currency, rate);
 }
 
 function resolveSiteCreatedSessionLabel(platform?: string | null): string {
@@ -201,19 +209,28 @@ function formatRemainingDuration(value?: string | null): string | null {
   return `剩余${Math.max(1, Math.ceil(deltaMs / 1000))}秒`;
 }
 
-function buildSubscriptionInlineValue(summary?: SiteSubscriptionSummary | null): string | null {
+function buildSubscriptionInlineValue(
+  summary: SiteSubscriptionSummary | null | undefined,
+  currency: DisplayCurrency,
+  rate: number | null,
+): string | null {
   if (!summary) return null;
   const remainingValue = typeof summary.totalRemainingUsd === 'number' && Number.isFinite(summary.totalRemainingUsd)
-    ? formatUsd(summary.totalRemainingUsd)
+    ? formatUsd(summary.totalRemainingUsd, currency, rate)
     : '--';
-  const usedValue = formatUsd(summary.totalUsedUsd);
   const remainingDuration = formatRemainingDuration(summary.nextExpiresAt);
   const remainingSuffix = remainingDuration ? `（${remainingDuration}）` : '';
-  if (usedValue === '$0.00' && remainingValue === '--' && !remainingSuffix) return null;
+  // 判空用原始数值，不用格式化后的文本：切到人民币后文本会多出符号与「汇率未知」后缀。
+  const usedNumber = Number(summary.totalUsedUsd);
+  if ((!Number.isFinite(usedNumber) || usedNumber === 0) && remainingValue === '--' && !remainingSuffix) return null;
   return `${remainingValue}${remainingSuffix}`;
 }
 
-function buildSubscriptionTooltip(summary?: SiteSubscriptionSummary | null): string | null {
+function buildSubscriptionTooltip(
+  summary: SiteSubscriptionSummary | null | undefined,
+  currency: DisplayCurrency,
+  rate: number | null,
+): string | null {
   if (!summary) return null;
   const parts: string[] = [];
   if (summary.activeCount > 0) parts.push(`生效订阅 ${summary.activeCount} 个`);
@@ -224,12 +241,12 @@ function buildSubscriptionTooltip(summary?: SiteSubscriptionSummary | null): str
   if (planNames.length > 0) parts.push(`套餐 ${planNames.join(' / ')}`);
 
   if (typeof summary.totalRemainingUsd === 'number' && Number.isFinite(summary.totalRemainingUsd)) {
-    parts.push(`订阅余额 ${formatUsd(summary.totalRemainingUsd)}`);
+    parts.push(`订阅余额 ${formatUsd(summary.totalRemainingUsd, currency, rate)}`);
   }
-  parts.push(`已用 ${formatUsd(summary.totalUsedUsd)}`);
+  parts.push(`已用 ${formatUsd(summary.totalUsedUsd, currency, rate)}`);
 
   if (typeof summary.totalMonthlyLimitUsd === 'number' && Number.isFinite(summary.totalMonthlyLimitUsd)) {
-    parts.push(`总额度 ${formatUsd(summary.totalMonthlyLimitUsd)}`);
+    parts.push(`总额度 ${formatUsd(summary.totalMonthlyLimitUsd, currency, rate)}`);
   }
 
   const remainingDuration = formatRemainingDuration(summary.nextExpiresAt);
@@ -241,14 +258,21 @@ function buildSubscriptionTooltip(summary?: SiteSubscriptionSummary | null): str
 }
 
 function SiteBalanceDisplay(props: {
+  siteId: number;
   balance?: number | null;
   summary?: SiteSubscriptionSummary | null;
+  /** 站点行自带的汇率；禁用站点不在 context 的活跃集里，只能从这里取。 */
+  rowRate?: number | null;
   align?: 'start' | 'end';
 }) {
-  const { balance, summary, align = 'start' } = props;
-  const walletBalanceText = formatUsd(balance);
-  const subscriptionValue = buildSubscriptionInlineValue(summary);
-  const tooltip = buildSubscriptionTooltip(summary);
+  const { currency, getSiteRate } = useCurrency();
+  const { siteId, balance, summary, rowRate, align = 'start' } = props;
+  const explicitRate = Number(rowRate);
+  // 优先用行数据（覆盖禁用站点），其次回落到 context 的活跃站点汇率表。
+  const rate = Number.isFinite(explicitRate) && explicitRate > 0 ? explicitRate : getSiteRate(siteId);
+  const walletBalanceText = formatUsd(balance, currency, rate);
+  const subscriptionValue = buildSubscriptionInlineValue(summary, currency, rate);
+  const tooltip = buildSubscriptionTooltip(summary, currency, rate);
 
   return (
     <div
@@ -369,6 +393,19 @@ export default function Sites() {
   const loadingModelsSiteIdRef = useRef<number | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<number | null>(null);
+  /** F4：汇率输入框所在行的容器；focusField 为 cnyRate 时滚动到这里（弹窗内容自身不滚）。 */
+  const billingRateRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * F4：待处理的「打开编辑弹窗并定位字段」意图。
+   * URL 参数是跨页传递的载体，但消费动作必须等 openEdit 真正渲染完才做，
+   * 所以先落到 state，由下方 effect 在 editor 切到该站点后再执行。
+   */
+  const [pendingEditorFocus, setPendingEditorFocus] = useState<{ siteId: number; field: 'cnyRate' } | null>(null);
+  /**
+   * F4：一次跳转带来多个缺汇率站点时，除首个之外的待办 id。
+   * 渲染成页面顶部常驻横幅（不用 toast —— message 是 string，带不了按钮）。
+   */
+  const [pendingRateSiteIds, setPendingRateSiteIds] = useState<number[]>([]);
   const toast = useToast();
   const [disabledModels, setDisabledModels] = useState<string[]>([]);
   const [disabledModelInput, setDisabledModelInput] = useState('');
@@ -510,11 +547,12 @@ export default function Sites() {
       </div>
       {!billingAdvancedOpen ? null : (
         <>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }} ref={billingRateRowRef}>
             <input
               placeholder={tr('人民币对美元汇率（如 7.3）')}
               value={billingCnyRate}
               onChange={(e) => setBillingCnyRate(e.target.value)}
+              data-focus-field="cny-rate"
               style={{ ...formInputStyle, flex: '1 1 200px' }}
             />
             <input
@@ -673,6 +711,72 @@ export default function Sites() {
     };
   }, []);
 
+  /**
+   * F4：把 URL 里的跨页意图落到 state。
+   *
+   * 拆成两步是因为时序：URL 参数在首帧就有，但 openEdit 要等站点行数据到手，
+   * 弹窗渲染又要再下一帧。这里只负责"记下要做什么"，真正打开/聚焦由下面两个
+   * effect 各自等自己的前置条件成立。
+   */
+  useEffect(() => {
+    const intent = readSiteEditorIntent(location.search);
+    if (!intent) return;
+    setPendingEditorFocus(intent);
+    setPendingRateSiteIds(readPendingSiteIds(location.search));
+  }, [location.search]);
+
+  /**
+   * F4：目标站点数据到手后再开编辑弹窗。
+   *
+   * 不能直接 openEdit 一条裸 id —— 表单字段要靠整行 SiteRow 水合，
+   * 而刷新中的站点可能还没有 billingProfile，硬开会得到一个空表单的弹窗。
+   *
+   * 这里刻意**不清** pendingEditorFocus：那是"还要把焦点放进汇率框"的待办，
+   * 由下面聚焦的 effect 消费。曾在同一拍里清掉，结果聚焦 effect 永远看到 null，
+   * 表现为"弹窗开了但没定位"。
+   */
+  useEffect(() => {
+    if (!pendingEditorFocus || !loaded) return;
+    const site = sites.find((row) => row.id === pendingEditorFocus.siteId);
+    if (!site) return;
+    if (editor?.mode !== 'edit' || editor.editingSiteId !== site.id) {
+      openEdit(site);
+    }
+  }, [pendingEditorFocus, loaded, sites, editor]);
+
+  /**
+   * F4：弹窗内容挂载完成后展开计费参数并把焦点放进汇率输入框。
+   *
+   * 必须分两拍：openEdit 会把计费参数收成折叠态，此时汇率输入框根本不在 DOM 里
+   * （billingRateRowRef 为 null），所以先展开、等这一帧渲染完，下一拍才拿得到元素。
+   * 依赖里带上 billingAdvancedOpen 就是为这次重跑；若直接在同一个 effect 里
+   * setState 再读 ref，拿到的一定还是 null，表现为"点了没反应"。
+   *
+   * 元素出现后再等一个 rAF 才聚焦：CenteredModal 用 createPortal + 入场动画，
+   * 同一帧内 scrollIntoView 会与动画互相打断；rAF 之后布局已稳定。
+   */
+  useEffect(() => {
+    if (!pendingEditorFocus || pendingEditorFocus.field !== 'cnyRate') return;
+    if (editor?.mode !== 'edit' || editor.editingSiteId !== pendingEditorFocus.siteId) return;
+    if (!billingAdvancedOpen) {
+      setBillingAdvancedOpen(true);
+      return;
+    }
+    const container = billingRateRowRef.current;
+    if (!container) return;
+    const frame = window.requestAnimationFrame(() => {
+      // 按标记取输入框，不靠"第一个 input"的位置假设——折叠区里以后加字段不会悄悄改焦点。
+      const input = container.querySelector<HTMLInputElement>('input[data-focus-field="cny-rate"]');
+      if (!input) return;
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // 弹窗内没有别的抢焦点的东西（CenteredModal 不做 autofocus / 焦点陷阱），
+      // 因此滚完直接聚焦不会和滚动互相打断。
+      input.focus({ preventScroll: true });
+    });
+    setPendingEditorFocus(null);
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingEditorFocus, editor, billingAdvancedOpen]);
+
   useEffect(() => {
     const focusSiteId = readFocusSiteId(location.search);
     if (!focusSiteId || !loaded) return;
@@ -684,7 +788,11 @@ export default function Sites() {
       return;
     }
 
-    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // F4：要求直达编辑弹窗时不再滚动表格行——马上要盖上一层弹窗，
+    // 底下的平滑滚动既看不见也是白做功。高亮照旧，关掉弹窗后能认出这一行。
+    if (!readSiteEditorIntent(location.search)) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
     setHighlightSiteId(focusSiteId);
     if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
     highlightTimerRef.current = window.setTimeout(() => {
@@ -770,6 +878,28 @@ export default function Sites() {
         console.warn('Failed to load site available models:', err?.message || err);
       })
       .finally(markLoadFinished);
+  };
+
+  /**
+   * F4：「继续处理」——把队列里的下一个站点直接推进编辑态。
+   *
+   * 不走 navigate 再消费 URL 的原因：站点页消费完 URL 会把参数清掉，
+   * 此时再跳同一串 URL 不一定触发 location 变化（同一地址不重放），
+   * 直接复用内存里的 sites 更稳，也省一次渲染往返。
+   * 站点已被删除时跳过它继续往后找，不让队列卡在一个不存在的 id 上。
+   */
+  const continuePendingRateSites = () => {
+    const queue = [...pendingRateSiteIds];
+    while (queue.length > 0) {
+      const nextId = queue.shift() as number;
+      const site = sites.find((row) => row.id === nextId);
+      if (!site) continue;
+      setPendingRateSiteIds(queue);
+      openEdit(site);
+      setPendingEditorFocus({ siteId: nextId, field: 'cnyRate' });
+      return;
+    }
+    setPendingRateSiteIds([]);
   };
 
   const handleAddDisabledModel = () => {
@@ -1483,6 +1613,46 @@ export default function Sites() {
           </button>
         </div>
       </div>
+
+      {/* F4：多站点跳转时，除首个之外的待办队列。常驻横幅而非 toast——
+          toast 的 message 是 string 带不了按钮，且 3.2 秒后消失，
+          用户关掉第一个汇率弹窗时就看不清"还剩几个"了。 */}
+      {pendingRateSiteIds.length > 0 ? (
+        <div
+          data-testid="sites-pending-rate-banner"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+            padding: '8px 12px',
+            marginBottom: 12,
+            fontSize: 12,
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--color-warning, #d97706)',
+            background: 'color-mix(in srgb, var(--color-warning, #d97706) 10%, transparent)',
+            color: 'var(--color-text)',
+          }}
+        >
+          <span>{`${tr('另有')} ${pendingRateSiteIds.length} ${tr('个站点待设置汇率')}`}</span>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+            onClick={continuePendingRateSites}
+          >
+            {tr('继续处理')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+            onClick={() => setPendingRateSiteIds([])}
+          >
+            {tr('忽略')}
+          </button>
+        </div>
+      ) : null}
 
       <ResponsiveFilterPanel
         isMobile={isMobile}
@@ -2415,6 +2585,8 @@ export default function Sites() {
                       label="余额"
                       value={(
                         <SiteBalanceDisplay
+                          siteId={site.id}
+                          rowRate={site.billingProfile?.cnyPerUsd}
                           balance={site.totalBalance}
                           summary={site.subscriptionSummary}
                           align="end"
@@ -2424,15 +2596,24 @@ export default function Sites() {
                     {/* S6 / T8.9：移动端同样给出汇率状态，与桌面表格保持一致口径。 */}
                     <MobileField
                       label="汇率"
-                      value={(
-                        <span className={`badge ${(Number(site.billingProfile?.cnyPerUsd) > 0) ? (site.billingProfile?.rateSource === 'manual' ? 'badge-info' : 'badge-success') : 'badge-warning'}`} style={{ fontSize: 11 }}>
-                          {(() => {
-                            const rate = Number(site.billingProfile?.cnyPerUsd);
-                            if (!(Number.isFinite(rate) && rate > 0)) return tr('汇率未知');
-                            return `¥${rate}${site.billingProfile?.rateSource === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`;
-                          })()}
-                        </span>
-                      )}
+                      value={(() => {
+                        const rate = Number(site.billingProfile?.cnyPerUsd);
+                        if (Number.isFinite(rate) && rate > 0) {
+                          return <span className={`badge ${site.billingProfile?.rateSource === 'manual' ? 'badge-info' : 'badge-success'}`} style={{ fontSize: 11 }}>{`¥${rate}${site.billingProfile?.rateSource === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}</span>;
+                        }
+                        // F4：移动端同样可点击直达汇率输入框，与桌面表格保持一致口径。
+                        return (
+                          <button
+                            type="button"
+                            className="badge badge-warning billing-rate-badge"
+                            style={{ fontSize: 11, cursor: 'pointer' }}
+                            title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                            onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                          >
+                            {tr('汇率未知')}
+                          </button>
+                        );
+                      })()}
                     />
                     <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
                     {isExpanded ? (
@@ -2655,6 +2836,8 @@ export default function Sites() {
                     </td>
                     <td className="site-balance-cell">
                       <SiteBalanceDisplay
+                        siteId={site.id}
+                        rowRate={site.billingProfile?.cnyPerUsd}
                         balance={site.totalBalance}
                         summary={site.subscriptionSummary}
                       />
@@ -2666,10 +2849,19 @@ export default function Sites() {
                         const rate = Number(profile?.cnyPerUsd);
                         const known = Number.isFinite(rate) && rate > 0;
                         if (!known) {
+                          // F4：badge 改成按钮，点击直达编辑弹窗的汇率输入框。
+                          // 用原生 title（与顶栏同一套约定），不用 data-tooltip——后者在
+                          // App.topbar-tooltips.test 里被明确限制，且长文案分段要靠真 DOM 弹层。
                           return (
-                            <span className="badge badge-warning" style={{ fontSize: 11 }} title="未探测到汇率，该站点不计入人民币合计；可在编辑弹窗的「计费参数」中手动填写。">
+                            <button
+                              type="button"
+                              className="badge badge-warning billing-rate-badge"
+                              style={{ fontSize: 11, cursor: 'pointer' }}
+                              title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                            >
                               {tr('汇率未知')}
-                            </span>
+                            </button>
                           );
                         }
                         const source = String(profile?.rateSource || '');

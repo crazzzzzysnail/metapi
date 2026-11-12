@@ -93,7 +93,8 @@ export function formatBalance(
       })()
       : safe;
     if (amount === null) {
-      return `${symbol}${safe.toFixed(2)}（汇率未知）`;
+      // 汇率未知时保留美元符号：数值本身没有换算过，贴 ¥ 会让人把它当成人民币读数。
+      return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(2)}（汇率未知）`;
     }
     return `${symbol}${amount.toFixed(2)}`;
   }
@@ -101,10 +102,86 @@ export function formatBalance(
   // 例外：0 按 2 位显示（`$0.00`），"0/无余额"写成 `$0` 反而像缺单位。
   if (safe === 0) {
     const rate = Number(cnyPerUsd);
-    if (currency === 'CNY' && (!Number.isFinite(rate) || rate <= 0)) return `${symbol}0.00（汇率未知）`;
+    if (currency === 'CNY' && (!Number.isFinite(rate) || rate <= 0)) return `${CURRENCY_SYMBOLS.USD}0.00（汇率未知）`;
     return `${symbol}0.00`;
   }
   return formatMoney(safe, currency, cnyPerUsd, { trim: true });
+}
+
+/**
+ * 给"已经换算过"的金额加符号与精度（F3）。
+ *
+ * 存在理由：formatBalance / formatMoney 的 CNY 分支都会**再乘一次汇率**。
+ * 而仪表盘汇总金额、以及任何由后端逐站算好的 CNY 数字，本身已经是人民币值 ——
+ * 再传汇率进去就是二次换算，会把 ¥736 变成 ¥5374 这种量级的错。
+ * 这个出口明确不做换算，只负责符号与小数位；需要换算的场景请继续用 formatBalance。
+ */
+export function formatAmountInCurrency(
+  value: unknown,
+  currency: DisplayCurrency = 'USD',
+): string {
+  const safe = toSafeNumber(value);
+  const symbol = CURRENCY_SYMBOLS[currency] ?? CURRENCY_SYMBOLS.USD;
+  if (Math.abs(safe) >= 1 || safe === 0) return `${symbol}${safe.toFixed(2)}`;
+  const text = safe.toFixed(decimalsFor(Math.abs(safe)));
+  const trimmed = trimMoneyZeros(text);
+  // 非零值被裁成 0 时保留原精度（同 formatMoney 的 N2 语义）
+  return `${symbol}${Math.abs(safe) > 0 && Number(trimmed) === 0 ? text : trimmed}`;
+}
+
+/**
+ * 站点级余额的内联展示（F6 修订，2026-11-12）。
+ *
+ * 与 formatBalance 的唯一差异：**汇率未知时不追加「（汇率未知）」后缀**。
+ * 依据：站点管理有独立的「汇率」列（黄色徽标），连接管理每条记录都带站点徽标，
+ * 汇率是否维护过在别处已经可见；每个金额后面再缀同一句话，一屏会出现十几次，
+ * 用户实测反馈"过于臃肿"。这里退回纯美元数字（`$75.00`），由 $ 符号本身说明未换算。
+ *
+ * 仅这两页使用；搜索结果、图表等没有旁路提示的地方仍用 formatBalance 的带标注分支。
+ */
+export function formatBalanceInline(
+  value: unknown,
+  currency: DisplayCurrency = 'USD',
+  cnyPerUsd?: number | null,
+): string {
+  const rate = Number(cnyPerUsd);
+  if (currency === 'CNY' && (!Number.isFinite(rate) || rate <= 0)) return formatBalance(value, 'USD');
+  return formatBalance(value, currency, rate);
+}
+
+/**
+ * 去掉币种符号。
+ * 用于「今日 +¥X」这类自带正负号、不希望重复出现符号的场合。
+ */
+export function stripSymbol(text: string): string {
+  return String(text || '').replace(/^[¥$]/, '');
+}
+
+/**
+ * 固定小数位的成本格式化（F3）。
+ *
+ * 存在理由：聚合成本（日志页「消耗总额」、密钥成本趋势）原本用
+ * `${x.toFixed(4)}` / `${x.toFixed(6)}` 散写，既要收敛掉手写的 $ 前缀，
+ * 又**不能**套用 formatAmountInCurrency 的"≥1 只留 2 位"规则 ——
+ * 我实测把 $1.2300 变成 $1.23 就立刻被既有测试抓到，说明这个位数是有人在依赖的。
+ *
+ * 所以这里只做两件事：按指定精度定长输出 + 由共享币种表给符号。
+ * 刻意不裁尾零：聚合成本里 0.0000 与 0.0001 必须看得出区别。
+ */
+export function formatCostFixed(
+  value: unknown,
+  digits = 6,
+  currency: DisplayCurrency = 'USD',
+  cnyPerUsd?: number | null,
+): string {
+  const safe = toSafeNumber(value);
+  const symbol = CURRENCY_SYMBOLS[currency] ?? CURRENCY_SYMBOLS.USD;
+  if (currency === 'CNY') {
+    const rate = Number(cnyPerUsd);
+    if (!Number.isFinite(rate) || rate <= 0) return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(digits)}（汇率未知）`;
+    return `${symbol}${(safe * rate).toFixed(digits)}`;
+  }
+  return `${symbol}${safe.toFixed(digits)}`;
 }
 
 /**
@@ -145,7 +222,7 @@ export function formatMoney(
   if (currency === 'CNY') {
     const rate = Number(cnyPerUsd);
     if (!Number.isFinite(rate) || rate <= 0) {
-      return `${symbol}${plain(safe)}（汇率未知）`;
+      return `${CURRENCY_SYMBOLS.USD}${plain(safe)}（汇率未知）`;
     }
     return `${symbol}${plain(safe * rate)}`;
   }

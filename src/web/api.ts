@@ -1277,6 +1277,17 @@ export const api = {
     }),
   getRuntimeSettings: () => request("/api/settings/runtime"),
   getBrandList: () => request("/api/settings/brand-list"),
+  /**
+   * 全站汇率档案（B1）。给顶栏切币种后的金额换算用。
+   * cnyPerUsd 为 null 表示该站点汇率未知 —— 调用方必须排除出合计并提示，
+   * 不得回退成"按 1 算"或拿别的站汇率凑。
+   */
+  getCurrencyRates: () =>
+    request("/api/settings/currency-rates") as Promise<{
+      rates: Array<{ siteId: number; cnyPerUsd: number | null }>;
+      generatedAt: string;
+      cacheStatus?: string;
+    }>,
   updateRuntimeSettings: (data: RuntimeSettingsPayload) =>
     request("/api/settings/runtime", {
       method: "PUT",

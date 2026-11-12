@@ -34,7 +34,7 @@ import { formatDateTimeLocal } from "./helpers/checkinLogTime.js";
 import ModernSelect from "../components/ModernSelect.js";
 import { parseProxyLogPathMeta } from "./helpers/proxyLogPathMeta.js";
 import { tr } from "../i18n.js";
-import { formatMoney } from "../numberFormat.js";
+import { formatMoney, formatCostFixed } from "../numberFormat.js";
 import { useCurrency } from "../currencyContext.js";
 
 type ProxyLogRenderItem = ProxyLogListItem & {
@@ -2115,8 +2115,19 @@ export default function ProxyLogs() {
           }}
         >
           <span className="kpi-chip">{activeSiteLabel}</span>
+          {/*
+            F3：消耗总额是**跨站聚合**的美元值（stats 里一条 SUM，没有站点维度），
+            而汇率逐站维护 —— 乘任何"代表汇率"都会得到一个看似精确、实则无依据的数，
+            所以这里刻意保持美元口径。要真正支持换算，需先在后端把该汇总按站点拆开
+            （同 dashboardSnapshotService 的双轨做法）。
+
+            ⚠️ 精度维持原有的 4 位小数，不是 formatAmountInCurrency 的 2 位：
+            我先试过直接换共享出口，结果 $1.2300 变成 $1.23，被既有测试当场抓到 ——
+            聚合成本少一位就可能让 1.2300 与 1.2345 看着一样。
+            故走"固定位数 + 共享币种符号"的成本专用出口，既不改显示精度也不再散写 $。
+          */}
           <span className="kpi-chip kpi-chip-success">
-            消耗总额 ${summary.totalCost.toFixed(4)}
+            消耗总额 {formatCostFixed(summary.totalCost, 4)}
           </span>
           <span className="kpi-chip kpi-chip-warning">
             {summary.totalTokensAll.toLocaleString()} tokens

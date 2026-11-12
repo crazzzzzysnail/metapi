@@ -18,6 +18,22 @@ export interface CurrencyContextValue {
   getSiteRate: (siteId: number | null | undefined) => number | null;
   /** 汇率档案是否已就绪；未就绪时调用方应显示占位而不是猜测值。 */
   loaded: boolean;
+  /**
+   * 活跃站点里有多少个汇率未维护（F3）。
+   *
+   * 由 context 统一算，而不是各页面自己拉 getSites() 数一遍：后者会与这里的
+   * 汇率表成两个数据源，站点改完汇率两边刷新时机不同就对不上。
+   * 端点以活跃站点为基准返回（含无档案的行，值为 null），所以这个数是完整的；
+   * 未加载完成时返回 0，调用方须配合 loaded 判断，不能据此断言"全都设好了"。
+   */
+  unknownRateSiteCount: number;
+  /**
+   * F4：汇率未维护的活跃站点 id（升序）。
+   *
+   * 与 unknownRateSiteCount 同一口径、同一个 Map 派生，这样「已排除 N 个」这句提示
+   * 和它点击后能跳转到的站点数必然一致；各页面不要再自己拉站点表数第二遍。
+   */
+  unknownRateSiteIds: number[];
   /** 设置页保存后重新拉取，让币种切换立即生效。 */
   refresh: () => Promise<void>;
   /**
@@ -33,6 +49,8 @@ const EMPTY_CONTEXT: CurrencyContextValue = {
   currency: 'USD',
   getSiteRate: () => null,
   loaded: false,
+  unknownRateSiteCount: 0,
+  unknownRateSiteIds: [],
   refresh: async () => {},
   toggleCurrency: async () => {},
   toggling: false,
@@ -48,7 +66,9 @@ CurrencyContext.displayName = 'CurrencyContext';
  */
 export function CurrencyProvider(props: { children: React.ReactNode }) {
   const [currency, setCurrency] = useState<DisplayCurrency>('USD');
-  const [ratesBySiteId, setRatesBySiteId] = useState<Map<number, number>>(() => new Map());
+  // 存三态：number = 有效汇率，null = 该活跃站点未维护汇率。
+  // 之前只存有效值，于是"有多少站没设汇率"这个数算不出来，各页面只好自己再拉一份。
+  const [ratesBySiteId, setRatesBySiteId] = useState<Map<number, number | null>>(() => new Map());
   const [loaded, setLoaded] = useState(false);
   // 并发保护：多个挂载点同时触发 refresh 时只发一轮请求。
   const inflight = useRef<Promise<void> | null>(null);
@@ -60,19 +80,22 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
     if (inflight.current) return inflight.current;
     const task = (async () => {
       try {
-        const [runtimeInfo, sitesRes] = await Promise.all([
+        // 汇率走专用轻量端点（B1），不再搭 getSites() 的便车：
+        // 站点行里有 url / api_key / extra_config 等大字段，而换算只要两个数。
+        const [runtimeInfo, ratesRes] = await Promise.all([
           api.getRuntimeSettings().catch(() => null),
-          api.getSites().catch(() => [] as any[]),
+          api.getCurrencyRates().catch(() => ({ rates: [], generatedAt: '' })),
         ]);
         const next = String((runtimeInfo as any)?.displayCurrency || 'USD').toUpperCase();
         setCurrency(next === 'CNY' ? 'CNY' : 'USD');
-        const list = Array.isArray(sitesRes) ? sitesRes : ((sitesRes as any)?.sites || []);
-        const map = new Map<number, number>();
-        for (const site of list) {
-          const id = Number(site?.id);
-          const rate = Number(site?.billingProfile?.cnyPerUsd);
-          if (Number.isFinite(id) && id > 0 && Number.isFinite(rate) && rate > 0) {
-            map.set(id, rate);
+        const map = new Map<number, number | null>();
+        for (const row of (Array.isArray(ratesRes?.rates) ? ratesRes.rates : [])) {
+          const id = Number(row?.siteId);
+          const raw = Number(row?.cnyPerUsd);
+          // cnyPerUsd 为 null / 0 / 负数一律记成"未知"：保留这一行而不是丢弃，
+          // 才能数出到底有几个活跃站点没设汇率（unknownRateSiteCount）。
+          if (Number.isFinite(id) && id > 0) {
+            map.set(id, Number.isFinite(raw) && raw > 0 ? raw : null);
           }
         }
         setRatesBySiteId(map);
@@ -95,7 +118,22 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
   const getSiteRate = useCallback((siteId: number | null | undefined) => {
     const id = Number(siteId);
     if (!Number.isFinite(id) || id <= 0) return null;
-    return ratesBySiteId.get(id) ?? null;
+    const rate = ratesBySiteId.get(id);
+    return typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : null;
+  }, [ratesBySiteId]);
+
+  const unknownRateSiteCount = useMemo(
+    () => Array.from(ratesBySiteId.values()).filter((rate) => rate == null).length,
+    [ratesBySiteId],
+  );
+
+  // F4：同上，但保留 id，供「已排除 N 个站点」这类提示做成可点击入口。
+  const unknownRateSiteIds = useMemo(() => {
+    const ids: number[] = [];
+    for (const [siteId, rate] of ratesBySiteId) {
+      if (rate == null) ids.push(siteId);
+    }
+    return ids.sort((a, b) => a - b);
   }, [ratesBySiteId]);
 
   /**
@@ -123,8 +161,8 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
   }, [currency]);
 
   const value = useMemo<CurrencyContextValue>(
-    () => ({ currency, getSiteRate, loaded, refresh, toggleCurrency, toggling }),
-    [currency, getSiteRate, loaded, refresh, toggleCurrency, toggling],
+    () => ({ currency, getSiteRate, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling }),
+    [currency, getSiteRate, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling],
   );
 
   return <CurrencyContext.Provider value={value}>{props.children}</CurrencyContext.Provider>;

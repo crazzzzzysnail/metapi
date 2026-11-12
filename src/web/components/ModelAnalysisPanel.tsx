@@ -2,17 +2,23 @@ import { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { InlineBrandIcon } from './BrandIcon.js';
 import { formatCompactTokenMetric, formatMoney } from '../numberFormat.js';
+import { useCurrency } from '../currencyContext.js';
 import { useThemeLabelColor } from './useThemeLabelColor.js';
 
 type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
 
-interface SpendDistributionItem { model: string; spend: number; calls: number; }
-interface SpendTrendItem { day: string; spend: number; }
+/**
+ * F3：金额双轨。后端按**行（站点）**换算后再累加，所以这里能同时拿到
+ * USD 原值与人民币值；`unconvertedUsdSpend` 是因汇率未知没进 CNY 的那部分，
+ * 界面必须把它说出来，否则 ¥ 数字会"看起来正常地偏小"。
+ */
+interface SpendDistributionItem { model: string; spend: number; calls: number; spendCny?: number; unconvertedUsdSpend?: number; }
+interface SpendTrendItem { day: string; spend: number; spendCny?: number; unconvertedUsdSpend?: number; }
 interface CallsDistributionItem { model: string; calls: number; share: number; }
-interface CallRankingItem { model: string; calls: number; successRate: number; avgLatencyMs: number; spend: number; tokens: number; }
+interface CallRankingItem { model: string; calls: number; successRate: number; avgLatencyMs: number; spend: number; spendCny?: number; unconvertedUsdSpend?: number; tokens: number; }
 
 interface ModelAnalysisData {
-  totals?: { spend?: number; calls?: number; tokens?: number };
+  totals?: { spend?: number; calls?: number; tokens?: number; spendCny?: number; unconvertedUsdSpend?: number };
   spendDistribution?: SpendDistributionItem[];
   spendTrend?: SpendTrendItem[];
   callsDistribution?: CallsDistributionItem[];
@@ -35,9 +41,30 @@ function toSafeNumber(value: unknown): number {
   return value;
 }
 
-// T8.1 / N3：委托统一实现，保留组件内调用名（5 处引用）。
-function formatCurrency(value: number): string {
-  return formatMoney(value);
+/**
+ * T8.1 / N3 → F3：金额格式化改为跟随显示货币。
+ *
+ * 原实现是 `formatMoney(value)`（默认 USD、不传币种），所以顶栏切到人民币后
+ * 面板仍是 $ —— 这是本次修复的直接起因。
+ *
+ * 现在取后端的双轨值：CNY 用 spendCny，USD 用 spend。
+ * ⚠️ 不做前端换算的原因：同一模型的成本可能来自多个站点（model_day_usage
+ * 唯一键含 siteId），汇率逐站维护，前端只有一个聚合后的总数，乘任何单一汇率
+ * 都会算错。换算只能发生在后端逐行阶段。
+ */
+function makeCurrencyFormatter(
+  currency: 'USD' | 'CNY',
+): (item: { spend?: number; spendCny?: number; unconvertedUsdSpend?: number }) => string {
+  return (item) => {
+    if (currency === 'USD') return formatMoney(toSafeNumber(item?.spend));
+    const cny = toSafeNumber(item?.spendCny);
+    const unconverted = toSafeNumber(item?.unconvertedUsdSpend);
+    // 一部分成本因汇率未知没换算：如实标出来，而不是给一个偏小的 ¥ 数当完整答案
+    if (unconverted > 0) {
+      return `${formatMoney(cny, 'CNY', 1)}（另有 ${formatMoney(unconverted)} 未换算）`;
+    }
+    return formatMoney(cny, 'CNY', 1);
+  };
 }
 
 function formatPercent(value: number): string {
@@ -56,9 +83,14 @@ function EmptyBlock() {
 export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('spend');
   const labelColor = useThemeLabelColor();
+  // F3：显示货币与金额格式化器（双轨取数，见 makeCurrencyFormatter）
+  const panelCurrency = useCurrency().currency;
+  const formatCurrency = makeCurrencyFormatter(panelCurrency);
 
   const totals = {
     spend: toSafeNumber(data?.totals?.spend),
+    spendCny: toSafeNumber(data?.totals?.spendCny),
+    unconvertedUsdSpend: toSafeNumber(data?.totals?.unconvertedUsdSpend),
     calls: toSafeNumber(data?.totals?.calls),
     tokens: toSafeNumber(data?.totals?.tokens),
   };
@@ -84,15 +116,23 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
 
   const trendSpec = useMemo(() => ({
     type: 'area' as const,
-    data: [{ id: 'data', values: spendTrend.map(d => ({ day: d.day, spend: toSafeNumber(d.spend) })) }],
+    // F3：三条轨道都要带进图表数据，否则 tooltip 里拿不到 spendCny（只会显示 0）
+    data: [{ id: 'data', values: spendTrend.map(d => ({
+      day: d.day,
+      spend: toSafeNumber(d.spend),
+      spendCny: toSafeNumber(d.spendCny),
+      unconvertedUsdSpend: toSafeNumber(d.unconvertedUsdSpend),
+    })) }],
     xField: 'day', yField: 'spend',
     line: { style: { lineWidth: 2.5, curveType: 'monotone' as const, stroke: '#4f46e5' } },
     area: { style: { fill: { gradient: 'linear' as const, x0: 0, y0: 0, x1: 0, y1: 1, stops: [{ offset: 0, color: 'rgba(79,70,229,0.25)' }, { offset: 1, color: 'rgba(79,70,229,0.02)' }] }, curveType: 'monotone' as const } },
     point: { visible: true, style: { size: 7, fill: '#4f46e5', stroke: '#fff', lineWidth: 2 } },
     axes: [{ orient: 'bottom' as const, label: { style: { fontSize: 11, fill: labelColor } } }, { orient: 'left' as const, label: { style: { fontSize: 11, fill: labelColor } } }],
-    tooltip: { mark: { content: [{ key: () => '消耗', value: (datum: any) => formatCurrency(datum?.spend ?? 0) }] } },
+    // 趋势 tooltip 传整条：双轨值都在同一对象里，只取 spend 会丢币种信息
+    tooltip: { mark: { content: [{ key: () => '消耗', value: (datum: any) => formatCurrency({ spend: toSafeNumber(datum?.spend), spendCny: toSafeNumber(datum?.spendCny), unconvertedUsdSpend: toSafeNumber(datum?.unconvertedUsdSpend) }) }] } },
     animation: true, background: 'transparent',
-  }), [spendTrend, labelColor]);
+    // panelCurrency 入依赖：切币种后 tooltip 文本必须重算，否则图已换、悬停仍旧
+  }), [spendTrend, labelColor, panelCurrency]);
 
   const callsPieSpec = useMemo(() => ({
     type: 'pie' as const,
@@ -115,7 +155,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
         <div className="stat-summary-card stat-summary-purple">
           <div className="stat-summary-card-label">总消耗</div>
-          <div className="stat-summary-card-value">{formatCurrency(totals.spend)}</div>
+          <div className="stat-summary-card-value">{formatCurrency(totals)}</div>
         </div>
         <div className="stat-summary-card stat-summary-blue">
           <div className="stat-summary-card-label">总调用</div>
@@ -153,7 +193,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
               <span key={d.model} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--color-text-secondary)' }}>
                 <InlineBrandIcon model={d.model} size={13} />
                 <span style={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.model}</span>
-                <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: 'var(--color-text-primary)' }}>{formatCurrency(d.spend)}</span>
+                <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: 'var(--color-text-primary)' }}>{formatCurrency(d)}</span>
               </span>
             ))}
           </div>
@@ -272,7 +312,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
                       </span>
                     </td>
                     <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500, fontSize: 13 }}>
-                      {formatCurrency(item.spend)}
+                      {formatCurrency(item)}
                     </td>
                   </tr>
                 );

@@ -22,7 +22,8 @@ import {
 import { estimateRewardWithTodayIncomeFallback } from "./todayIncomeRewardService.js";
 import { createAdminSnapshotPersistence } from "./adminSnapshotStore.js";
 import { runUsageAggregationProjectionPass } from "./usageAggregationService.js";
-import { summarizeByCurrency } from "./billing/currencySplit.js";
+import { maxExcludedSiteCount, splitMetricBySite, summarizeByCurrency } from "./billing/currencySplit.js";
+import { listSiteCurrencyRates } from "./billing/siteBillingProfileService.js";
 
 export type DashboardSummaryPayload = {
   totalBalance: number;
@@ -36,6 +37,18 @@ export type DashboardSummaryPayload = {
   totalUsed: number;
   todaySpend: number;
   todayReward: number;
+  /**
+   * B2：消耗/收入三个指标的人民币口径（逐站换算，汇率未知的站点已排除）。
+   * 与 USD 字段并列存在，读取方按显示货币择一使用；缺键须当作"未知"而不是 0。
+   */
+  totalUsedCny?: number;
+  todaySpendCny?: number;
+  todayRewardCny?: number;
+  /**
+   * 因汇率未知被排除出 CNY 合计的站点数（取四个指标的最大值，非相加）。
+   * 前端在 CNY 模式下必须提示，否则总额会"看起来正常地偏小"。
+   */
+  currencyExcludedSiteCount?: number;
   activeAccounts: number;
   totalAccounts: number;
   todayCheckin: { success: number; failed: number; total: number };
@@ -124,10 +137,10 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
 
   const [
     todayCheckinRows,
-    totalUsedRow,
+    totalUsedRows,
     proxy24hRow,
     proxyPerformanceRow,
-    todaySpendRow,
+    todaySpendRows,
   ] = await Promise.all([
     db
       .select()
@@ -145,14 +158,19 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
         ),
       )
       .all(),
+    // S6 / T8.8 → B2：改成按站点分组返回，USD 合计由这些行求和得出（与旧的
+    // 单值 SUM 等价），同时让 CNY 能逐站乘各自汇率。缺这一步的话累计消耗
+    // 只能显示美元，会和同一张卡上已换算的余额自相矛盾。
     db
       .select({
-        totalUsed: sql<number>`coalesce(sum(coalesce(${schema.siteDayUsage.totalSiteSpend}, 0)), 0)`,
+        siteId: schema.siteDayUsage.siteId,
+        usdSpend: sql<number>`coalesce(sum(coalesce(${schema.siteDayUsage.totalSiteSpend}, 0)), 0)`,
       })
       .from(schema.siteDayUsage)
       .innerJoin(schema.sites, eq(schema.siteDayUsage.siteId, schema.sites.id))
       .where(eq(schema.sites.status, "active"))
-      .get(),
+      .groupBy(schema.siteDayUsage.siteId)
+      .all(),
     db
       .select({
         total: sql<number>`count(*)`,
@@ -191,9 +209,11 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
         ),
       )
       .get(),
+    // B2：同上，今日支出也要按站点分组才能逐站换算。
     db
       .select({
-        todaySpend: sql<number>`coalesce(sum(coalesce(${schema.siteDayUsage.totalSiteSpend}, 0)), 0)`,
+        siteId: schema.siteDayUsage.siteId,
+        usdSpend: sql<number>`coalesce(sum(coalesce(${schema.siteDayUsage.totalSiteSpend}, 0)), 0)`,
       })
       .from(schema.siteDayUsage)
       .innerJoin(schema.sites, eq(schema.siteDayUsage.siteId, schema.sites.id))
@@ -203,7 +223,8 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
           eq(schema.sites.status, "active"),
         ),
       )
-      .get(),
+      .groupBy(schema.siteDayUsage.siteId)
+      .all(),
   ]);
 
   const todayCheckins = todayCheckinRows.map((row) => row.checkin_logs);
@@ -236,19 +257,55 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   const totalTokens = Number(proxy24hRow?.totalTokens || 0);
   const requestsPerMinute = Number(proxyPerformanceRow?.total || 0);
   const tokensPerMinute = Number(proxyPerformanceRow?.totalTokens || 0);
-  const totalUsed = Number(totalUsedRow?.totalUsed || 0);
-  const todaySpend = Number(todaySpendRow?.todaySpend || 0);
-  const todayReward = accounts.reduce(
-    (sum, account) =>
-      sum +
-      estimateRewardWithTodayIncomeFallback({
-        day: today,
-        successCount: successCountByAccount[account.id] || 0,
-        parsedRewardCount: parsedRewardCountByAccount[account.id] || 0,
-        rewardSum: rewardByAccount[account.id] || 0,
-        extraConfig: account.extraConfig,
-      }),
-    0,
+
+  /**
+   * B2：四个金额指标统一走"逐站汇总 → 双币拆分"（判据见 currencySplit）。
+   *
+   * USD 合计仍等于全部站点之和（含汇率未知站点 —— 美元不需要汇率），
+   * 与改造前的单值 SUM 等价；CNY 只累计汇率已知的站点，并单独交出被排除数。
+   */
+  const usedBySite = (totalUsedRows ?? []).map((row) => ({
+    siteId: Number(row?.siteId),
+    usd: Number(row?.usdSpend || 0),
+  }));
+  const todaySpendBySite = (todaySpendRows ?? []).map((row) => ({
+    siteId: Number(row?.siteId),
+    usd: Number(row?.usdSpend || 0),
+  }));
+  // 今日收入原本就是 accounts 逐个算的，这里改成先按站点归集再换算。
+  const rewardBySite = new Map<number, number>();
+  for (const row of accountRows) {
+    const account = row.accounts;
+    const reward = estimateRewardWithTodayIncomeFallback({
+      day: today,
+      successCount: successCountByAccount[account.id] || 0,
+      parsedRewardCount: parsedRewardCountByAccount[account.id] || 0,
+      rewardSum: rewardByAccount[account.id] || 0,
+      extraConfig: account.extraConfig,
+    });
+    rewardBySite.set(
+      row.sites.id,
+      (rewardBySite.get(row.sites.id) || 0) + reward,
+    );
+  }
+  const rewardAmounts = Array.from(rewardBySite.entries()).map(([siteId, usd]) => ({ siteId, usd }));
+
+  const usedSplit = splitMetricBySite(usedBySite, cnyRateBySiteId);
+  const todaySpendSplit = splitMetricBySite(todaySpendBySite, cnyRateBySiteId);
+  const rewardSplit = splitMetricBySite(rewardAmounts, cnyRateBySiteId);
+
+  const totalUsed = usedSplit.usdSum;
+  const todaySpend = todaySpendSplit.usdSum;
+  const todayReward = rewardSplit.usdSum;
+
+  // 方案 a1：四个指标各算一次排除数，UI 只取最大值提示一句「N 个站点未计入」。
+  // 取最大值而不是相加：缺汇率通常就是同几个站四处都缺，相加会重复计数、
+  // 反而夸大问题规模。
+  const currencyExcludedSiteCount = maxExcludedSiteCount(
+    currencySplit.excludedSiteCount,
+    usedSplit.excludedSiteCount,
+    todaySpendSplit.excludedSiteCount,
+    rewardSplit.excludedSiteCount,
   );
 
   return {
@@ -259,6 +316,16 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     totalUsed: toRoundedMicroNumber(totalUsed),
     todaySpend: toRoundedMicroNumber(todaySpend),
     todayReward: toRoundedMicroNumber(todayReward),
+    // B2：四个指标的 CNY 口径。可选字段 —— 老读取方按"未知"处理，不作 0。
+    totalUsedCny: toRoundedMicroNumber(usedSplit.cnyTotal),
+    todaySpendCny: toRoundedMicroNumber(todaySpendSplit.cnyTotal),
+    todayRewardCny: toRoundedMicroNumber(rewardSplit.cnyTotal),
+    /**
+     * 因汇率未知被排除出 CNY 合计的站点数（四个指标取最大值，见上方注释）。
+     * 前端在 CNY 模式下必须提示这个数 —— 否则总额会"看起来正常地偏小"，
+     * 用户会当成 bug 报回来。
+     */
+    currencyExcludedSiteCount,
     activeAccounts: activeCount,
     totalAccounts: accounts.length,
     todayCheckin: {
@@ -289,7 +356,7 @@ async function loadDashboardInsightsPayload(): Promise<DashboardInsightsPayload>
   const modelAnalysisSinceDay = getLocalRangeStartDayKey(7);
   await runUsageAggregationProjectionPass();
 
-  const [activeSites, siteAvailabilityRows, modelDayRows] =
+  const [activeSites, siteAvailabilityRows, modelDayRows, currencyRateRows] =
     await Promise.all([
       db
         .select({
@@ -313,7 +380,16 @@ async function loadDashboardInsightsPayload(): Promise<DashboardInsightsPayload>
         .from(schema.modelDayUsage)
         .where(gte(schema.modelDayUsage.localDay, modelAnalysisSinceDay))
         .all(),
+      // F3：模型数据分析要出人民币轨道，所以这里也要汇率。
+      // 复用站点档案读取（同一实现、同一语义），避免在 insights 里再抄一遍解析规则。
+      listSiteCurrencyRates(),
     ]);
+
+  // 与 summary 侧同样的"只认正有限值"规则；缺键即视为未知，不乘 1。
+  const insightCnyRateBySiteId = new Map<number, number | null>();
+  for (const row of currencyRateRows) {
+    insightCnyRateBySiteId.set(row.siteId, row.cnyPerUsd);
+  }
 
   const sortedSites = activeSites.sort(
     (left: SiteAvailabilitySiteRow, right: SiteAvailabilitySiteRow) => {
@@ -355,8 +431,10 @@ async function loadDashboardInsightsPayload(): Promise<DashboardInsightsPayload>
           totalTokens: row.totalTokens,
           totalSpend: row.totalSpend,
           totalLatencyMs: row.totalLatencyMs,
+          // F3：带上站点标识，换算才能在聚合前按站进行
+          siteId: row.siteId,
         })),
-      { days: 7 },
+      { days: 7, cnyRateBySiteId: insightCnyRateBySiteId },
     ),
   };
 }
