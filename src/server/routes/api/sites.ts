@@ -484,14 +484,20 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     if (mode === 'probe') {
       const { probeAndPersistSiteBillingProfile } = await import('../../services/billing/siteBillingProfileService.js');
+      const { withSiteRecordProxyRequestInit } = await import('../../services/siteProxy.js');
+      // 用户显式点「探测上游汇率」：overrideManual 让上游值覆盖手动值，
+      // 否则手填过汇率的站点会永远探测不动（数字与来源都停在手动）。
+      // 走 withSiteRecordProxyRequestInit 与保存后的静默探测保持同一套代理/自定义头，
+      // 避免"保存能探到、手动点探测却失败"这类因网络路径不同导致的分歧。
       const profile = await probeAndPersistSiteBillingProfile(
         { id: site.id, url: site.url },
         async (url, init) => {
           const { fetch } = await import('undici');
-          const res = await fetch(url, init as any);
+          const res = await fetch(url, withSiteRecordProxyRequestInit(site, init as any));
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           return res.json();
         },
+        { overrideManual: true },
       );
       return { success: true, profile };
     }

@@ -331,6 +331,9 @@ const SITE_PLATFORM_OPTIONS = [
 export default function Sites() {
   const location = useLocation();
   const navigate = useNavigate();
+  // F7：探测/手动改完汇率后要让汇率表立即重拉，否则表格徽标与顶栏「已排除 N 站」
+  // 都还停在旧值，得刷新整页才更新。
+  const { refresh: refreshRates } = useCurrency();
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('custom');
@@ -571,8 +574,8 @@ export default function Sites() {
             {billingSourceInfo.capturedAt ? (
               <>
                 <br />
-                {tr('最近自动探测')}：{new Date(billingSourceInfo.capturedAt).toLocaleString()}
-                （{tr('汇率')} {billingSourceInfo.rateSource === 'manual' ? tr('手动') : billingSourceInfo.rateSource === 'auto' ? tr('自动') : tr('未知')}
+                {tr('最近一次探测')}：{new Date(billingSourceInfo.capturedAt).toLocaleString()}
+                （{tr('当前来源')}：{tr('汇率')} {billingSourceInfo.rateSource === 'manual' ? tr('手动') : billingSourceInfo.rateSource === 'auto' ? tr('自动') : tr('未知')}
                 ，{tr('标尺')} {billingSourceInfo.quotaSource === 'manual' ? tr('手动') : billingSourceInfo.quotaSource === 'auto' ? tr('自动') : tr('未知')}）
               </>
             ) : null}
@@ -599,7 +602,21 @@ export default function Sites() {
                     quotaSource: res?.profile?.quotaSource ?? null,
                     capturedAt: res?.profile?.capturedAt ?? null,
                   });
-                  toast.success(res?.profile?.cnyPerUsd ? tr('已探测到汇率') : tr('上游未提供汇率，保持未知'));
+                  // 探测结果要立刻反映到表格徽标与顶栏汇率（合计口径）：
+                  // 只改弹窗内 state 的话，用户会看到"探到了新值，列表还挂着旧值"。
+                  void load();
+                  void refreshRates();
+                  // 文案按"这次到底有没有写进上游值"区分：overrideManual 之后
+                  // 仍显示手动，说明上游没给汇率、刚才那次并没有改动任何数值。
+                  const probedRate = Number(res?.profile?.cnyPerUsd);
+                  const probedSource = String(res?.profile?.rateSource || '');
+                  if (Number.isFinite(probedRate) && probedRate > 0 && probedSource === 'auto') {
+                    toast.success(`${tr('已探测到汇率')} ¥${probedRate}`);
+                  } else if (Number.isFinite(probedRate) && probedRate > 0) {
+                    toast.info(tr('上游未提供汇率，保留当前手动值'));
+                  } else {
+                    toast.info(tr('上游未提供汇率，汇率保持未知'));
+                  }
                 } catch (err: any) {
                   toast.error(err?.message || tr('探测失败'));
                 } finally {
@@ -624,11 +641,21 @@ export default function Sites() {
                     const n = Number(trimmed);
                     return Number.isFinite(n) && n > 0 ? n : null;
                   };
-                  await api.saveSiteBillingProfile(editor.editingSiteId, {
+                  const res = await api.saveSiteBillingProfile(editor.editingSiteId, {
                     mode: 'manual',
                     cnyPerUsd: parseOrNull(billingCnyRate),
                     quotaPerUnit: parseOrNull(billingQuotaPerUnit),
                   });
+                  // 手动保存后把来源信息一并回填：不清空的话，行内「最近一次探测」
+                  // 还挂着上次自动探测的来源，读起来像"刚保存的还是自动值"。
+                  setBillingSourceInfo({
+                    rateSource: res?.profile?.rateSource ?? null,
+                    quotaSource: res?.profile?.quotaSource ?? null,
+                    capturedAt: res?.profile?.capturedAt ?? null,
+                  });
+                  // 手动保存同理：徽标与顶栏汇率表立即同步。
+                  void load();
+                  void refreshRates();
                   toast.success(tr('计费参数已保存'));
                 } catch (err: any) {
                   toast.error(err?.message || tr('保存失败'));
@@ -2599,7 +2626,19 @@ export default function Sites() {
                       value={(() => {
                         const rate = Number(site.billingProfile?.cnyPerUsd);
                         if (Number.isFinite(rate) && rate > 0) {
-                          return <span className={`badge ${site.billingProfile?.rateSource === 'manual' ? 'badge-info' : 'badge-success'}`} style={{ fontSize: 11 }}>{`¥${rate}${site.billingProfile?.rateSource === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}</span>;
+                          // F7：与桌面表格一致，已知汇率也可点，直达汇率输入框。
+                          const source = String(site.billingProfile?.rateSource || '');
+                          return (
+                            <button
+                              type="button"
+                              className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
+                              style={{ fontSize: 11, cursor: 'pointer' }}
+                              title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                            >
+                              {`¥${rate}${source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}
+                            </button>
+                          );
                         }
                         // F4：移动端同样可点击直达汇率输入框，与桌面表格保持一致口径。
                         return (
@@ -2865,10 +2904,19 @@ export default function Sites() {
                           );
                         }
                         const source = String(profile?.rateSource || '');
+                        // F7：已知汇率的标签同样可点，直达编辑弹窗的汇率输入框。
+                        // 未知态本来就有这个入口，已知态却只能看不能改，用户要改一个
+                        // 已经探测到的汇率得先展开行、再进编辑、再展开计费参数，路径过长。
                         return (
-                          <span className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'}`} style={{ fontSize: 11 }} title={source === 'manual' ? tr('用户手动维护') : tr('自动探测')}>
+                          <button
+                            type="button"
+                            className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
+                            style={{ fontSize: 11, cursor: 'pointer' }}
+                            title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                            onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                          >
                             ¥{rate}{source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}
-                          </span>
+                          </button>
                         );
                       })()}
                     </td>
