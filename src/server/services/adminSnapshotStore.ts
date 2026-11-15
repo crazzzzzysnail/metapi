@@ -1,5 +1,6 @@
 import { and, eq, lt } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { upsertRow } from "../db/dialectUpsert.js";
 import type {
   PersistedSnapshotRecord,
   SnapshotPersistenceAdapter,
@@ -81,23 +82,26 @@ export async function writeAdminSnapshot<T>(
     updatedAt: new Date().toISOString(),
   };
 
-  await (db
-    .insert(schema.adminSnapshots)
-    .values(values) as any)
-    .onConflictDoUpdate({
-      target: [
-        schema.adminSnapshots.namespace,
-        schema.adminSnapshots.snapshotKey,
-      ],
-      set: {
-        payload: values.payload,
-        generatedAt: values.generatedAt,
-        expiresAt: values.expiresAt,
-        staleUntil: values.staleUntil,
-        updatedAt: values.updatedAt,
-      },
-    })
-    .run();
+  // 走方言感知 upsert。原先直接写 `.onConflictDoUpdate(...)`：MySQL 下抛
+  // TypeError，而本函数的调用方 snapshotCacheService 会把持久化写失败整条
+  // catch 成 console.warn —— 于是线上表现不是报错，而是"快照永远不落库、
+  // 进程重启即丢"，比 500 更难发现。
+  // namespace + snapshot_key 的唯一索引在三种方言的 bootstrap SQL 里都有。
+  await upsertRow({
+    table: schema.adminSnapshots,
+    values,
+    conflictTarget: [
+      schema.adminSnapshots.namespace,
+      schema.adminSnapshots.snapshotKey,
+    ],
+    set: {
+      payload: values.payload,
+      generatedAt: values.generatedAt,
+      expiresAt: values.expiresAt,
+      staleUntil: values.staleUntil,
+      updatedAt: values.updatedAt,
+    },
+  });
 }
 
 export async function deleteExpiredAdminSnapshots(beforeIso?: string) {

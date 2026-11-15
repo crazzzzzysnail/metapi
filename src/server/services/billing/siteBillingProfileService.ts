@@ -13,6 +13,7 @@
 
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
+import { upsertRow } from '../../db/dialectUpsert.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { clearSnapshotCache, readSnapshotCache } from '../snapshotCacheService.js';
 
@@ -137,10 +138,15 @@ export async function probeAndPersistSiteBillingProfile(
   }
 
   if (Object.keys(next).length > 1) {
-    await db.insert(schema.siteBillingProfiles)
-      .values(next as any)
-      .onConflictDoUpdate({ target: schema.siteBillingProfiles.siteId, set: next as any })
-      .run();
+    // 走方言感知的 upsert。原先直接写 `.onConflictDoUpdate(...)`，在
+    // DB_TYPE=mysql 下是 `onConflictDoUpdate is not a function` → HTTP 500。
+    // `next` 只含本次真正探到的列，缺省 set 即整份覆盖这些列，与原语义逐字一致；
+    // site_id 在三种方言下都是主键，写回自己无害。
+    await upsertRow({
+      table: schema.siteBillingProfiles,
+      values: next as Record<string, unknown>,
+      conflictTarget: schema.siteBillingProfiles.siteId,
+    });
   }
 
   // 汇率/标尺一变，全站金额显示就得重算：让轻量端点的缓存立刻作废，
@@ -169,10 +175,13 @@ export async function setManualBillingOverrides(input: {
     patch.quotaSource = v === null ? null : 'manual';
   }
 
-  await db.insert(schema.siteBillingProfiles)
-    .values(patch as any)
-    .onConflictDoUpdate({ target: schema.siteBillingProfiles.siteId, set: patch as any })
-    .run();
+  // 同上：手动覆盖也要走方言感知 upsert。这里 patch 会显式带 null（= 清除覆盖），
+  // 整份覆盖正是想要的语义，故不传 set，让缺省逻辑原样写回。
+  await upsertRow({
+    table: schema.siteBillingProfiles,
+    values: patch,
+    conflictTarget: schema.siteBillingProfiles.siteId,
+  });
 
   // 同上：手动覆盖也要让汇率缓存作废。
   invalidateSiteCurrencyRatesCache();
