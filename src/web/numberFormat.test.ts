@@ -3,6 +3,7 @@ import {
   formatAmountInCurrency,
   formatBalance,
   formatBalanceInline,
+  formatBalanceOrDash,
   formatCompactTokenMetric,
   formatCostFixed,
   formatMoney,
@@ -190,6 +191,67 @@ describe('formatAmountInCurrency（不做换算）', () => {
     expect(formatAmountInCurrency(Number.NaN, 'CNY')).toBe('¥0.00');
     expect(formatAmountInCurrency(null, 'USD')).toBe('$0.00');
     expect(formatAmountInCurrency(undefined, 'USD')).toBe('$0.00');
+  });
+});
+
+/**
+ * F8 第 0 期：余额读不到时必显示 `—`。
+ *
+ * 立这条的直接原因是真实现场：纯 apikey 站点从未成功读到余额，库里 `balance`
+ * 停在 schema 默认值 0，界面上就是 `$0.00`——和"账户真的没钱"一模一样。
+ * 判据必须是"读到过没有"，而不是金额大小，所以这里专门钉住 0 的两种情况。
+ */
+describe('formatBalanceOrDash', () => {
+  it('从未读到过余额时显示破折号，即便库里是 0', () => {
+    expect(formatBalanceOrDash(0, { currency: 'USD', neverRead: true })).toBe('—');
+  });
+
+  it('读到过且确实是 0 时照常显示 $0.00（真·零不能被藏起来）', () => {
+    expect(formatBalanceOrDash(0, { currency: 'USD', neverRead: false })).toBe('$0.00');
+  });
+
+  it('读到过时与 formatBalanceInline 完全一致', () => {
+    expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: 7.3, neverRead: false })).toBe('¥547.50');
+    // 汇率未知仍走 F6 口径：退回纯美元数字，不加「（汇率未知）」后缀
+    expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: null, neverRead: false })).toBe('$75.00');
+  });
+
+  it('占位符可覆盖，且不会给数字追加任何文字', () => {
+    expect(formatBalanceOrDash(0, { currency: 'USD', neverRead: true, placeholder: '--' })).toBe('--');
+    expect(formatBalanceOrDash(1.5, { currency: 'USD', neverRead: false })).toBe('$1.50');
+  });
+
+  /**
+   * 非零金额永远压过"没读到"的判定。
+   *
+   * 现场依据：某些连接的余额来自订阅同步等旁路，库里是真实数字（如 10、5），
+   * 但余额刷新一直失败、也没有成功时间戳。若按"最近一次失败"就涂成 —，
+   * 用户会以为这些连接没钱/没数据 —— 比显示一个稍旧的数字糟糕得多。
+   */
+  it('虽判定没读到，但库里有非零金额时照常显示', () => {
+    expect(formatBalanceOrDash(15, { currency: 'USD', neverRead: true })).toBe('$15.00');
+  });
+
+  it('无限配额画成 ∞，且压过破折号判定', () => {
+    expect(formatBalanceOrDash(0, { currency: 'USD', neverRead: true, unlimited: true })).toBe('∞');
+    expect(formatBalanceOrDash(100, { currency: 'CNY', cnyPerUsd: 7.3, neverRead: false, unlimited: true })).toBe('∞');
+    // 不传 unlimited 时行为不变，避免误伤未接三态的页面
+    expect(formatBalanceOrDash(0, { currency: 'USD', neverRead: true })).toBe('—');
+  });
+
+  /**
+   * withRateNote：搜索结果这类没有旁路提示的地方，缺汇率必须写进数字本身。
+   * 只影响"出数字"的分支，`—`/`∞` 不受影响。
+   */
+  it('withRateNote 让汇率未知的分支保留标注', () => {
+    expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: null, neverRead: false, withRateNote: true }))
+      .toBe('$75.00（汇率未知）');
+    // 汇率已知时与默认口径完全一致，不会多出任何文字
+    expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: 7.3, neverRead: false, withRateNote: true }))
+      .toBe('¥547.50');
+    // 占位符分支优先于标注：没读到就是没读到
+    expect(formatBalanceOrDash(0, { currency: 'CNY', cnyPerUsd: null, neverRead: true, withRateNote: true }))
+      .toBe('—');
   });
 });
 

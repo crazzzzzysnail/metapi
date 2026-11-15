@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { getInsertedRowId } from '../db/insertHelpers.js';
+import { insertRowIfAbsent } from '../db/dialectUpsert.js';
 import { getAdapter } from './platforms/index.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
@@ -522,10 +523,17 @@ export async function probeSiteModels(
           eq(schema.modelAvailability.modelName, modelName),
         ))
         .run();
-      await db.insert(schema.siteDisabledModels)
-        .values({ siteId, modelName })
-        .onConflictDoNothing()
-        .run();
+      // 幂等插入走方言感知 helper：原先直接 `.onConflictDoNothing()`，
+      // 在 DB_TYPE=mysql 下抛 TypeError 并把整条手动探测流程带崩。
+      // site_disabled_models 的 (site_id, model_name) 唯一索引三种方言都有。
+      await insertRowIfAbsent({
+        table: schema.siteDisabledModels,
+        values: { siteId, modelName },
+        conflictColumns: [
+          { column: schema.siteDisabledModels.siteId, value: siteId },
+          { column: schema.siteDisabledModels.modelName, value: modelName },
+        ],
+      });
       onProgress?.({ type: 'action', modelName, action: 'disabled' });
     }
     const reason = unsupportedModels.length === 1
@@ -601,11 +609,15 @@ async function runPostRefreshProbeIfEnabled(params: {
           eq(schema.modelAvailability.modelName, modelName),
         ))
         .run();
-      // Add to site-level disabled models
-      await db.insert(schema.siteDisabledModels)
-        .values({ siteId: params.site.id, modelName })
-        .onConflictDoNothing()
-        .run();
+      // Add to site-level disabled models —— 同上，走方言感知 helper
+      await insertRowIfAbsent({
+        table: schema.siteDisabledModels,
+        values: { siteId: params.site.id, modelName },
+        conflictColumns: [
+          { column: schema.siteDisabledModels.siteId, value: params.site.id },
+          { column: schema.siteDisabledModels.modelName, value: modelName },
+        ],
+      });
     }
     // Update account health
     const reason = unsupportedModels.length === 1

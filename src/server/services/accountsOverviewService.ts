@@ -3,6 +3,7 @@ import { db, schema } from "../db/index.js";
 import {
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
+  getBalanceEvidenceFromExtraConfig,
   type AccountCredentialMode,
 } from "./accountExtraConfig.js";
 import {
@@ -210,6 +211,9 @@ async function loadAccountsSnapshotPayload(): Promise<AccountsSnapshotPayload> {
           sessionCapable: capabilities.canRefreshBalance,
           hasDiscoveredModels: (modelCountByAccount[row.accounts.id] || 0) > 0,
         }),
+        // F8 第 1 期：把余额证据原样下发。前端优先读它，缺失时才回落到
+        // runtimeHealth + lastBalanceRefresh 的推断（见 Accounts.tsx isBalanceNeverRead）。
+        balanceEvidence: getBalanceEvidenceFromExtraConfig(row.accounts.extraConfig),
       };
     }),
     sites,

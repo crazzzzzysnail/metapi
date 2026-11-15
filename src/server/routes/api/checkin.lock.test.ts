@@ -38,6 +38,7 @@ vi.mock('../../db/index.js', () => {
   };
 
   return {
+    runtimeDbDialect: 'sqlite', // dialectUpsert.js 顶层 import 该名，mock 工厂不可缺
     db: {
       insert: () => insertChain,
       select: () => queryChain,

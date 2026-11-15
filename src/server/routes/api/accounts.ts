@@ -13,10 +13,13 @@ import {
   getProxyUrlFromExtraConfig,
   guessPlatformUserIdFromUsername,
   hasOauthProvider,
+  clearBalanceEvidenceInExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   normalizeCredentialMode as normalizeCredentialModeInput,
   resolvePlatformUserId,
+  setBalanceEvidenceInExtraConfig,
+  setManualBalanceUsdInExtraConfig,
   type AccountCredentialMode,
 } from "../../services/accountExtraConfig.js";
 import { encryptAccountPassword } from "../../services/accountCredentialService.js";
@@ -1518,6 +1521,70 @@ export async function accountsRoutes(app: FastifyInstance) {
         updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
           proxyUrl: normalizedProxy ?? undefined,
         });
+      }
+
+      // F8 第 3 期：手动余额。走 extra_config 而非加列；这里不并入 needsModelRefresh——
+      // 改一个展示用数字不需要重拉模型列表，否则每次保存都要白等一轮。
+      if (Object.prototype.hasOwnProperty.call(body, "manualBalanceUsd")) {
+        const raw = body.manualBalanceUsd;
+        const isClearing =
+          raw === null || (typeof raw === "string" && raw.trim() === "");
+        let manualValue: number | null = null;
+        if (!isClearing) {
+          const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+          if (!Number.isFinite(n) || n < 0) {
+            return reply
+              .code(400)
+              .send({ message: "手动余额必须是不小于 0 的数字，或留空恢复自动获取" });
+          }
+          manualValue = n;
+        }
+        const baseExtraConfig =
+          typeof updates.extraConfig === "string"
+            ? updates.extraConfig
+            : account.extraConfig;
+        updates.extraConfig = setManualBalanceUsdInExtraConfig(
+          baseExtraConfig,
+          manualValue,
+        );
+        // 手动值立即生效：写 balance + lastBalanceRefresh + known 证据，
+        // 用户保存后不必等下一次刷新才看到数字，也不会被判成"从未读到"。
+        if (manualValue !== null) {
+          const now = new Date().toISOString();
+          updates.balance = manualValue;
+          updates.lastBalanceRefresh = now;
+          updates.extraConfig = setBalanceEvidenceInExtraConfig(updates.extraConfig, {
+            status: "known",
+            source: "manual",
+            capturedAt: now,
+          });
+        } else {
+          // 清除手动值时把证据一并删掉：库里那个数字就是从手动值来的，再声称 known/manual
+          // 会让界面以为还能读到，直到下一次刷新才纠正。
+          updates.extraConfig = clearBalanceEvidenceInExtraConfig(updates.extraConfig);
+          // 余额列与时间戳也归零：它们当初就是被手动值覆盖的，留着等于把手动数字
+          // 继续冒充上游读数。下一次刷新会重新填真实值。
+          updates.balance = 0;
+          updates.lastBalanceRefresh = null;
+        }
+        // 余额类快照（账号列表、仪表盘合计、站点统计）都要重算，否则前端 15 秒内
+        // 拿到的还是旧数字，看起来像没保存成功。落库的那份也必须删——readSnapshotCache
+        // 内存未命中时会把库里旧快照读回来，只清内存等于没清。
+        const { clearSnapshotCache } = await import(
+          "../../services/snapshotCacheService.js"
+        );
+        const { deleteAdminSnapshotsByNamespace } = await import(
+          "../../services/adminSnapshotStore.js"
+        );
+        for (const namespace of [
+          "accounts-snapshot",
+          "dashboard-summary",
+          "dashboard-insights",
+          "site-stats",
+        ]) {
+          clearSnapshotCache(namespace);
+          await deleteAdminSnapshotsByNamespace(namespace);
+        }
       }
 
       const nextAccessToken =

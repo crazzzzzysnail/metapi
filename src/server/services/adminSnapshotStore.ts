@@ -1,5 +1,6 @@
 import { and, eq, lt } from "drizzle-orm";
 import { db, schema } from "../db/index.js";
+import { upsertRow } from "../db/dialectUpsert.js";
 import type {
   PersistedSnapshotRecord,
   SnapshotPersistenceAdapter,
@@ -81,23 +82,26 @@ export async function writeAdminSnapshot<T>(
     updatedAt: new Date().toISOString(),
   };
 
-  await (db
-    .insert(schema.adminSnapshots)
-    .values(values) as any)
-    .onConflictDoUpdate({
-      target: [
-        schema.adminSnapshots.namespace,
-        schema.adminSnapshots.snapshotKey,
-      ],
-      set: {
-        payload: values.payload,
-        generatedAt: values.generatedAt,
-        expiresAt: values.expiresAt,
-        staleUntil: values.staleUntil,
-        updatedAt: values.updatedAt,
-      },
-    })
-    .run();
+  // 走方言感知 upsert。原先直接写 `.onConflictDoUpdate(...)`：MySQL 下抛
+  // TypeError，而本函数的调用方 snapshotCacheService 会把持久化写失败整条
+  // catch 成 console.warn —— 于是线上表现不是报错，而是"快照永远不落库、
+  // 进程重启即丢"，比 500 更难发现。
+  // namespace + snapshot_key 的唯一索引在三种方言的 bootstrap SQL 里都有。
+  await upsertRow({
+    table: schema.adminSnapshots,
+    values,
+    conflictTarget: [
+      schema.adminSnapshots.namespace,
+      schema.adminSnapshots.snapshotKey,
+    ],
+    set: {
+      payload: values.payload,
+      generatedAt: values.generatedAt,
+      expiresAt: values.expiresAt,
+      staleUntil: values.staleUntil,
+      updatedAt: values.updatedAt,
+    },
+  });
 }
 
 export async function deleteExpiredAdminSnapshots(beforeIso?: string) {
@@ -105,6 +109,19 @@ export async function deleteExpiredAdminSnapshots(beforeIso?: string) {
   await db
     .delete(schema.adminSnapshots)
     .where(lt(schema.adminSnapshots.staleUntil, cutoffIso))
+    .run();
+}
+
+/**
+ * 按命名空间清掉落库的快照。
+ *
+ * 只清内存缓存不够：`readSnapshotCache` 在内存无条目时会把库里那份读回来并复用，
+ * 于是"保存成功但页面还是旧数字"，看起来像没生效。进程重启后库里那份同样还在。
+ */
+export async function deleteAdminSnapshotsByNamespace(namespace: string) {
+  await db
+    .delete(schema.adminSnapshots)
+    .where(eq(schema.adminSnapshots.namespace, namespace))
     .run();
 }
 

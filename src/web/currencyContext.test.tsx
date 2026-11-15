@@ -116,7 +116,9 @@ describe('CurrencyProvider', () => {
       expect(h.read().unknownRateSiteCount).toBe(3);
       // F4：计数与可跳转 id 必须同源 —— 否则提示说「已排除 3 个」，
       // 点进去却只能处理 2 个，用户会以为剩下的不存在。
-      expect(h.read().unknownRateSiteIds).toEqual([266, 272, 273]);
+      // F8：顺序改为倒序 —— 新站 id 更大，缺汇率的多半是刚加的站，
+      // 升序会让用户连点多次「继续处理」才轮到它。
+      expect(h.read().unknownRateSiteIds).toEqual([273, 272, 266]);
       expect(h.read().unknownRateSiteIds).toHaveLength(h.read().unknownRateSiteCount);
     } finally {
       h.unmount();

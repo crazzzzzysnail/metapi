@@ -133,7 +133,9 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
     for (const [siteId, rate] of ratesBySiteId) {
       if (rate == null) ids.push(siteId);
     }
-    return ids.sort((a, b) => a - b);
+    // 倒序（F8 第 1 期）：新加的站点 id 更大，而"缺汇率"几乎总是刚加的站点产生的。
+    // 升序会让用户连续点五六次「继续处理」才轮到要修的那个（实测 siteA 场景即是如此）。
+    return ids.sort((a, b) => b - a);
   }, [ratesBySiteId]);
 
   /**

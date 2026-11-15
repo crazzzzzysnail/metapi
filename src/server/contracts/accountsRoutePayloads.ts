@@ -29,6 +29,8 @@ const accountUpdatePayloadSchema = z.object({
   isPinned: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  // 手动余额：空串 / null = 清除并回到自动刷新；数值范围在路由里校验（中文错误文案）
+  manualBalanceUsd: z.union([z.string(), z.number(), z.null()]).optional(),
 }).passthrough();
 
 const accountBatchPayloadSchema = z.object({

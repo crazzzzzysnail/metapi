@@ -150,6 +150,48 @@ export function formatBalanceInline(
 }
 
 /**
+ * 余额格专用：把「没有数字」如实画成 `—`，而不是库里那个默认 0。
+ *
+ * 存在理由（F8 第 0 期）：`accounts.balance` 有 schema 默认值 0，从未成功读取过余额的
+ * 连接（纯 apikey 站点、上游探测失败）会显示 `$0.00`，与"账户确实没钱"完全无法区分。
+ * 服务端其实一直在写 `last_balance_refresh`（`balanceService.ts` 每次成功都更新），
+ * 只是前端从没读过 —— 这个出口就是那处消费点。
+ *
+ * **只有 source === 'balance' 的降级才是"没读到"**：runtimeHealth 是个泛用状态槽，
+ * 凭证过期、站点禁用之类的原因也会让它变 degraded，拿 state 当判据会把正常显示过的
+ * 余额误改成 `—`。所以调用方需自己确认来源是余额（见 Accounts.tsx 的 balanceNeverRead）。
+ * 注意这比只看 lastBalanceRefresh 更保守也更正：老数据里可能有个很久以前的成功时间戳，
+ * 但最近一次余额读取明确失败了，那种情况同样不该继续报旧数字。
+ *
+ * **非零值一律照常显示**：万一某个连接从别的路径（订阅同步、手动填值）拿到了真实余额，
+ * 却因为"最近一次余额读取失败"被判成没读到，把 $15 涂成 — 比显示一个稍旧的数字糟糕得多。
+ * 所以这里只在"没读到 **且** 金额为 0"时才出占位符 —— 0 才是唯一有歧义的值。
+ *
+ * 返回值只可能是 `—` 或 `formatBalanceInline(...)` 的结果，不追加任何文字后缀
+ * （逐格重复提示在 F6 已被用户否掉）。
+ */
+export function formatBalanceOrDash(
+  value: unknown,
+  options: {
+    currency: DisplayCurrency;
+    cnyPerUsd?: number | null;
+    neverRead: boolean;
+    placeholder?: string;
+    /** 无限配额：既不是"没读到"也不是"余额为 0"，单独画成 ∞。 */
+    unlimited?: boolean;
+    /** 汇率未知时是否保留「（汇率未知）」后缀；搜索弹窗这类无旁路提示的地方需要。 */
+    withRateNote?: boolean;
+  },
+): string {
+  if (options.unlimited) return '∞';
+  if (options.neverRead && toSafeNumber(value) === 0) return options.placeholder ?? '—';
+  // 逐格后缀在 F6 被否掉，但搜索结果没有旁边的汇率列/徽标可看，仍要说明为什么是 $；
+  // 所以这里按需切回带标注的出口，而不是让调用方自己判币种再拼后缀。
+  if (options.withRateNote) return formatBalance(value, options.currency, options.cnyPerUsd);
+  return formatBalanceInline(value, options.currency, options.cnyPerUsd);
+}
+
+/**
  * 去掉币种符号。
  * 用于「今日 +¥X」这类自带正负号、不希望重复出现符号的场合。
  */
