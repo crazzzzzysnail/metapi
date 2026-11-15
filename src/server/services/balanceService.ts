@@ -12,10 +12,12 @@ import {
   buildStoredSub2ApiSubscriptionSummary,
   getAutoReloginConfig,
   getCredentialModeFromExtraConfig,
+  getManualBalanceUsdFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
+  setBalanceEvidenceInExtraConfig,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
@@ -237,6 +239,43 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   return loginResult.accessToken;
 }
 
+/**
+ * 记录余额可得性证据（F8 第 1 期）。
+ *
+ * 单独成函数有两个理由：一是 `setAccountRuntimeHealth` 自己会读行、改 extra_config、
+ * 再写回，若把证据合并进它那次写入，两个写库顺序会互相覆盖；二是**只有真的发生了一次
+ * 余额读取尝试才写**——没配好站点、adapter 缺失（`return null`）那种情况根本没尝试过，
+ * 写成 unknown 会把"未知"和"试过但拿不到"混成一类。
+ *
+ * 失败静默吞掉：证据是展示用的旁路信息，绝不该因为它把余额刷新本身弄挂。
+ */
+async function recordBalanceEvidence(
+  accountId: number,
+  evidence: {
+    status: 'known' | 'unavailable' | 'not-applicable';
+    reason?: Parameters<typeof setBalanceEvidenceInExtraConfig>[1]['reason'];
+    source?: string | null;
+  },
+): Promise<void> {
+  try {
+    const row = await db
+      .select({ extraConfig: schema.accounts.extraConfig })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .get() as { extraConfig: string | null } | undefined;
+    if (!row) return;
+    await db.update(schema.accounts)
+      .set({
+        extraConfig: setBalanceEvidenceInExtraConfig(row.extraConfig, evidence),
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.accounts.id, accountId))
+      .run();
+  } catch {
+    // 见函数注释：旁路信息不影响主流程
+  }
+}
+
 export async function refreshBalance(accountId: number) {
   const rows = await db
     .select()
@@ -262,6 +301,53 @@ export async function refreshBalance(accountId: number) {
       quota: account.quota ?? 0,
       skipped: true,
       reason: 'site_disabled',
+    };
+  }
+
+  // F8 第 3 期：手动余额优先。命中后不再打上游——填手动值的场景几乎都是
+  // "上游根本没有余额接口"，探测只会白费一次请求。写回 balance 让列表直接显示该值。
+  const manualBalanceUsd = getManualBalanceUsdFromExtraConfig(account.extraConfig);
+  if (manualBalanceUsd !== null) {
+    const now = new Date().toISOString();
+    await db.update(schema.accounts)
+      .set({
+        balance: manualBalanceUsd,
+        lastBalanceRefresh: now,
+        extraConfig: setBalanceEvidenceInExtraConfig(account.extraConfig, {
+          status: 'known',
+          source: 'manual',
+          capturedAt: now,
+        }),
+        updatedAt: now,
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+    await setAccountRuntimeHealth(account.id, {
+      state: 'healthy',
+      reason: '使用手动余额',
+      source: 'balance',
+    });
+    return {
+      balance: manualBalanceUsd,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+      source: 'manual',
+    };
+  }
+
+  // 站点被显式标记为"不提供余额数据"时直接记 not-applicable，别再逐次探测。
+  if (site.balanceCapability === 'none') {
+    await recordBalanceEvidence(account.id, {
+      status: 'not-applicable',
+      reason: 'no-capable-source',
+      source: 'site-capability',
+    });
+    return {
+      balance: account.balance ?? 0,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+      skipped: true,
+      reason: 'balance_not_applicable',
     };
   }
 
@@ -299,6 +385,13 @@ export async function refreshBalance(accountId: number) {
     // 此时 granted/available 不承载信息。若先走金额分支，
     // `balanceUsd ?? 0` 会把"没有余额概念"伪造成"余额 $0"——正是本方案要消灭的错误。
     if (adopted?.unlimitedQuota) {
+      // 「不受额度约束」是上游给出的明确结论，不是"没读到"：标 not-applicable，
+      // 前端据此显示 —（而不是 $0.00），且不会把它当成一次失败的读取去重试告警。
+      await recordBalanceEvidence(account.id, {
+        status: 'not-applicable',
+        reason: 'unlimited-quota',
+        source: 'apikey-telemetry',
+      });
       return {
         balance: account.balance ?? 0,
         used: adopted.totalUsedUsd ?? account.balanceUsed ?? 0,
@@ -311,6 +404,27 @@ export async function refreshBalance(accountId: number) {
 
     // 只有真正拿到可用余额数字时才写库；仅有"已消耗"不足以构成余额结论。
     if (adopted && typeof adopted.balanceUsd === 'number') {
+      // 此前这条路径只 return 不落库：余额、used、last_balance_refresh 全留在旧值上，
+      // 于是纯 apikey 连接永远没有"最近刷新时间"，前端也无从判断数字新旧。补上写入。
+      await db.update(schema.accounts)
+        .set({
+          balance: adopted.balanceUsd,
+          balanceUsed: adopted.totalUsedUsd ?? account.balanceUsed ?? 0,
+          quota: adopted.totalGrantedUsd ?? adopted.balanceUsd,
+          lastBalanceRefresh: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, account.id))
+        .run();
+      await recordBalanceEvidence(account.id, {
+        status: 'known',
+        source: 'apikey-telemetry',
+      });
+      setAccountRuntimeHealth(account.id, {
+        state: 'healthy',
+        reason: '余额刷新成功',
+        source: 'balance',
+      });
       return {
         balance: adopted.balanceUsd,
         used: adopted.totalUsedUsd ?? account.balanceUsed ?? 0,
@@ -319,6 +433,13 @@ export async function refreshBalance(accountId: number) {
       };
     }
 
+    // 遥测全部失败 / 上游不提供余额：这是"有通道但没读到"，属于值得重试的 unavailable，
+    // 与 unlimited-quota 的 not-applicable 刻意区分（前者过阵子可能就有了）。
+    await recordBalanceEvidence(account.id, {
+      status: 'unavailable',
+      reason: telemetry ? 'malformed-payload' : 'all-sources-failed',
+      source: 'apikey-telemetry',
+    });
     return {
       balance: account.balance ?? 0,
       used: account.balanceUsed ?? 0,
@@ -354,6 +475,13 @@ export async function refreshBalance(accountId: number) {
     () => adapter.getBalance(site.url, token, platformUserId));
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
+    // 先写证据再写健康状态：两者都是"读行→改 extra_config→写回"，
+    // 反过来的话未被 await 的健康状态写入会晚到一步，把证据覆盖掉。
+    await recordBalanceEvidence(account.id, {
+      status: 'unavailable',
+      reason: /401|403|unauthorized|token/i.test(message) ? 'endpoint-unauthorized' : 'all-sources-failed',
+      source: 'session',
+    });
     setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: message,
@@ -417,6 +545,13 @@ export async function refreshBalance(accountId: number) {
   // T2.4：上游明确没有余额接口时，绝不写库、也不标不健康。
   // 旧实现会拿到伪造的 0 并覆盖账户真实余额，界面上显示成"已用尽"。
   if (balanceInfo.unsupported) {
+    // 上游明确没有余额接口 = 这条路走不通，不是"这次失败"；标 not-applicable。
+    // 与错误分支同理，证据先写，避免被未 await 的健康状态写入覆盖。
+    await recordBalanceEvidence(account.id, {
+      status: 'not-applicable',
+      reason: 'no-capable-source',
+      source: 'session',
+    });
     setAccountRuntimeHealth(account.id, {
       state: 'degraded',
       reason: balanceInfo.unsupportedReason || 'balance API not supported',
@@ -464,6 +599,11 @@ export async function refreshBalance(accountId: number) {
   // S5d 范围说明（用户确认）：API-key 遥测**只用于没有 session 的通道**
   // （见上方 isApiKeyConnection 分支）。session 侧本就是账号钱包的权威来源，
   // 再额外发 2–3 个上游请求只为拿诊断信息不划算，故此处不做任何 key 侧调用。
+  // F8：成功证据并进本次 extra_config 写入，避免再单独读写一次库。
+  const nextExtraConfigWithEvidence = setBalanceEvidenceInExtraConfig(nextExtraConfig, {
+    status: 'known',
+    source: 'session',
+  });
   const updates: Record<string, unknown> = {
     balance: balanceInfo.balance,
     balanceUsed: balanceInfo.used,
@@ -471,10 +611,8 @@ export async function refreshBalance(accountId: number) {
     status: account.status === 'expired' ? 'active' : account.status,
     lastBalanceRefresh: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    extraConfig: nextExtraConfigWithEvidence,
   };
-  if (nextExtraConfig !== account.extraConfig) {
-    updates.extraConfig = nextExtraConfig;
-  }
 
   await db.update(schema.accounts)
     .set(updates)

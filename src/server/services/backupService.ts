@@ -787,6 +787,9 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       postRefreshProbeModel: '',
       postRefreshProbeScope: 'single',
       postRefreshProbeLatencyThresholdMs: 0,
+      // F8 第 3 期新增列：旧备份里没有这两个键，导入时按默认值补齐
+      excludeFromTotalBalance: false,
+      balanceCapability: null,
       createdAt: input.createdAt,
       updatedAt: input.updatedAt,
     });
@@ -1034,6 +1037,8 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         postRefreshProbeModel: '',
         postRefreshProbeScope: 'single',
         postRefreshProbeLatencyThresholdMs: 0,
+        excludeFromTotalBalance: false,
+        balanceCapability: null,
         createdAt: toIsoString(item.created_at),
         updatedAt: toIsoString(item.updated_at),
       });
@@ -1638,6 +1643,8 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         postRefreshProbeModel: row.postRefreshProbeModel ?? '',
         postRefreshProbeScope: (row.postRefreshProbeScope === 'all' ? 'all' : 'single') as 'single' | 'all',
         postRefreshProbeLatencyThresholdMs: row.postRefreshProbeLatencyThresholdMs ?? 0,
+        excludeFromTotalBalance: row.excludeFromTotalBalance ?? false,
+        balanceCapability: row.balanceCapability ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       }).run();

@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { and, like, desc, eq, or } from 'drizzle-orm';
 import { getProxyLogBaseSelectFields } from '../../services/proxyLogStore.js';
-import { getCredentialModeFromExtraConfig, supportsDirectAccountRoutingConnection } from '../../services/accountExtraConfig.js';
+import { getCredentialModeFromExtraConfig, supportsDirectAccountRoutingConnection, getBalanceEvidenceFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from '../../services/accountTokenService.js';
 
 function hasSessionTokenValue(value: string | null | undefined): boolean {
@@ -79,6 +79,9 @@ export async function searchRoutes(app: FastifyInstance) {
     const accounts = [...new Map([...accountResults, ...apiKeyAccountResults].map((r) => [r.accounts.id, ({
       ...r.accounts,
       segment: resolveAccountSearchSegment(r.accounts),
+      // F8：搜索结果也要能区分"余额 0"与"从没读到"——证据与账号列表同源，
+      // 由 extra_config 派生，不额外查库。
+      balanceEvidence: getBalanceEvidenceFromExtraConfig(r.accounts.extraConfig),
       site: r.sites,
     })])).values()].slice(0, perCategory);
 

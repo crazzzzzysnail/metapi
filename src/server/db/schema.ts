@@ -19,6 +19,9 @@ export const sites = sqliteTable('sites', {
   postRefreshProbeModel: text('post_refresh_probe_model').default(''),
   postRefreshProbeScope: text('post_refresh_probe_scope').default('single'),
   postRefreshProbeLatencyThresholdMs: integer('post_refresh_probe_latency_threshold_ms').default(0),
+  // 站点级余额策略：不计入总余额；余额能力（'auto' | 'none'，null 等价 auto）
+  excludeFromTotalBalance: integer('exclude_from_total_balance', { mode: 'boolean' }).default(false),
+  balanceCapability: text('balance_capability'),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
 }, (table) => ({

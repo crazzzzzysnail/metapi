@@ -2171,6 +2171,18 @@
           "notNull": false,
           "defaultValue": "0",
           "primaryKey": false
+        },
+        "exclude_from_total_balance": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": "false",
+          "primaryKey": false
+        },
+        "balance_capability": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

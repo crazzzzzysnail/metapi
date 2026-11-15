@@ -7,7 +7,7 @@ import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
-import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
+import { getSub2ApiSubscriptionFromExtraConfig, getBalanceEvidenceFromExtraConfig, reduceSiteBalanceAvailability } from '../../services/accountExtraConfig.js';
 import {
   parseSiteBatchPayload,
   parseSiteCreatePayload,
@@ -441,6 +441,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       siteId: schema.accounts.siteId,
       balance: schema.accounts.balance,
       extraConfig: schema.accounts.extraConfig,
+      lastBalanceRefresh: schema.accounts.lastBalanceRefresh,
     }).from(schema.accounts).all();
     // T8.9：站点列表要如实展示每个站点的汇率状态（自动探测 / 手动覆盖 / 未知）。
     const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
@@ -449,27 +450,71 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     const totalBalanceBySiteId: Record<number, number> = {};
     const subscriptionBySiteId: Record<number, SiteSubscriptionAggregate | undefined> = {};
+    // F8 第 1 期：汇总余额之外还要给出"这个总额到底读没读到过"。
+    // 站点行只带 balance 数字，证据在每条连接的 extra_config 里，故在此逐行归并。
+    const balanceEvidenceBySiteId: Record<number, Array<ReturnType<typeof getBalanceEvidenceFromExtraConfig>>> = {};
+    // 无限配额要单独成态（F8 四态里的"不适用"）：归并函数只返回一个状态，
+    // 站点级拿不到"哪些连接是无限配额"，界面就会把 ∞ 和 — 画成同一个破折号。
+    const unlimitedQuotaBySiteId: Record<number, boolean> = {};
+    // 成功时间戳是最硬的"读到过"证据：有些连接（订阅式站点的副号）余额真的存在，
+    // 但从不走余额刷新，只凭证据字段会被判成没读到。
+    const balanceReadBySiteId: Record<number, boolean> = {};
     for (const row of accountRows) {
       totalBalanceBySiteId[row.siteId] = roundMetric((totalBalanceBySiteId[row.siteId] || 0) + Number(row.balance || 0));
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
+      const evidence = getBalanceEvidenceFromExtraConfig(row.extraConfig);
+      const evidenceList = balanceEvidenceBySiteId[row.siteId] || (balanceEvidenceBySiteId[row.siteId] = []);
+      evidenceList.push(evidence);
+      if (evidence?.status === 'not-applicable' && evidence.reason === 'unlimited-quota') {
+        unlimitedQuotaBySiteId[row.siteId] = true;
+      }
+      if (row.lastBalanceRefresh) balanceReadBySiteId[row.siteId] = true;
     }
 
-    return siteRowsWithApiEndpoints.map((site) => ({
-      ...site,
-      totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
-      subscriptionSummary: subscriptionBySiteId[site.id] || null,
-      billingProfile: (() => {
-        const p = billingProfileBySiteId[site.id];
-        if (!p) return { cnyPerUsd: null, rateSource: null, quotaPerUnit: null, quotaSource: null, capturedAt: null };
-        return {
-          cnyPerUsd: p.cnyPerUsd ?? null,
-          rateSource: p.rateSource ?? null,
-          quotaPerUnit: p.quotaPerUnit ?? null,
-          quotaSource: p.quotaSource ?? null,
-          capturedAt: p.capturedAt ?? null,
-        };
-      })(),
-    }));
+    // attachSiteApiEndpoints 属于泛型包装，返回类型里丢了业务列的推断，这里单独取一份
+    const balanceCapabilityBySiteId = new Map(siteRows.map((row) => [row.id, row.balanceCapability ?? null]));
+
+    return siteRowsWithApiEndpoints.map((site) => {
+      // F8 第 3 期：用户把站点标成"没有余额接口"时，结论最硬——直接判不适用，
+      // 不再看连接证据（证据可能还是上次失败时留下的 unavailable）。
+      const siteBalanceCapability = balanceCapabilityBySiteId.get(site.id) ?? null;
+      const siteAvailability = siteBalanceCapability === 'none'
+        ? 'not-applicable'
+        : balanceReadBySiteId[site.id]
+          ? 'known'
+          : reduceSiteBalanceAvailability(balanceEvidenceBySiteId[site.id] || []);
+      // 只有"确实不可得"才带原因，供前端挂 tooltip；读得到或完全没证据时保持 null，不猜。
+      const siteAvailabilityReason =
+        siteBalanceCapability === 'none'
+          ? null
+          : siteAvailability === 'unavailable' || siteAvailability === 'not-applicable'
+            ? (balanceEvidenceBySiteId[site.id] || [])
+                .map((evidence) => evidence?.reason)
+                .find((reason): reason is NonNullable<typeof reason> => typeof reason === 'string' && reason.length > 0) || null
+            : null;
+      return {
+        ...site,
+        totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
+        // 'unknown' 表示这个站点下一条连接都没有（或全是存量老数据），前端据此回落推断链
+        balanceAvailability: siteAvailability,
+        balanceAvailabilityReason: siteAvailabilityReason,
+        // F8：站点下任一连接是无限配额 → 余额格画 ∞ 而不是 —。
+        // 只在"确实读不到数字"时生效，否则会把已有余额盖成无限符号。
+        balanceUnlimitedQuota: !!unlimitedQuotaBySiteId[site.id] && siteAvailability !== 'known',
+        subscriptionSummary: subscriptionBySiteId[site.id] || null,
+        billingProfile: (() => {
+          const p = billingProfileBySiteId[site.id];
+          if (!p) return { cnyPerUsd: null, rateSource: null, quotaPerUnit: null, quotaSource: null, capturedAt: null };
+          return {
+            cnyPerUsd: p.cnyPerUsd ?? null,
+            rateSource: p.rateSource ?? null,
+            quotaPerUnit: p.quotaPerUnit ?? null,
+            quotaSource: p.quotaSource ?? null,
+            capturedAt: p.capturedAt ?? null,
+          };
+        })(),
+      };
+    });
   });
 
   // T8.10：计费参数（汇率/标尺）的人工维护与重新探测
@@ -516,6 +561,70 @@ export async function sitesRoutes(app: FastifyInstance) {
       quotaPerUnit: readOverride('quotaPerUnit'),
     });
     return { success: true, profile };
+  });
+
+  // F8 第 3 期：站点级余额策略（是否计入总余额、该站是否压根没有余额接口）。
+  app.post<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/balance-capability', async (request, reply) => {
+    const id = parseInt(request.params.id);
+    if (Number.isNaN(id)) return reply.code(400).send({ success: false, message: '无效的站点 ID' });
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    if (!site) return reply.code(404).send({ success: false, message: '站点不存在' });
+
+    const body = (request.body || {}) as Record<string, unknown>;
+    const updates: { excludeFromTotalBalance?: boolean; balanceCapability?: string | null } = {};
+
+    if (Object.prototype.hasOwnProperty.call(body, 'excludeFromTotalBalance')) {
+      const raw = body.excludeFromTotalBalance;
+      // 只认真正的布尔与 0/1，别的（"true" 字符串之类）宁可报错也不猜
+      const normalized = typeof raw === 'boolean' ? raw : (raw === 0 || raw === 1 ? raw === 1 : null);
+      if (normalized === null) {
+        return reply.code(400).send({ success: false, message: '排除标记格式无效，应为布尔值' });
+      }
+      updates.excludeFromTotalBalance = normalized;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, 'balanceCapability')) {
+      const raw = body.balanceCapability;
+      if (raw === null || raw === '') {
+        updates.balanceCapability = null;
+      } else {
+        const normalized = String(raw).trim().toLowerCase();
+        if (normalized !== 'auto' && normalized !== 'none') {
+          return reply.code(400).send({ success: false, message: '余额能力取值无效，应为 auto 或 none' });
+        }
+        updates.balanceCapability = normalized === 'auto' ? null : 'none';
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return reply.code(400).send({ success: false, message: '未提供任何需要修改的字段' });
+    }
+
+    await db.update(schema.sites)
+      .set({ ...updates, updatedAt: new Date().toISOString() })
+      .where(eq(schema.sites.id, id))
+      .run();
+
+    // 排除标记会改仪表盘合计、余额能力会改账号证据，两边快照都得失效
+    const { clearSnapshotCache } = await import('../../services/snapshotCacheService.js');
+    const { deleteAdminSnapshotsByNamespace } = await import('../../services/adminSnapshotStore.js');
+    // 内存与落库两份都要清：readSnapshotCache 内存未命中会把库里旧快照读回来复用，
+    // 只清内存的话保存后页面仍显示旧合计。
+    for (const namespace of ['accounts-snapshot', 'dashboard-summary', 'dashboard-insights', 'site-stats']) {
+      clearSnapshotCache(namespace);
+      await deleteAdminSnapshotsByNamespace(namespace);
+    }
+    invalidateSiteCaches();
+
+    const updated = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    return {
+      success: true,
+      site: {
+        id: updated?.id,
+        excludeFromTotalBalance: !!updated?.excludeFromTotalBalance,
+        balanceCapability: updated?.balanceCapability ?? null,
+      },
+    };
   });
 
   // Add a site

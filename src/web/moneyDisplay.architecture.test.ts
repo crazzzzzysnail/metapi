@@ -164,3 +164,66 @@ describe('余额格式化必须显式传币种', () => {
     expect(SINGLE_ARG_BALANCE.test('formatBalance(balance * rate, "CNY", 1)')).toBe(false);
   });
 });
+
+/**
+ * 余额格必须经 formatBalanceOrDash（F8，2026-11-13）。
+ *
+ * 防的是回归：`accounts.balance` 有 schema 默认 0，"从来没读到"与"余额确实是 0"
+ * 在数字上完全一样。这两页的余额格改成三态（`—` / `∞` / 数字）后，只要有人
+ * 图省事改回 `formatBalanceInline(a.balance, …)`，`$0.00` 就会重新冒出来，
+ * 而且类型检查与渲染测试都发现不了。
+ *
+ * 为什么只查这两个文件：其余页面（搜索结果、图表）没有"每行都是连接余额格"的结构，
+ * 它们该用带「汇率未知」标注的 formatBalance —— 一刀切会误伤。
+ */
+const DIRECT_BALANCE_CELL = [
+  // a.balance / props.balance / row.balance 作为**整个**首参
+  /formatBalanceInline\(\s*[\w$]+(?:\?\.|\.)balance\s*[,)]/,
+  // 直接传裸的 balance 变量
+  /formatBalanceInline\(\s*balance\s*[,)]/,
+];
+const BALANCE_CELL_FILES = ['src/web/pages/Accounts.tsx', 'src/web/pages/Sites.tsx'];
+
+describe('余额格必须经 formatBalanceOrDash 出三态', () => {
+  it('Accounts / Sites 不得对余额直接调 formatBalanceInline', () => {
+    const offenders: string[] = [];
+    for (const file of BALANCE_CELL_FILES) {
+      const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+      if (!source.includes('formatBalanceOrDash(')) {
+        offenders.push(`${file}: 未使用 formatBalanceOrDash`);
+      }
+      // 整文件匹配而不是逐行：真实调用可能换行（验证凭证弹窗就是四行写法）
+      for (const re of DIRECT_BALANCE_CELL) {
+        const hit = source.match(re);
+        if (hit) offenders.push(`${file}: ${hit[0].replace(/\s+/g, ' ').slice(0, 100)}`);
+      }
+    }
+    expect(offenders.join('\n')).toBe('');
+  });
+
+  it('检测器用真实代码形状自证（含反例）', () => {
+    const blocked = [
+      'formatBalanceInline(a.balance, currency, accountRate)',
+      'formatBalanceInline(props.balance, currency, rate)',
+      'formatBalanceInline(row?.balance, currency, rate)',
+      'formatBalanceInline(balance, currency, rate)',
+      // 真实的多行写法
+      '{formatBalanceInline(\n  props.balance,\n  currency,\n  rate,\n)}',
+    ];
+    for (const sample of blocked) {
+      expect(DIRECT_BALANCE_CELL.some((re) => re.test(sample))).toBe(true);
+    }
+    const allowed = [
+      'formatBalanceOrDash(a.balance, { currency, neverRead: balanceNeverRead })',
+      // 同页的其它金额列：已用/今日奖励/今日消耗不是余额格，不受这条约束
+      'formatBalanceInline(a.balanceUsed, currency, accountRate)',
+      'formatBalanceInline(a.todayReward, currency, accountRate)',
+      'formatBalanceInline(a.todaySpend, currency, accountRate)',
+      // 验证凭证弹窗读的是刚探测回来的实时值，不存在"从没读到"，保留内联写法
+      'formatBalanceInline(\n  verifyResult.balance.balance,\n  currency,\n  getSiteRate(tokenForm.siteId),\n)',
+    ];
+    for (const sample of allowed) {
+      expect(DIRECT_BALANCE_CELL.some((re) => re.test(sample))).toBe(false);
+    }
+  });
+});

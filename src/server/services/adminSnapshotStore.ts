@@ -108,6 +108,19 @@ export async function deleteExpiredAdminSnapshots(beforeIso?: string) {
     .run();
 }
 
+/**
+ * 按命名空间清掉落库的快照。
+ *
+ * 只清内存缓存不够：`readSnapshotCache` 在内存无条目时会把库里那份读回来并复用，
+ * 于是"保存成功但页面还是旧数字"，看起来像没生效。进程重启后库里那份同样还在。
+ */
+export async function deleteAdminSnapshotsByNamespace(namespace: string) {
+  await db
+    .delete(schema.adminSnapshots)
+    .where(eq(schema.adminSnapshots.namespace, namespace))
+    .run();
+}
+
 export function createAdminSnapshotPersistence<T>(
   identity: AdminSnapshotIdentity,
 ): SnapshotPersistenceAdapter<T> {

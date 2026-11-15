@@ -21,11 +21,12 @@ import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { buildSiteFocusPath, clearFocusParams, readFocusSiteId, readPendingSiteIds, readSiteEditorIntent } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
-import { formatBalanceInline, type DisplayCurrency } from '../numberFormat.js';
+import { formatBalanceInline, formatBalanceOrDash, type DisplayCurrency } from '../numberFormat.js';
 import { useCurrency } from '../currencyContext.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
+import { balanceUnavailableHint } from './helpers/balanceAvailability.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   buildSiteSaveAction,
@@ -70,6 +71,16 @@ type SiteRow = {
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
+  /** F8：汇总余额的可得性（由该站点各连接证据归并而来）。 */
+  balanceAvailability?: 'known' | 'unavailable' | 'not-applicable' | 'unknown';
+  /** 不可得时的原因码，仅供余额格的 tooltip 使用。 */
+  balanceAvailabilityReason?: string | null;
+  /** F8：该站点存在无限配额连接（余额格画 ∞）。 */
+  balanceUnlimitedQuota?: boolean;
+  /** F8 第 3 期：该站点是否整体不计入总余额合计。 */
+  excludeFromTotalBalance?: boolean;
+  /** F8 第 3 期：'none' 表示该站点压根没有余额接口（null 等价 auto）。 */
+  balanceCapability?: string | null;
   /** S6 / T8.9：站点计费档案（汇率/标尺及其来源）。缺省表示从未探测。 */
   billingProfile?: {
     cnyPerUsd: number | null;
@@ -162,6 +173,8 @@ function formatUsd(
   // 再缀「（汇率未知）」会让整列被重复文字淹没（用户实测反馈）。
   return formatBalanceInline(value, currency, rate);
 }
+
+// F8：破折号占位符已收进 numberFormat.formatBalanceOrDash，本页不再单独定义。
 
 function resolveSiteCreatedSessionLabel(platform?: string | null): string {
   const normalized = String(platform || '').trim().toLowerCase();
@@ -263,6 +276,12 @@ function SiteBalanceDisplay(props: {
   summary?: SiteSubscriptionSummary | null;
   /** 站点行自带的汇率；禁用站点不在 context 的活跃集里，只能从这里取。 */
   rowRate?: number | null;
+  /** F8：服务端归并出的余额可得性；'unknown'/缺省表示无法判定，按原样显示数字。 */
+  balanceAvailability?: 'known' | 'unavailable' | 'not-applicable' | 'unknown';
+  /** 不可得时的原因码（服务端给），只用于 tooltip 说明，不进正文。 */
+  balanceAvailabilityReason?: string | null;
+  /** F8：无限配额 → ∞；与连接管理页的 isUnlimitedQuota 同一语义。 */
+  balanceUnlimitedQuota?: boolean;
   align?: 'start' | 'end';
 }) {
   const { currency, getSiteRate } = useCurrency();
@@ -270,7 +289,28 @@ function SiteBalanceDisplay(props: {
   const explicitRate = Number(rowRate);
   // 优先用行数据（覆盖禁用站点），其次回落到 context 的活跃站点汇率表。
   const rate = Number.isFinite(explicitRate) && explicitRate > 0 ? explicitRate : getSiteRate(siteId);
-  const walletBalanceText = formatUsd(balance, currency, rate);
+  // F8 第 1 期：服务端说"这个站点一条余额都没读到过"时才出占位符。
+  // 两个约束与连接管理页保持一致：availability 为 'known'（读到过）就显示数字；
+  // 金额非零就显示数字 —— 非零说明有旁路写过真实余额，藏起来比显示稍旧的值更糟。
+  const unlimitedBalance = !!props.balanceUnlimitedQuota;
+  const neverReadBalance = !unlimitedBalance
+    && props.balanceAvailability !== 'known'
+    && !(Number(balance) > 0);
+  // 与连接管理页共用同一个出口：占位符判定（含"非零一律照常显示"）只在 numberFormat 里写一次
+  const walletBalanceText = formatBalanceOrDash(balance, {
+    currency,
+    cnyPerUsd: rate,
+    neverRead: neverReadBalance,
+    unlimited: unlimitedBalance,
+  });
+  // 破折号必须能自解释，否则用户只知道"没数字"。原因只挂 tooltip（F6 约定：不进正文）。
+  // 文案表与连接管理页同源（balanceAvailability.ts 的 balanceUnavailableHint）：
+  // 两处各写一份 reason → 中文的映射迟早分叉，故按同一形状造证据对象后复用那个出口。
+  const neverReadHint = neverReadBalance
+    ? balanceUnavailableHint({
+        balanceEvidence: { status: props.balanceAvailability ?? null, reason: props.balanceAvailabilityReason ?? null },
+      })
+    : unlimitedBalance ? tr('无限配额，不受额度约束') : null;
   const subscriptionValue = buildSubscriptionInlineValue(summary, currency, rate);
   const tooltip = buildSubscriptionTooltip(summary, currency, rate);
 
@@ -278,7 +318,7 @@ function SiteBalanceDisplay(props: {
     <div
       className={`site-balance-inline ${align === 'end' ? 'align-end' : ''}`.trim()}
     >
-      <span className="site-balance-primary">{walletBalanceText}</span>
+      <span className="site-balance-primary" title={neverReadHint || undefined}>{walletBalanceText}</span>
       {subscriptionValue ? (
         <>
           <span className="site-balance-divider">/</span>
@@ -366,6 +406,8 @@ export default function Sites() {
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
+  const [togglingBalanceSiteId, setTogglingBalanceSiteId] = useState<number | null>(null);
+  const [togglingBalanceCapabilitySiteId, setTogglingBalanceCapabilitySiteId] = useState<number | null>(null);
   const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
   const [createdSiteForChoice, setCreatedSiteForChoice] = useState<{
@@ -1418,6 +1460,50 @@ export default function Sites() {
       toast.error(e.message || '切换置顶失败');
     } finally {
       setPinningSiteId(null);
+    }
+  };
+
+  /**
+   * F8 第 3 期：切换"不计入总余额"。站点级开关，影响仪表盘合计口径；
+   * 保存后重新拉列表，让行内徽标与合计提示一起刷新。
+   */
+  const handleToggleExcludeBalance = async (site: SiteRow) => {
+    const nextExclude = !site.excludeFromTotalBalance;
+    setTogglingBalanceSiteId(site.id);
+    try {
+      await api.saveSiteBalanceCapability(site.id, { excludeFromTotalBalance: nextExclude });
+      toast.success(
+        nextExclude
+          ? `站点 "${site.name}" 已不计入总余额`
+          : `站点 "${site.name}" 已恢复计入总余额`,
+      );
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || tr('切换余额合计口径失败'));
+    } finally {
+      setTogglingBalanceSiteId(null);
+    }
+  };
+
+  /**
+   * F8 第 3 期：切换"无需余额数据"。标记后该站点的余额刷新直接跳过（不打上游），
+   * 余额列按"不适用"显示 —。设计文档定的是"取值留给用户手改"，这里给它一个入口。
+   */
+  const handleToggleBalanceCapability = async (site: SiteRow) => {
+    const nextCapability = site.balanceCapability === 'none' ? 'auto' : 'none';
+    setTogglingBalanceCapabilitySiteId(site.id);
+    try {
+      await api.saveSiteBalanceCapability(site.id, { balanceCapability: nextCapability });
+      toast.success(
+        nextCapability === 'none'
+          ? `站点 "${site.name}" 已标记为无需余额数据`
+          : `站点 "${site.name}" 已恢复余额读取`,
+      );
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || tr('切换余额能力失败'));
+    } finally {
+      setTogglingBalanceCapabilitySiteId(null);
     }
   };
 
@@ -2615,6 +2701,9 @@ export default function Sites() {
                           siteId={site.id}
                           rowRate={site.billingProfile?.cnyPerUsd}
                           balance={site.totalBalance}
+                          balanceAvailability={site.balanceAvailability}
+                          balanceAvailabilityReason={site.balanceAvailabilityReason}
+                          balanceUnlimitedQuota={site.balanceUnlimitedQuota}
                           summary={site.subscriptionSummary}
                           align="end"
                         />
@@ -2624,33 +2713,50 @@ export default function Sites() {
                     <MobileField
                       label="汇率"
                       value={(() => {
+                        // F8 第 3 期：站点被标记为"没有余额接口"时，汇率徽标旁补一枚说明，
+                        // 否则用户看到余额列永远是 —，会误以为汇率没生效。
+                        const noBalanceCapability = site.balanceCapability === 'none' ? (
+                          <span
+                            className="badge badge-muted"
+                            style={{ fontSize: 11, marginLeft: 6 }}
+                            title={tr('该站点无需余额数据')}
+                          >
+                            {tr('无需余额数据')}
+                          </span>
+                        ) : null;
                         const rate = Number(site.billingProfile?.cnyPerUsd);
                         if (Number.isFinite(rate) && rate > 0) {
                           // F7：与桌面表格一致，已知汇率也可点，直达汇率输入框。
                           const source = String(site.billingProfile?.rateSource || '');
                           return (
-                            <button
-                              type="button"
-                              className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
-                              style={{ fontSize: 11, cursor: 'pointer' }}
-                              title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
-                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
-                            >
-                              {`¥${rate}${source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
+                                style={{ fontSize: 11, cursor: 'pointer' }}
+                                title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                                onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                              >
+                                {`¥${rate}${source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}
+                              </button>
+                              {noBalanceCapability}
+                            </>
                           );
                         }
                         // F4：移动端同样可点击直达汇率输入框，与桌面表格保持一致口径。
                         return (
-                          <button
-                            type="button"
-                            className="badge badge-warning billing-rate-badge"
-                            style={{ fontSize: 11, cursor: 'pointer' }}
-                            title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
-                            onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
-                          >
-                            {tr('汇率未知')}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="badge badge-warning billing-rate-badge"
+                              style={{ fontSize: 11, cursor: 'pointer' }}
+                              title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                            >
+                              {tr('汇率未知')}
+                            </button>
+                            {noBalanceCapability}
+                          </>
                         );
                       })()}
                     />
@@ -2747,6 +2853,21 @@ export default function Sites() {
                             className={`btn btn-link ${site.isPinned ? 'btn-link-warning' : 'btn-link-primary'}`}
                           >
                             {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
+                          </button>
+                          <button
+                            onClick={() => handleToggleExcludeBalance(site)}
+                            disabled={togglingBalanceSiteId === site.id}
+                            className={`btn btn-link ${site.excludeFromTotalBalance ? 'btn-link-warning' : 'btn-link-muted'}`}
+                          >
+                            {togglingBalanceSiteId === site.id ? <span className="spinner spinner-sm" /> : tr(site.excludeFromTotalBalance ? '计入总余额' : '不计入总余额')}
+                          </button>
+                          <button
+                            onClick={() => handleToggleBalanceCapability(site)}
+                            disabled={togglingBalanceCapabilitySiteId === site.id}
+                            className={`btn btn-link ${site.balanceCapability === 'none' ? 'btn-link-warning' : 'btn-link-muted'}`}
+                            title={tr('该站点无需余额数据')}
+                          >
+                            {togglingBalanceCapabilitySiteId === site.id ? <span className="spinner spinner-sm" /> : tr(site.balanceCapability === 'none' ? '恢复余额读取' : '无需余额数据')}
                           </button>
                           {sortMode === 'custom' && (
                             <>
@@ -2878,6 +2999,9 @@ export default function Sites() {
                         siteId={site.id}
                         rowRate={site.billingProfile?.cnyPerUsd}
                         balance={site.totalBalance}
+                        balanceAvailability={site.balanceAvailability}
+                        balanceAvailabilityReason={site.balanceAvailabilityReason}
+                        balanceUnlimitedQuota={site.balanceUnlimitedQuota}
                         summary={site.subscriptionSummary}
                       />
                     </td>
@@ -2887,20 +3011,33 @@ export default function Sites() {
                         const profile = site.billingProfile;
                         const rate = Number(profile?.cnyPerUsd);
                         const known = Number.isFinite(rate) && rate > 0;
+                        // F8 第 3 期：标记了"没有余额接口"的站点，在汇率徽标后补一枚说明。
+                        const noBalanceCapability = site.balanceCapability === 'none' ? (
+                          <span
+                            className="badge badge-muted"
+                            style={{ fontSize: 11, marginLeft: 6 }}
+                            title={tr('该站点无需余额数据')}
+                          >
+                            {tr('无需余额数据')}
+                          </span>
+                        ) : null;
                         if (!known) {
                           // F4：badge 改成按钮，点击直达编辑弹窗的汇率输入框。
                           // 用原生 title（与顶栏同一套约定），不用 data-tooltip——后者在
                           // App.topbar-tooltips.test 里被明确限制，且长文案分段要靠真 DOM 弹层。
                           return (
-                            <button
-                              type="button"
-                              className="badge badge-warning billing-rate-badge"
-                              style={{ fontSize: 11, cursor: 'pointer' }}
-                              title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
-                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
-                            >
-                              {tr('汇率未知')}
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className="badge badge-warning billing-rate-badge"
+                                style={{ fontSize: 11, cursor: 'pointer' }}
+                                title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                                onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                              >
+                                {tr('汇率未知')}
+                              </button>
+                              {noBalanceCapability}
+                            </>
                           );
                         }
                         const source = String(profile?.rateSource || '');
@@ -2908,15 +3045,18 @@ export default function Sites() {
                         // 未知态本来就有这个入口，已知态却只能看不能改，用户要改一个
                         // 已经探测到的汇率得先展开行、再进编辑、再展开计费参数，路径过长。
                         return (
-                          <button
-                            type="button"
-                            className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
-                            style={{ fontSize: 11, cursor: 'pointer' }}
-                            title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
-                            onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
-                          >
-                            ¥{rate}{source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
+                              style={{ fontSize: 11, cursor: 'pointer' }}
+                              title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                              onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
+                            >
+                              ¥{rate}{source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}
+                            </button>
+                            {noBalanceCapability}
+                          </>
                         );
                       })()}
                     </td>
@@ -2968,6 +3108,21 @@ export default function Sites() {
                           className={`btn btn-link ${site.isPinned ? 'btn-link-warning' : 'btn-link-primary'}`}
                         >
                           {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
+                        </button>
+                        <button
+                          onClick={() => handleToggleExcludeBalance(site)}
+                          disabled={togglingBalanceSiteId === site.id}
+                          className={`btn btn-link ${site.excludeFromTotalBalance ? 'btn-link-warning' : 'btn-link-muted'}`}
+                        >
+                          {togglingBalanceSiteId === site.id ? <span className="spinner spinner-sm" /> : tr(site.excludeFromTotalBalance ? '计入总余额' : '不计入总余额')}
+                        </button>
+                        <button
+                          onClick={() => handleToggleBalanceCapability(site)}
+                          disabled={togglingBalanceCapabilitySiteId === site.id}
+                          className={`btn btn-link ${site.balanceCapability === 'none' ? 'btn-link-warning' : 'btn-link-muted'}`}
+                          title={tr('该站点无需余额数据')}
+                        >
+                          {togglingBalanceCapabilitySiteId === site.id ? <span className="spinner spinner-sm" /> : tr(site.balanceCapability === 'none' ? '恢复余额读取' : '无需余额数据')}
                         </button>
                         {sortMode === 'custom' && (
                           <>

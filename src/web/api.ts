@@ -811,6 +811,9 @@ export const api = {
   // S6 / T8.10：站点计费参数 —— mode=probe 走上游探测，mode=manual 写用户覆盖。
   saveSiteBillingProfile: (siteId: number, data: { mode: 'probe' | 'manual'; cnyPerUsd?: number | null; quotaPerUnit?: number | null }) =>
     request(`/api/sites/${siteId}/billing-profile`, { method: "POST", body: JSON.stringify(data) }),
+  // F8 第 3 期：站点级余额策略（不计入总余额 / 该站没有余额接口）
+  saveSiteBalanceCapability: (siteId: number, data: { excludeFromTotalBalance?: boolean; balanceCapability?: 'auto' | 'none' | null }) =>
+    request(`/api/sites/${siteId}/balance-capability`, { method: "POST", body: JSON.stringify(data) }),
   updateSiteDisabledModels: (siteId: number, models: string[]) =>
     request(`/api/sites/${siteId}/disabled-models`, {
       method: "PUT",
@@ -1285,6 +1288,8 @@ export const api = {
   getCurrencyRates: () =>
     request("/api/settings/currency-rates") as Promise<{
       rates: Array<{ siteId: number; cnyPerUsd: number | null }>;
+      /** 活跃站中汇率未知的个数（服务端算好，与前端 unknownRateSiteCount 同源）。 */
+      unknownCount?: number;
       generatedAt: string;
       cacheStatus?: string;
     }>,

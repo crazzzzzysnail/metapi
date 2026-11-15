@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
-import { mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
+import { mergeAccountExtraConfig, setBalanceEvidenceInExtraConfig } from '../../services/accountExtraConfig.js';
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -96,6 +96,51 @@ describe('search routes', () => {
           accountId: account.id,
           site: expect.objectContaining({
             name: 'searchable key site',
+          }),
+        }),
+      ],
+    });
+  });
+
+  /**
+   * F8：搜索结果必须带上余额证据，前端才能区分"余额 0"与"从没读到"。
+   * 只验字段透出，不验渲染（渲染在 search-modal.results.test.tsx 里）。
+   */
+  it('returns balance evidence on account search results', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'evidence site',
+      url: 'https://evidence-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'evidence-user',
+      accessToken: 'session-sample',
+      status: 'active',
+      balance: 0,
+      extraConfig: setBalanceEvidenceInExtraConfig(null, {
+        status: 'unavailable',
+        reason: 'malformed-payload',
+        source: 'apikey-telemetry',
+      }),
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/search',
+      payload: { query: 'evidence', limit: 20 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      accounts: [
+        expect.objectContaining({
+          id: account.id,
+          balance: 0,
+          balanceEvidence: expect.objectContaining({
+            status: 'unavailable',
+            reason: 'malformed-payload',
           }),
         }),
       ],

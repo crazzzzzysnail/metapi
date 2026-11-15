@@ -5,7 +5,8 @@ import { formatDateLocal, formatDateTimeMinuteLocal } from '../pages/helpers/che
 import { buildAccountFocusPath, buildSiteFocusPath, buildTokenFocusPath } from '../pages/helpers/navigationFocus.js';
 import { useI18n } from '../i18n.js';
 import { useAnimatedVisibility } from './useAnimatedVisibility.js';
-import { formatBalance } from '../numberFormat.js';
+import { formatBalanceOrDash } from '../numberFormat.js';
+import { balanceUnavailableHint, isBalanceNeverRead, isUnlimitedQuota } from '../pages/helpers/balanceAvailability.js';
 import { useCurrency } from '../currencyContext.js';
 
 interface SiteResult {
@@ -20,6 +21,17 @@ interface AccountResult {
   status?: string | null;
   balance?: number | null;
   segment?: 'session' | 'apikey';
+  /**
+   * F8：余额可得性。搜索结果与账号列表共用 helpers/balanceAvailability 的判据，
+   * 否则同一个连接在两处会出现"一处 `—`、一处 `$0.00`"。
+   */
+  lastBalanceRefresh?: string | null;
+  balanceEvidence?: {
+    status?: string | null;
+    reason?: string | null;
+    source?: string | null;
+    capturedAt?: number | null;
+  } | null;
   /**
    * F3：后端搜索接口返回的是完整站点行（`site: r.sites`），此前这里只声明了
    * name，于是拿不到 siteId —— 而按站汇率换算必须要 id。补齐而不是靠名字反查
@@ -78,11 +90,22 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
 
   /**
    * F3：搜索结果里的账号余额按该账号所属站点的汇率换算。
-   * 汇率未知时保留美元并标注 —— 与站点页、日志同一判据，不贴 ¥ 冒充人民币。
+   * F8：从未读到的余额画 `—`（原来是 `a.balance || 0` 直接算 0，把"没读到"说成"余额为零"）。
+   * 判定与账号列表同源（helpers/balanceAvailability），这里只负责拼文本。
    */
-  const formatAccountBalance = (balance: number, siteId?: number): string =>
-    // 汇率未知时由 formatBalance 统一输出 `$X（汇率未知）`，不再各页手拼后缀。
-    formatBalance(balance, currency, getSiteRate(siteId ?? null));
+  const formatAccountBalance = (account: AccountResult): string => {
+    const balance = typeof account.balance === 'number' && Number.isFinite(account.balance) ? account.balance : 0;
+    return formatBalanceOrDash(balance, {
+      currency,
+      cnyPerUsd: getSiteRate(account.site?.id ?? null),
+      neverRead: isBalanceNeverRead(account),
+      unlimited: isUnlimitedQuota(account),
+      // 搜索结果行内没有汇率列可看，缺汇率时仍要说明"这是美元"（F6 例外场景）
+      withRateNote: true,
+    });
+  };
+  const accountBalanceHint = (account: AccountResult): string | undefined =>
+    formatAccountBalance(account) === '—' ? balanceUnavailableHint(account) : undefined;
   const presence = useAnimatedVisibility(open, 180);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult | null>(null);
@@ -238,7 +261,10 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                       {a.segment === 'apikey' ? ` · ${t('API Key 连接')}` : ''}
                       {' · '}
                       {/* F3：按该账号所属站点的汇率换算，不再硬编码 $ */}
-                      {t('余额')} {formatAccountBalance(a.balance || 0, a.site?.id)}
+                      {/* F8：从未读到的余额出 `—`（原 `a.balance || 0` 把 null 塌成 0） */}
+                      <span title={accountBalanceHint(a)}>
+                        {t('余额')} {formatAccountBalance(a)}
+                      </span>
                     </div>
                   </div>
                 </button>

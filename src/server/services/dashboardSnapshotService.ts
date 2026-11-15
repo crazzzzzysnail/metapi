@@ -24,6 +24,7 @@ import { createAdminSnapshotPersistence } from "./adminSnapshotStore.js";
 import { runUsageAggregationProjectionPass } from "./usageAggregationService.js";
 import { maxExcludedSiteCount, splitMetricBySite, summarizeByCurrency } from "./billing/currencySplit.js";
 import { listSiteCurrencyRates } from "./billing/siteBillingProfileService.js";
+import { getBalanceEvidenceFromExtraConfig, reduceSiteBalanceAvailability } from "./accountExtraConfig.js";
 
 export type DashboardSummaryPayload = {
   totalBalance: number;
@@ -34,6 +35,12 @@ export type DashboardSummaryPayload = {
   totalBalanceCny?: number;
   /** 被排除出 CNY 合计的站点数；前端必须提示，不得静默少算。 */
   balanceExcludedSiteCount?: number;
+  /**
+   * F8 第 3 期：被用户显式标记「不计入总余额」的站点数（USD/CNY 合计都已剔除）。
+   * 与 balanceExcludedSiteCount 语义不同 —— 后者是"汇率未知、算不出来"，
+   * 这里是"用户要求不算"，两者都要提示，否则合计会静默偏小。
+   */
+  balanceOptOutSiteCount?: number;
   totalUsed: number;
   todaySpend: number;
   todayReward: number;
@@ -96,7 +103,18 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     .where(eq(schema.sites.status, "active"))
     .all();
   const accounts = accountRows.map((row) => row.accounts);
-  const totalBalance = accounts.reduce(
+  // F8 第 3 期：站点被标记"不计入总余额"时，整站余额从合计里剔除（USD 与 CNY 都剔）。
+  // 与"读不到余额"不同——那是数据缺失，这是用户显式决定的统计口径，必须照办并给提示。
+  const excludedBalanceSiteIds = new Set<number>();
+  const balanceEligibleAccountRows = accountRows.filter((row) => {
+    if (row.sites.excludeFromTotalBalance) {
+      excludedBalanceSiteIds.add(row.sites.id);
+      return false;
+    }
+    return true;
+  });
+  const balanceEligibleAccounts = balanceEligibleAccountRows.map((row) => row.accounts);
+  const totalBalance = balanceEligibleAccounts.reduce(
     (sum, account) => sum + (account.balance || 0),
     0,
   );
@@ -109,17 +127,55 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     cnyRateBySiteId.set(row.siteId, Number.isFinite(rate) && rate > 0 ? rate : null);
   }
   const balanceBySiteForCurrency = new Map<number, number>();
-  for (const row of accountRows) {
+  for (const row of balanceEligibleAccountRows) {
     balanceBySiteForCurrency.set(
       row.sites.id,
       (balanceBySiteForCurrency.get(row.sites.id) || 0) + (row.accounts.balance || 0),
     );
   }
+  // F8：余额「从未读到」的站点也要进 CNY 排除集，理由与缺汇率同构（R7）。
+  // accounts.balance 有 schema 默认 0，一条从没刷新成功的连接在这里贡献的是 0 美元，
+  // 换算成人民币同样贡献 0 —— 数字上无害，但总额会"看起来正常地偏小"而没有任何说明。
+  // 判据与 /api/sites 的 balanceAvailability 完全一致（时间戳最硬 → 证据归并），
+  // 两处若口径不同，站点页会说"读不到"而仪表盘不说。
+  const balanceReadSites = new Set<number>();
+  const balanceEvidenceBySiteId = new Map<number, Array<ReturnType<typeof getBalanceEvidenceFromExtraConfig>>>();
+  for (const row of balanceEligibleAccountRows) {
+    if (row.accounts.lastBalanceRefresh) {
+      balanceReadSites.add(row.sites.id);
+      continue;
+    }
+    const list = balanceEvidenceBySiteId.get(row.sites.id) || [];
+    list.push(getBalanceEvidenceFromExtraConfig(row.accounts.extraConfig));
+    balanceEvidenceBySiteId.set(row.sites.id, list);
+  }
+  const balanceUnreadSiteIds = new Set<number>();
+  for (const siteId of balanceBySiteForCurrency.keys()) {
+    if (balanceReadSites.has(siteId)) continue;
+    const availability = reduceSiteBalanceAvailability(balanceEvidenceBySiteId.get(siteId) || []);
+    // 只排除**有明确 unavailable 证据**的站点。三种状态各有归属，不能一把抓：
+    // - 'known'          → 读到了（上面 balanceReadSites 已拦，或归并结果为 known）
+    // - 'unavailable'    → 确认这次没读到，进排除集，让提示如实说"N 个未计入"
+    // - 'not-applicable' → 无限配额 / 无余额接口，是"这站没有余额概念"而非"总额不完整"，
+    //                      混进同一句提示会夸大问题规模
+    // - 'unknown'        → 完全没有证据（存量老数据）。它既不能证明读到过、也不能证明
+    //                      读不到，据此改合计口径会把大量正常站点误伤，界面上它们也仍然
+    //                      显示数字（formatBalanceOrDash 只在金额为 0 时出占位符）。
+    // ⚠️ 这里吃过一次教训：曾把 unknown 一并纳入排除集，于是每个从未刷新过的站都被剔出
+    // CNY，totalBalanceCny 直接归 0、提示虚增到全站 —— 而单看这一段逻辑完全"合理"，
+    // 只有把 currencySplit 的实际返回值打出来才看出来。判据收紧回只认 unavailable。
+    if (availability === 'unavailable') balanceUnreadSiteIds.add(siteId);
+  }
   const currencySplit = summarizeByCurrency(
     Array.from(balanceBySiteForCurrency.entries()).map(([siteId, usd]) => ({
       siteId,
       usd,
-      cnyPerUsd: cnyRateBySiteId.get(siteId) ?? null,
+      // 汇率未知优先；否则按余额不可得排除。
+      // ⚠️ cnyPerUsd 的类型是 number | null，而 Map.get 可能返回 undefined ——
+      // 直接写三元很容易让"读到过汇率的站点"掉进 undefined 分支，被
+      // summarizeByCurrency 当成汇率未知整批排除（且 totalBalanceCny 静默归 0）。
+      // 这里必须显式收敛成 null，不要依赖 ?? 之外的隐式兜底。
+      cnyPerUsd: balanceUnreadSiteIds.has(siteId) ? null : (cnyRateBySiteId.get(siteId) ?? null),
     })),
   );
   const activeCount = accounts.filter(
@@ -301,6 +357,8 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   // 方案 a1：四个指标各算一次排除数，UI 只取最大值提示一句「N 个站点未计入」。
   // 取最大值而不是相加：缺汇率通常就是同几个站四处都缺，相加会重复计数、
   // 反而夸大问题规模。
+  // F8 起余额这一路还包含"余额从未读到"的站点（见上方 balanceUnreadSiteIds），
+  // 与缺汇率共用同一句提示 —— 两者对用户是同一个后果：这个 CNY 总额不完整。
   const currencyExcludedSiteCount = maxExcludedSiteCount(
     currencySplit.excludedSiteCount,
     usedSplit.excludedSiteCount,
@@ -313,6 +371,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     // S6：CNY 口径与排除计数（USD 字段语义不变，两者并存供前端按开关选择）
     totalBalanceCny: currencySplit.cnyTotal,
     balanceExcludedSiteCount: currencySplit.excludedSiteCount,
+    balanceOptOutSiteCount: excludedBalanceSiteIds.size,
     totalUsed: toRoundedMicroNumber(totalUsed),
     todaySpend: toRoundedMicroNumber(todaySpend),
     todayReward: toRoundedMicroNumber(todayReward),

@@ -244,13 +244,24 @@ const CURRENCY_RATES_TTL_MS = 60_000;
 export async function getSiteCurrencyRatesSnapshot(options?: {
   forceRefresh?: boolean;
 }) {
-  return readSnapshotCache<SiteCurrencyRate[]>({
+  const snapshot = await readSnapshotCache<SiteCurrencyRate[]>({
     namespace: 'site-currency-rates',
     key: 'default',
     ttlMs: CURRENCY_RATES_TTL_MS,
     forceRefresh: options?.forceRefresh,
     loader: listSiteCurrencyRates,
   });
+  // F8：把「有多少活跃站汇率未知」在服务端算好一起返回。
+  // 这不是冗余字段 —— 前端 CurrencyContext 也数一遍（unknownRateSiteCount），
+  // 两处必须同源同值，否则仪表盘的「已排除 N 个」与顶栏提示会各说一套。
+  // 判据同样只取活跃站：listSiteCurrencyRates 已按 status='active' 过滤，
+  // 禁用站不参与任何金额合计，不该虚增提示数量。
+  const rates = snapshot.payload ?? [];
+  let unknownCount = 0;
+  for (const rate of rates) {
+    if (rate.cnyPerUsd == null) unknownCount += 1;
+  }
+  return { ...snapshot, unknownCount };
 }
 
 /**

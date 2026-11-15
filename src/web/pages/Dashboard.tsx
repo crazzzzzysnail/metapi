@@ -550,6 +550,8 @@ export default function Dashboard({
   const currencyExcludedSiteCount = dashboardCurrency === 'CNY'
     ? safeNumber(data?.currencyExcludedSiteCount || 0)
     : 0;
+  /** F8 第 3 期：用户显式标记「不计入总余额」的站点数；两种币种都提示。 */
+  const balanceOptOutSiteCount = safeNumber(data?.balanceOptOutSiteCount || 0);
   const activeAccounts = safeNumber(data?.activeAccounts);
   const totalAccounts = safeNumber(data?.totalAccounts);
   const todaySuccess = safeNumber(data?.todayCheckin?.success);
@@ -743,6 +745,25 @@ export default function Dashboard({
                   title={tr('点击查看并设置这些站点的汇率')}
                 >
                   {`${tr('已排除')} ${currencyExcludedSiteCount} ${tr('个汇率未知的站点')}`}
+                </Link>
+              ) : null}
+              {/*
+                F8 第 3 期：用户主动排除的站点同样要说明，否则合计比明细之和小会被当成 bug。
+                点击直达站点管理页，用户自己决定哪些站要计入。
+              */}
+              {balanceOptOutSiteCount > 0 ? (
+                <Link
+                  to="/sites"
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--color-text-muted)',
+                    marginTop: 2,
+                    display: 'inline-block',
+                    textDecoration: 'none',
+                  }}
+                  title={tr('在站点管理中可调整"不计入总余额"开关')}
+                >
+                  {`${tr('另有')} ${balanceOptOutSiteCount} ${tr('个站点不计入总余额')}`}
                 </Link>
               ) : null}
             </div>

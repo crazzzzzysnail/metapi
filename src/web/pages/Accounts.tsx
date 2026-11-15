@@ -12,7 +12,7 @@ import { useIsMobile } from "../components/useIsMobile.js";
 import DeleteConfirmModal from "../components/DeleteConfirmModal.js";
 import SiteBadgeLink from "../components/SiteBadgeLink.js";
 // 二-1：账号余额/已用的精度口径收敛到 numberFormat 的单一出口。
-import { formatBalanceInline, stripSymbol } from "../numberFormat.js";
+import { formatBalanceInline, formatBalanceOrDash, stripSymbol } from "../numberFormat.js";
 import { useCurrency } from "../currencyContext.js";
 import AccountModelsModal from "./accounts/AccountModelsModal.js";
 import {
@@ -31,6 +31,11 @@ import {
 } from "./helpers/navigationFocus.js";
 import { TokensPanel } from "./Tokens.js";
 import { tr } from "../i18n.js";
+import {
+  balanceUnavailableHint,
+  isBalanceNeverRead,
+  isUnlimitedQuota,
+} from "./helpers/balanceAvailability.js";
 import {
   buildCustomReorderUpdates,
   sortItemsForDisplay,
@@ -122,6 +127,10 @@ function getAccountRuntimeStatusRank(account: any): number {
   return 2;
 }
 
+// 余额可得性的三个判据（isBalanceNeverRead / balanceUnavailableHint / isUnlimitedQuota）
+// 已抽到 helpers/balanceAvailability.ts —— 搜索弹窗要复用同一套口径，
+// 两处各写一份推断迟早会分叉（一处出 `—`、一处出 `$0.00`）。
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -178,6 +187,7 @@ export default function Accounts() {
     refreshToken: "",
     tokenExpiresAt: "",
     proxyUrl: "",
+    manualBalanceUsd: "",
   });
   const [savingEdit, setSavingEdit] = useState(false);
   const [rebindTarget, setRebindTarget] = useState<any | null>(null);
@@ -1011,7 +1021,14 @@ export default function Accounts() {
 
   const openEditPanel = (account: any) => {
     const managedAuth = extractManagedSub2ApiAuth(account);
-    const proxyUrl = parseAccountExtraConfig(account)?.proxyUrl || "";
+    const parsedExtra = parseAccountExtraConfig(account);
+    const proxyUrl = parsedExtra?.proxyUrl || "";
+    // 手动余额存的是数字，输入框要字符串；null/缺省一律显示空（= 自动获取）
+    const manualBalanceUsd =
+      parsedExtra?.manualBalanceUsd === undefined ||
+      parsedExtra?.manualBalanceUsd === null
+        ? ""
+        : String(parsedExtra.manualBalanceUsd);
     closeAddPanel();
     setRebindTarget(null);
     setEditingAccount(account);
@@ -1029,6 +1046,7 @@ export default function Accounts() {
       refreshToken: managedAuth.refreshToken,
       tokenExpiresAt: managedAuth.tokenExpiresAt,
       proxyUrl,
+      manualBalanceUsd,
     });
   };
 
@@ -1056,6 +1074,7 @@ export default function Accounts() {
           ? Number.parseInt(editForm.tokenExpiresAt.trim(), 10)
           : null,
         proxyUrl: editForm.proxyUrl.trim() || null,
+        manualBalanceUsd: editForm.manualBalanceUsd.trim() || null,
       });
       toast.success("账号已更新");
       closeEditPanel();
@@ -2809,6 +2828,27 @@ export default function Accounts() {
                   覆盖站点和系统代理，留空则使用站点设置。支持 http/https/socks5
                   协议。
                 </div>
+                <input
+                  placeholder={`${tr("手动余额")}（USD，${tr("留空则自动获取")}）`}
+                  value={editForm.manualBalanceUsd}
+                  onChange={(e) =>
+                    setEditForm((prev) => ({
+                      ...prev,
+                      manualBalanceUsd: e.target.value,
+                    }))
+                  }
+                  inputMode="decimal"
+                  style={inputStyle}
+                />
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--color-text-muted)",
+                    marginTop: -4,
+                  }}
+                >
+                  {tr("上游读不到余额时，可在此填一个固定值；保存后立即生效，并停止向上游读取余额。")}
+                </div>
                 {(editingAccount?.site?.platform || "").toLowerCase() ===
                   "sub2api" && (
                   <>
@@ -2849,6 +2889,8 @@ export default function Accounts() {
                     const connectionMode = resolveAccountCredentialMode(a);
                     const health = resolveRuntimeHealth(a);
                     const accountRate = getSiteRate(a.site?.id ?? a.siteId);
+                    // 余额格按"是否读到过"决定显示数字还是 —（见 isBalanceNeverRead）
+                    const balanceNeverRead = isBalanceNeverRead(a);
                     const isExpanded = expandedAccountIds.includes(a.id);
                     const hintMessage =
                       a.status === "expired" && !capabilities.proxyOnly
@@ -2972,7 +3014,15 @@ export default function Accounts() {
                                   color: "var(--color-text-primary)",
                                 }}
                               >
-                                {formatBalanceInline(a.balance, currency, accountRate)}
+                                <span
+                                  title={
+                                    !isUnlimitedQuota(a) && balanceNeverRead && !(Number(a.balance) > 0)
+                                      ? balanceUnavailableHint(a)
+                                      : undefined
+                                  }
+                                >
+                                  {formatBalanceOrDash(a.balance, { currency, cnyPerUsd: accountRate, neverRead: balanceNeverRead, unlimited: isUnlimitedQuota(a) })}
+                                </span>
                               </div>
                               <div
                                 style={{
@@ -3222,6 +3272,8 @@ export default function Accounts() {
                       const capabilities = resolveAccountCapabilities(a);
                       const connectionMode = resolveAccountCredentialMode(a);
                       const accountRate = getSiteRate(a.site?.id ?? a.siteId);
+                      // 与移动端同一判据：余额读不到就画 —，不要报库里的默认 0
+                      const balanceNeverRead = isBalanceNeverRead(a);
                       return (
                         <tr
                           key={a.id}
@@ -3328,7 +3380,15 @@ export default function Accounts() {
                                 color: "var(--color-text-primary)",
                               }}
                             >
-                              {formatBalanceInline(a.balance, currency, accountRate)}
+                              <span
+                                title={
+                                  !isUnlimitedQuota(a) && balanceNeverRead && !(Number(a.balance) > 0)
+                                    ? balanceUnavailableHint(a)
+                                    : undefined
+                                }
+                              >
+                                {formatBalanceOrDash(a.balance, { currency, cnyPerUsd: accountRate, neverRead: balanceNeverRead, unlimited: isUnlimitedQuota(a) })}
+                              </span>
                             </div>
                             <div
                               style={{

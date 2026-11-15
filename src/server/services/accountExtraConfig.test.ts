@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildStoredSub2ApiSubscriptionSummary,
+  fallbackBalanceEvidence,
+  getBalanceEvidenceFromExtraConfig,
+  reduceSiteBalanceAvailability,
+  setBalanceEvidenceInExtraConfig,
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
   getPlatformUserIdFromExtraConfig,
@@ -9,6 +13,8 @@ import {
   resolveProxyUrlFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   getSub2ApiSubscriptionFromExtraConfig,
+  getManualBalanceUsdFromExtraConfig,
+  setManualBalanceUsdInExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
   normalizeCredentialMode,
@@ -223,5 +229,130 @@ describe('accountExtraConfig', () => {
       ],
       updatedAt: 1760000000000,
     });
+  });
+});
+
+/**
+ * F8 第 1 期：余额可得性证据。
+ *
+ * 这块的价值全在"脏数据怎么处理"上 —— 证据决定界面显不显示 `—`，
+ * 猜错等于谎报，所以每个用例都在钉住"宁可退回 unknown 也不猜"。
+ */
+describe('balance evidence', () => {
+  it('写入后能原样读回，capturedAt 缺省取当前时刻', () => {
+    const now = Date.now();
+    const next = setBalanceEvidenceInExtraConfig(null, { status: 'known', source: 'session' });
+    const evidence = getBalanceEvidenceFromExtraConfig(next);
+    expect(evidence?.status).toBe('known');
+    expect(evidence?.source).toBe('session');
+    expect(evidence?.reason).toBeNull();
+    expect(evidence?.capturedAt).toBeGreaterThanOrEqual(now - 1000);
+  });
+
+  it('保留 extra_config 里的其他字段', () => {
+    const base = JSON.stringify({ platformUserId: 42, other: 'keep-me' });
+    const next = setBalanceEvidenceInExtraConfig(base, {
+      status: 'unavailable',
+      reason: 'all-sources-failed',
+      source: 'session',
+      capturedAt: 1760000000000,
+    });
+    const parsed = JSON.parse(next);
+    expect(parsed.platformUserId).toBe(42);
+    expect(parsed.other).toBe('keep-me');
+    expect(parsed.balanceEvidence).toEqual({
+      status: 'unavailable',
+      reason: 'all-sources-failed',
+      source: 'session',
+      capturedAt: 1760000000000,
+    });
+  });
+
+  it('ISO 时间串也能归一成毫秒', () => {
+    const next = setBalanceEvidenceInExtraConfig(null, {
+      status: 'known',
+      capturedAt: '2026-11-13T00:00:00.000Z',
+    });
+    expect(getBalanceEvidenceFromExtraConfig(next)?.capturedAt).toBe(Date.parse('2026-11-13T00:00:00.000Z'));
+  });
+
+  it('非法 status / 不在白名单的 reason 一律降级，不写进库', () => {
+    const base = JSON.stringify({ keep: 1 });
+    const next = setBalanceEvidenceInExtraConfig(base, {
+      status: 'bogus' as any,
+      reason: 'not-a-real-reason' as any,
+    });
+    expect(JSON.parse(next)).toEqual({ keep: 1 });
+    expect(getBalanceEvidenceFromExtraConfig(next)).toBeNull();
+  });
+
+  it('库里是脏数据时读取返回 null，迫使调用方走推断链', () => {
+    expect(getBalanceEvidenceFromExtraConfig(JSON.stringify({ balanceEvidence: 'oops' }))).toBeNull();
+    expect(getBalanceEvidenceFromExtraConfig(JSON.stringify({ balanceEvidence: { status: 'whatever' } }))).toBeNull();
+    // 合法的 known 才算数
+    expect(
+      getBalanceEvidenceFromExtraConfig(JSON.stringify({ balanceEvidence: { status: 'known', capturedAt: 1 } }))?.status,
+    ).toBe('known');
+  });
+
+  it('站点级归并：任一连接读到过就算 known', () => {
+    expect(reduceSiteBalanceAvailability([
+      { status: 'unavailable', reason: 'all-sources-failed', source: 'session', capturedAt: 1 },
+      { status: 'known', reason: null, source: 'session', capturedAt: 2 },
+    ])).toBe('known');
+  });
+
+  it('站点级归并：全都没读到时区分"该重试"与"没这个概念"', () => {
+    // unavailable 比 not-applicable 更需要人关注，优先级更高
+    expect(reduceSiteBalanceAvailability([
+      { status: 'not-applicable', reason: 'unlimited-quota', source: 'apikey-telemetry', capturedAt: 1 },
+      { status: 'unavailable', reason: 'endpoint-unauthorized', source: 'session', capturedAt: 2 },
+    ])).toBe('unavailable');
+    expect(reduceSiteBalanceAvailability([
+      { status: 'not-applicable', reason: 'unlimited-quota', source: 'apikey-telemetry', capturedAt: 1 },
+    ])).toBe('not-applicable');
+  });
+
+  it('站点级归并：没有连接或证据缺失时是 unknown（不冒充任何结论）', () => {
+    expect(reduceSiteBalanceAvailability([])).toBe('unknown');
+    expect(reduceSiteBalanceAvailability([null, undefined])).toBe('unknown');
+    // 脏证据同样不参与判定
+    expect(reduceSiteBalanceAvailability([{ status: 'nope' } as any])).toBe('unknown');
+  });
+
+  it('fallback 与"读不到"的含义不同：它是无结论，不是不可用', () => {
+    expect(fallbackBalanceEvidence()).toEqual({
+      status: 'unknown',
+      reason: 'no-capable-source',
+      source: null,
+      capturedAt: null,
+    });
+  });
+});
+
+describe('manual balance', () => {
+  it('读写往返：数字与数字字符串都能读出，保留其他字段', () => {
+    const initial = JSON.stringify({ proxyUrl: 'http://127.0.0.1:7890' });
+    const next = setManualBalanceUsdInExtraConfig(initial, 12.5);
+    expect(getManualBalanceUsdFromExtraConfig(next)).toBe(12.5);
+    expect(JSON.parse(next).proxyUrl).toBe('http://127.0.0.1:7890');
+
+    const zero = setManualBalanceUsdInExtraConfig('{}', 0);
+    expect(getManualBalanceUsdFromExtraConfig(zero)).toBe(0);
+  });
+
+  it('清除后回到 null；负数与脏值不被当成手动值', () => {
+    const set = setManualBalanceUsdInExtraConfig('{}', 3);
+    const cleared = setManualBalanceUsdInExtraConfig(set, null);
+    expect('manualBalanceUsd' in JSON.parse(cleared)).toBe(false);
+    expect(getManualBalanceUsdFromExtraConfig(cleared)).toBe(null);
+
+    expect(getManualBalanceUsdFromExtraConfig(JSON.stringify({ manualBalanceUsd: -1 }))).toBe(null);
+    expect(getManualBalanceUsdFromExtraConfig(JSON.stringify({ manualBalanceUsd: 'abc' }))).toBe(null);
+    // 早期写入的是字符串形态，必须仍能读出（备份恢复的老数据走这条）
+    expect(getManualBalanceUsdFromExtraConfig(JSON.stringify({ manualBalanceUsd: '3.5' }))).toBe(3.5);
+    expect(getManualBalanceUsdFromExtraConfig(JSON.stringify({ manualBalanceUsd: null }))).toBe(null);
+    // 写负数属于调用方错误，保持原样且不落脏值
+    expect(getManualBalanceUsdFromExtraConfig(setManualBalanceUsdInExtraConfig('{}', -2))).toBe(null);
   });
 });
