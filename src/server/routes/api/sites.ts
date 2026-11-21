@@ -19,6 +19,7 @@ import { getSiteInitializationPreset } from '../../../shared/siteInitializationP
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
 import { probeSiteModels } from '../../services/modelService.js';
+import { normalizePerfMetricsCapabilityInput } from '../../services/perfMetricsCapability.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
   try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
@@ -571,7 +572,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!site) return reply.code(404).send({ success: false, message: '站点不存在' });
 
     const body = (request.body || {}) as Record<string, unknown>;
-    const updates: { excludeFromTotalBalance?: boolean; balanceCapability?: string | null } = {};
+    const updates: { excludeFromTotalBalance?: boolean; balanceCapability?: string | null; perfMetricsCapability?: string | null } = {};
 
     if (Object.prototype.hasOwnProperty.call(body, 'excludeFromTotalBalance')) {
       const raw = body.excludeFromTotalBalance;
@@ -594,6 +595,15 @@ export async function sitesRoutes(app: FastifyInstance) {
         }
         updates.balanceCapability = normalized === 'auto' ? null : 'none';
       }
+    }
+
+    // S2-2/3：perf-metrics 能力列守卫，复用权威纯函数（与 S2.5 探测写点同一值域判据，不各写各的）。
+    if (Object.prototype.hasOwnProperty.call(body, 'perfMetricsCapability')) {
+      const normalizedPerf = normalizePerfMetricsCapabilityInput(body.perfMetricsCapability);
+      if (!normalizedPerf.ok) {
+        return reply.code(400).send({ success: false, message: '公示指标能力取值无效，应为 public/auth/cred_invalid/none 或留空（未探测）' });
+      }
+      updates.perfMetricsCapability = normalizedPerf.value;
     }
 
     if (Object.keys(updates).length === 0) {
@@ -623,6 +633,7 @@ export async function sitesRoutes(app: FastifyInstance) {
         id: updated?.id,
         excludeFromTotalBalance: !!updated?.excludeFromTotalBalance,
         balanceCapability: updated?.balanceCapability ?? null,
+        perfMetricsCapability: updated?.perfMetricsCapability ?? null,
       },
     };
   });

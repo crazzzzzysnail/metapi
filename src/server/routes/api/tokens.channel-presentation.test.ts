@@ -3,6 +3,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+// 真函数（非工厂 mock）：billing/* 不经 modelPricingService 的 mock，故这里拿到的是
+// 展示与实扣共用的同一实现，用于"同函数同结果"直证断言。
+import { resolveBillingGroup } from '../../services/billing/billingGroupResolution.js';
+// 预热缓存是模块级单例：S4-1 用例直接往里灌详情，故每例前必须清空（防跨例污染）。
+import { storePerfDetail, __resetPerfMetricsCacheForTests } from '../../services/perfMetricsCache.js';
 
 const getCachedModelPricingCatalogMock = vi.fn();
 const refreshModelPricingCatalogMock = vi.fn();
@@ -46,6 +51,7 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
     refreshModelPricingCatalogMock.mockReset();
     refreshModelPricingCatalogMock.mockResolvedValue(null);
     resetBackgroundTasks();
+    __resetPerfMetricsCacheForTests();
 
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.routeGroupSources).run();
@@ -241,6 +247,34 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
     expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
   });
 
+  it('S1 边界：无令牌分组 + 平台不支持目录 + 目录冷 → unavailable，绝不凭空造价（移交 S2）', async () => {
+    // coarena 冷启动真实形态：platform=openai（错标，不在 PRICING_CATALOG_PLATFORMS）+ 无令牌分组 + 缓存未热。
+    // 期望：走 refreshBlockReason 分支 → unavailable『当前连接不支持计费目录』，
+    //   而不是旧的『当前令牌分组未知』，更不是给无凭据/不支持的平台凭空编一个价。
+    // 这条是判据 1 负控制的另一半：证明 S1-2 移除 bail 后，仍严守"不支持就不出价"。
+    // 目录热后（marketplace 先拉过）它才出价——该正路径已由真库实测覆盖，冷启动归宿交 S2 能力探测。
+    const seeded = await seedChannel({
+      route: { modelPattern: 'cold-openai-model' },
+      channel: { tokenId: null, sourceModel: 'cold-openai-model' },
+      token: { enabled: false, isDefault: true },
+      site: { platform: 'openai' },
+    });
+    getCachedModelPricingCatalogMock.mockReturnValue(null);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${seeded.route.id}/channels`,
+    });
+    const body = response.json() as any[];
+    expect(body[0].billing).toMatchObject({
+      status: 'unavailable',
+      message: '当前连接不支持计费目录',
+    });
+    expect(body[0].billing.message).not.toBe('当前令牌分组未知');
+    expect(body[0].billing.pricing).toBeNull();
+    expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
+  });
+
   it('treats sub2api as pricing-unsupported (T2.5)', async () => {
     // sub2api 只有订阅摘要与余额，没有任何取价端点。
     // 它此前被错列为支持定价目录，导致 UI 显示"可查目录"而结果恒为空。
@@ -290,7 +324,9 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
     expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
   });
 
-  it('does not refresh pricing when the effective token group is unknown', async () => {
+  it('S1-2：未知令牌分组不再提前 bail，改为触发目录刷新（与模型广场同路径）', async () => {
+    // 旧行为：!groupName 直接 bail "当前令牌分组未知"，连目录都不查 —— apikey 类整类的显示缺陷。
+    // 新行为：无分组等价于实扣 groupHint=null，继续走目录；缓存未命中则 refreshing，命中后按声明首档出。
     const seeded = await seedChannel({
       route: { modelPattern: 'unknown-group-model' },
       channel: { tokenId: null, sourceModel: 'unknown-group-model' },
@@ -306,11 +342,124 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as any[];
     expect(body[0].billing).toMatchObject({
-      status: 'unavailable',
-      message: '当前令牌分组未知',
+      status: 'refreshing',
+      modelName: 'unknown-group-model',
     });
-    expect(body[0].billing.refreshTaskId).toBeUndefined();
-    expect(refreshModelPricingCatalogMock).not.toHaveBeenCalled();
+    expect(body[0].billing.refreshTaskId).toEqual(expect.any(String));
+    expect(refreshModelPricingCatalogMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('S1-3 例1（coarena 形）：apikey 无令牌分组、模型只挂 default → 展示 default，且与实扣同函数同结果', async () => {
+    const seeded = await seedChannel({
+      route: { modelPattern: 'coarena-shape-model' },
+      channel: { tokenId: null, sourceModel: 'coarena-shape-model' },
+      token: { enabled: false, isDefault: true },
+    });
+    getCachedModelPricingCatalogMock.mockReturnValue({
+      models: [
+        {
+          modelName: 'coarena-shape-model',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default'],
+          groupPricing: {
+            default: { quotaType: 0, inputPerMillion: 0.5, outputPerMillion: 1 },
+          },
+        },
+      ],
+      groupRatio: { default: 0.01 },
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${seeded.route.id}/channels`,
+    });
+    const body = response.json() as any[];
+    expect(body[0].billing).toMatchObject({
+      status: 'ready',
+      groupName: 'default',
+      modelName: 'coarena-shape-model',
+    });
+    expect(body[0].billing.pricing).toMatchObject({ inputPerMillion: 0.5 });
+    // 同函数同结果直证：展示档 == 实扣 resolveBillingGroup(空 hint) 档，逐字一致。
+    expect(resolveBillingGroup({ enableGroups: ['default'] }, { default: 0.01 }, null)?.groupName).toBe('default');
+    expect(body[0].billing.groupName).toBe(
+      resolveBillingGroup({ enableGroups: ['default'] }, { default: 0.01 }, null)?.groupName,
+    );
+  });
+
+  it('S1-3 例2（siteC 形，钉死被推翻的错法）：enable_groups=[组甲,default] 且 default×2 → 展示组甲价，绝不显示 default', async () => {
+    const seeded = await seedChannel({
+      route: { modelPattern: 'sitec-shape-model' },
+      channel: { tokenId: null, sourceModel: 'sitec-shape-model' },
+      token: { enabled: false, isDefault: true },
+    });
+    getCachedModelPricingCatalogMock.mockReturnValue({
+      models: [
+        {
+          modelName: 'sitec-shape-model',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['组甲', 'default'],
+          groupPricing: {
+            组甲: { quotaType: 0, inputPerMillion: 1.2, outputPerMillion: 2.4 },
+            default: { quotaType: 0, inputPerMillion: 9.9, outputPerMillion: 9.9 },
+          },
+        },
+      ],
+      // default 倍率 ×2 是被推翻方案会误用的档；正确取声明首档 组甲。
+      groupRatio: { 组甲: 1, default: 2 },
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${seeded.route.id}/channels`,
+    });
+    const body = response.json() as any[];
+    expect(body[0].billing).toMatchObject({ status: 'ready', groupName: '组甲' });
+    expect(body[0].billing.pricing).toMatchObject({ inputPerMillion: 1.2 });
+    // 绝不显示 default×2 的价。
+    expect(body[0].billing.pricing?.inputPerMillion).not.toBe(9.9);
+    // 同函数同结果直证。
+    expect(resolveBillingGroup({ enableGroups: ['组甲', 'default'] }, { 组甲: 1, default: 2 }, null)?.groupName).toBe('组甲');
+  });
+
+  it('S1-3 例3：enableGroups 为空 → 如实保持未知分组（与实扣 line 978 同语义，绝不注入 default）', async () => {
+    const seeded = await seedChannel({
+      route: { modelPattern: 'no-declared-group-model' },
+      channel: { tokenId: null, sourceModel: 'no-declared-group-model' },
+      token: { enabled: false, isDefault: true },
+    });
+    getCachedModelPricingCatalogMock.mockReturnValue({
+      models: [
+        {
+          modelName: 'no-declared-group-model',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: [],
+          groupPricing: {},
+        },
+      ],
+      groupRatio: { default: 1 },
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/routes/${seeded.route.id}/channels`,
+    });
+    const body = response.json() as any[];
+    expect(body[0].billing).toMatchObject({ status: 'unavailable', groupName: null });
+    // 即便目录里存在 default 倍率，也绝不拿它兜底。
+    expect(resolveBillingGroup({ enableGroups: [] }, { default: 1 }, null)).toBeNull();
   });
 
   it('returns unavailable billing when the pricing catalog has no matching model', async () => {
@@ -377,6 +526,70 @@ describe('GET /api/routes/:id/channels presentation metadata', () => {
       'disabled',
       'degraded',
     ]);
+  });
+
+  it('S4-1：ready 行附 perfGroup，按计价分组同名取 groups[] 条目（含双窗+ttft）', async () => {
+    const seeded = await seedChannel({ route: { modelPattern: 'perf-group-model' }, channel: { sourceModel: 'perf-group-model' } });
+    mockCatalog('perf-group-model', 'vip');
+    // 预热缓存里放该 (site,model) 的详情：groups[] 同时有 vip 与别的档，钉"取同名那条"。
+    const siteId = seeded.site.id;
+    const now = Date.now();
+    storePerfDetail(siteId, 'perf-group-model', 24, {
+      groups: [
+        { group: 'vip', avg_tps: 77, avg_ttft_ms: 1297, avg_latency_ms: 4426, success_rate: 99.1 },
+        { group: 'other', avg_tps: 5, avg_ttft_ms: 900, avg_latency_ms: 9999, success_rate: 12 },
+      ],
+    }, now);
+    storePerfDetail(siteId, 'perf-group-model', 1, {
+      groups: [{ group: 'vip', avg_tps: 80, avg_ttft_ms: 1200, avg_latency_ms: 4200, success_rate: 100 }],
+    }, now);
+
+    const response = await app.inject({ method: 'GET', url: `/api/routes/${seeded.route.id}/channels` });
+    const body = response.json() as any[];
+    const perf = body[0].billing.perfGroup;
+    expect(body[0].billing.groupName).toBe('vip');
+    expect(perf).toBeTruthy();
+    expect(perf.state).toBe('value');
+    expect(perf.groupName).toBe('vip');
+    expect(perf.tps.value).toBe(77);
+    expect(perf.success24.value).toBe(99.1);
+    expect(perf.success1h.value).toBe(100);
+    expect(perf.ttft.value).toBe(1297);
+    // 绝不取到 other 档的值（分组名一致性优先）。
+    expect(perf.success24.value).not.toBe(12);
+    expect(perf.latency.value).not.toBe(9999);
+  });
+
+  it('S4-1：groups[] 无同名档 → perfGroup 落空态，绝不回退站级/别的分组值', async () => {
+    const seeded = await seedChannel({ route: { modelPattern: 'perf-miss-model' }, channel: { sourceModel: 'perf-miss-model' } });
+    mockCatalog('perf-miss-model', 'vip');
+    storePerfDetail(seeded.site.id, 'perf-miss-model', 24, {
+      groups: [{ group: 'gold', avg_tps: 42, avg_latency_ms: 100, success_rate: 88 }],
+    }, Date.now());
+    storePerfDetail(seeded.site.id, 'perf-miss-model', 1, {
+      groups: [{ group: 'gold', avg_tps: 42, avg_latency_ms: 100, success_rate: 88 }],
+    }, Date.now());
+
+    const response = await app.inject({ method: 'GET', url: `/api/routes/${seeded.route.id}/channels` });
+    const body = response.json() as any[];
+    const perf = body[0].billing.perfGroup;
+    expect(body[0].billing.status).toBe('ready');
+    expect(perf).toBeTruthy();
+    // 计价档是 vip，groups[] 里只有 gold → 四态空值、不是拿 gold 的值冒充。
+    expect(perf.tps.present).toBe(false);
+    expect(perf.tps.value).toBeNull();
+    expect(perf.success24.value).toBeNull();
+  });
+
+  it('S4-1：详情完全未预热 → perfGroup=null（整组不渲染，不给无数据行挂空 chip）', async () => {
+    const seeded = await seedChannel({ route: { modelPattern: 'perf-none-model' }, channel: { sourceModel: 'perf-none-model' } });
+    mockCatalog('perf-none-model', 'vip');
+    // 不调 storePerfDetail：模拟该 (site,model) 从未被预热。
+
+    const response = await app.inject({ method: 'GET', url: `/api/routes/${seeded.route.id}/channels` });
+    const body = response.json() as any[];
+    // 从未预热 = 无公示数据，null 而非"上游未公示"空 chip（后者专属"过期断供"，判据 5）。
+    expect(body[0].billing.perfGroup).toBeNull();
   });
 
   it('uses the source model when an explicit group route exposes source channels', async () => {

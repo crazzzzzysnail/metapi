@@ -51,6 +51,10 @@ import {
   stopChannelRecoveryProbeScheduler,
 } from './services/channelRecoveryProbeService.js';
 import {
+  startPerfMetricsWarmScheduler,
+  stopPerfMetricsWarmScheduler,
+} from './services/perfMetricsWarmService.js';
+import {
   startSub2ApiManagedRefreshScheduler,
   stopSub2ApiManagedRefreshScheduler,
 } from './services/sub2apiRefreshScheduler.js';
@@ -270,6 +274,7 @@ await reloadBackupWebdavScheduler();
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startChannelRecoveryProbeScheduler();
+startPerfMetricsWarmScheduler();
 startSub2ApiManagedRefreshScheduler();
 startUpdateCenterPolling();
 startUsageAggregationProjectorScheduler();
@@ -288,6 +293,7 @@ app.addHook('onClose', async () => {
   stopProxyLogRetentionService();
   stopModelAvailabilityProbeScheduler();
   stopChannelRecoveryProbeScheduler();
+  stopPerfMetricsWarmScheduler();
   await stopUsageAggregationProjectorScheduler();
   await stopAdminSnapshotWarmScheduler();
   await stopSub2ApiManagedRefreshScheduler();

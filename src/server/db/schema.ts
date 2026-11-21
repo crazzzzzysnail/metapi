@@ -22,6 +22,13 @@ export const sites = sqliteTable('sites', {
   // 站点级余额策略：不计入总余额；余额能力（'auto' | 'none'，null 等价 auto）
   excludeFromTotalBalance: integer('exclude_from_total_balance', { mode: 'boolean' }).default(false),
   balanceCapability: text('balance_capability'),
+  // perf-metrics 公示指标能力（S2，逐站实测，绝不按 platform 猜）。值域四态：
+  //   'public'       匿名 GET /api/perf-metrics/summary 即 200 可得；
+  //   'auth'         匿名 401、带 session 令牌 200（需登录）；
+  //   'cred_invalid' 带凭据仍 401·403（需登录站的会话挂了——独立信号，不是"站没这功能"）；
+  //   'none'         404，无 perf-metrics 端点（sub2api / 厂商直连）。
+  // null 等价"未探测"。界面据此决定显不显 / 要不要登录提示，见 README 2.4。
+  perfMetricsCapability: text('perf_metrics_capability'),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
 }, (table) => ({

@@ -26,6 +26,12 @@ import {
   type ModelPricingCatalog,
 } from '../../services/modelPricingService.js';
 import { isAutoGroupName } from '../../services/billing/groupNames.js';
+import { resolveBillingGroup } from '../../services/billing/billingGroupResolution.js';
+// S4-1：通道行的分组级公示快照。只读预热缓存（perfMetricsCache 纯层，不经被工厂 mock 的
+// modelPricingService，链接期安全）；渲染路径零上游请求（判据 5）。
+import { getCachedPerfDetail } from '../../services/perfMetricsCache.js';
+import { buildGroupPerfSnapshot } from '../../services/perfMetricsSnapshot.js';
+import type { PerfSnapshot } from '../../../shared/perfMetricsValue.js';
 import {
   clearRouteDecisionSnapshot,
   clearRouteDecisionSnapshots,
@@ -611,6 +617,13 @@ type RouteChannelBilling = {
   pricing: ModelGroupPricing | null;
   refreshTaskId?: string | null;
   message: string;
+  /**
+   * S4-1：本行**展示计价分组**对应的上游公示快照（分组级，含 24h/1h 双窗 + ttft）。
+   * 按 groupName 从 (siteId, model, hours) 缓存的 `groups[]` 里取同名条目；
+   * 取不到=四态空值，**绝不回退站级 model 值**（判据 3：分组名一致性优先）。
+   * 仅在 status='ready' 时有意义；其他态缺省（前端不画 chip）。
+   */
+  perfGroup?: PerfSnapshot | null;
 };
 
 /**
@@ -791,6 +804,26 @@ function startRouteChannelPricingRefresh(input: EstimateProxyCostInput): string 
   return task.id;
 }
 
+/**
+ * S4-1：按"本行展示计价分组"取分组级公示快照。
+ * 只读 (siteId, model, hours) 预热缓存的 groups[]，分组名一致性优先：
+ * 挑不到同名条目→快照层落四态空值，**绝不回退站级 model 值**（判据 3）。
+ * 渲染路径零上游请求（判据 5）。
+ */
+function resolveChannelPerfGroup(
+  siteId: number,
+  modelName: string,
+  groupName: string,
+): PerfSnapshot | null {
+  const nowMs = Date.now();
+  return buildGroupPerfSnapshot({
+    group: groupName,
+    detail24: getCachedPerfDetail(siteId, modelName, 24),
+    detail1: getCachedPerfDetail(siteId, modelName, 1),
+    nowMs,
+  });
+}
+
 function buildRouteChannelBilling(input: {
   pricingInput: EstimateProxyCostInput | null;
   effectiveGroupName: string | null;
@@ -823,16 +856,10 @@ function buildRouteChannelBilling(input: {
     });
   }
 
-  if (!groupName) {
-    return withGroup({
-      status: 'unavailable' as const,
-      groupName: null,
-      modelName,
-      pricing: null,
-      message: groupNote || '当前令牌分组未知',
-    });
-  }
-
+  // S1-2：不在这里提前 bail"未知分组"。无令牌分组（groupName=null）严格等价于实扣的
+  // groupHint=null（resolveRouteChannelGroup 只要有显式档或 auto 链路就必返非空 groupName），
+  // 故继续走目录解析（refreshing/unavailable 语义照旧），待目录命中后用与实扣同一函数
+  // resolveBillingGroup(空 hint) 解析"声明首档"。详见下方 !groupName 分支。
   const catalog = getCachedModelPricingCatalog(input.pricingInput);
   if (!catalog) {
     if (input.refreshBlockReason) {
@@ -866,6 +893,39 @@ function buildRouteChannelBilling(input: {
       modelName,
       pricing: null,
       message: '上游计费目录未提供该模型',
+    });
+  }
+
+  // S1-2：无令牌分组（apikey 类；groupName=null ⟺ 实扣 groupHint=null，等价性见上方注释）时，
+  // 与实扣**共用同一函数** resolveBillingGroup(空 hint) 解析"模型声明首档"，绝不注入 default。
+  // 判据 1（展示档与实扣同函数同结果）在此由构造保证：实扣 calculateModelUsageCost
+  // 用 catalog 同一份 groupRatio 调 resolveBillingGroup(model, groupRatio, null)，本分支逐字相同。
+  if (!groupName) {
+    const resolvedDisplay = resolveBillingGroup(model, catalog.groupRatio, null);
+    if (!resolvedDisplay?.groupName) {
+      // enableGroups 为空或全部无显式倍率 → 如实保持"未知分组"（与实扣 line 978 同语义）。
+      return withGroup({
+        status: 'unavailable' as const,
+        groupName: null,
+        modelName,
+        pricing: null,
+        message: groupNote || '令牌未标注分组，且模型未声明可用计价档',
+      });
+    }
+    const displayGroup = resolvedDisplay.groupName;
+    // 该档目录价：groupPricing 的键来自 enableGroups 声明顺序（buildModelPricingCatalogFromData），
+    // 与 resolveBillingGroup 取档同源，故大小写不敏感命中即真价；倍率明确存在才有此档（hasExplicitRatio 把关）。
+    const priceEntry = Object.entries(model.groupPricing || {}).find(
+      ([group]) => group.trim().toLowerCase() === displayGroup.trim().toLowerCase(),
+    );
+    return withGroup({
+      status: 'ready' as const,
+      groupName: displayGroup,
+      modelName,
+      pricing: priceEntry?.[1] as ModelGroupPricing ?? null,
+      message: '未绑定令牌分组，按模型声明首档计价（与实扣同源）',
+      // 展示档已定（=实扣同源档），按同名分组取分组级公示。
+      perfGroup: resolveChannelPerfGroup(input.pricingInput.site.id, modelName, displayGroup),
     });
   }
 
@@ -904,6 +964,8 @@ function buildRouteChannelBilling(input: {
         ? `来自模型广场计费缓存（链路 ${matched.map(([g]) => g).join(' → ')}，按首个命中档计价）`
         : '来自模型广场计费缓存',
     }),
+    // S4-1：按本行最终计价档（chosenGroup，与展示价逐字同源）取分组级公示。
+    perfGroup: resolveChannelPerfGroup(input.pricingInput!.site.id, modelName, chosenGroup),
   };
 }
 

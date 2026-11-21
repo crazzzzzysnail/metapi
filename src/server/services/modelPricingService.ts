@@ -4,6 +4,7 @@ import { ratioToUsdPerMillion, tokensToUsd } from './billing/quotaScale.js';
 import type { BillingMeter, BillingTier, ParsedBillingPlanV2, TierCondition, TierRates } from './billing/billingPlanV2.js';
 import { parseBillingExprV2, tierMatchesAt } from './billing/billingPlanV2.js';
 import { isAutoGroupName } from './billing/groupNames.js';
+import { resolveBillingGroup, type BillingGroupHint } from './billing/billingGroupResolution.js';
 import {
   knownPriceEvidence,
   normalizeBillingMode,
@@ -902,11 +903,10 @@ function resolveModel(modelName: string, data: PricingData): PricingModel | null
  *
  * 返回 null 表示「不知道倍率」，调用方必须走未知分支而非默认 1。
  */
-/** 本次请求的令牌分组信息（三-3）。缺省时沿用旧的"模型分组优先"启发式。 */
-export interface BillingGroupHint {
-  tokenGroup?: string | null;
-  autoGroups?: string[] | null;
-}
+// 本次请求的令牌分组信息（三-3）：定义随 resolveBillingGroup 迁到
+// billing/billingGroupResolution.js（S1-1）。顶部 import 供本文件内部使用，
+// 此处按原名重导出，保留 modelPricingService 既有对外类型契约（行为零变化）。
+export type { BillingGroupHint } from './billing/billingGroupResolution.js';
 
 /**
  * 该分组名是否是"auto"这类**没有独立倍率**的别名（三-1）。
@@ -934,63 +934,10 @@ function resolveGroupMultiplier(
   return resolveBillingGroup(model, groupRatio, hint)?.ratio ?? null;
 }
 
-/** 解析结果：倍率 + 实际命中的分组名（三-2 需要把分组名写进 billing_details）。 */
-function resolveBillingGroup(
-  model: PricingModel,
-  groupRatio: Record<string, number>,
-  hint?: BillingGroupHint | null,
-): { ratio: number; groupName: string | null } | null {
-  const groups = (model.enableGroups || [])
-    .map((group) => String(group || '').trim())
-    .filter(Boolean);
-
-  const tokenGroup = String(hint?.tokenGroup || '').trim();
-  const chain = (hint?.autoGroups ?? [])
-    .map((group) => String(group || '').trim())
-    .filter(Boolean);
-  const hasHint = Boolean(tokenGroup) || chain.length > 0;
-
-  if (hasHint) {
-    // ① 显式分组优先。auto 不是真分组（上游在 usable_group 里明确标它无效），
-    //    不能拿它去查倍率。
-    if (tokenGroup && !isAutoGroupName(tokenGroup) && groups.includes(tokenGroup)) {
-      return hasExplicitRatio(groupRatio, tokenGroup)
-        ? { ratio: groupRatio[tokenGroup]!, groupName: tokenGroup }
-        : null;
-    }
-
-    // ② 链路顺序命中：第一个模型声明了的分组。
-    for (const candidate of chain) {
-      if (!groups.includes(candidate)) continue;
-      // 模型声明了该分组却拿不到倍率：这是"已知分组但倍率未知"，不能继续往后猜。
-      return hasExplicitRatio(groupRatio, candidate)
-        ? { ratio: groupRatio[candidate]!, groupName: candidate }
-        : null;
-    }
-
-    // ③ 有令牌信息但一个都对不上：拒绝出价，绝不退到别的分组。
-    return null;
-  }
-
-  // ⚠️ 兼容路径：没有分组信息时返回 null（未知），**不再**退到 default。
-  // 实扣路径拿不到倍率就该拒绝出价，而不是猜一个 —— siteB 的 default 是 ×2，
-  // 猜测会直接导致多扣一倍。有声明则严格按声明顺序，不注入、不重排。
-  if (groups.length === 0) return null;
-
-  for (const group of groups) {
-    if (hasExplicitRatio(groupRatio, group)) {
-      return { ratio: groupRatio[group]!, groupName: group };
-    }
-  }
-
-  return null;
-}
-
-/** 分组倍率是否被显式给出（含合法的 0）。 */
-function hasExplicitRatio(groupRatio: Record<string, number>, group: string): boolean {
-  const value = groupRatio[group];
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
-}
+// resolveBillingGroup / hasExplicitRatio 已抽到 billing/billingGroupResolution.js（S1-1），
+// 展示层（tokens.ts）与实扣（本文件 resolveGroupMultiplier / calculateModelUsageCost）共用同一函数。
+// 由顶部 import 引入。本切片是 1a 纯 move，行为零变化
+// （全量 groupResolution/honesty/routing/test 全绿即为证据）。
 
 function calculatePerCallCost(
   modelPrice: number | { input: number; output: number } | null,

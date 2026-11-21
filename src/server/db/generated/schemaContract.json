@@ -2183,6 +2183,12 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "perf_metrics_capability": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

@@ -22,6 +22,10 @@ import {
 } from "../../services/backgroundTaskService.js";
 import { parseCheckinRewardAmount } from "../../services/checkinRewardParser.js";
 import { estimateRewardWithTodayIncomeFallback } from "../../services/todayIncomeRewardService.js";
+// S3-1：公示指标只读预热缓存并交 shared 权威层判值，渲染路径绝不发上游请求（判据 5）。
+import { getCachedPerfDetail, getCachedPerfSummary, requestPerfDetailWarm, runPerfWarmSweep } from "../../services/perfMetricsWarmService.js";
+import { buildGroupPerfSnapshotMap, buildModelPerfSnapshot } from "../../services/perfMetricsSnapshot.js";
+import type { PerfSnapshot } from "../../../shared/perfMetricsValue.js";
 import {
   getProxyLogBaseSelectFields,
   parseProxyLogBillingDetails,
@@ -127,6 +131,16 @@ function writeModelsMarketplaceCache(
     expiresAt: Date.now() + ttl,
     models,
   });
+}
+
+/**
+ * 测试钩子：清掉两个响应档。
+ * 先例：oauth.ts 的 resetOauthSensitiveRouteLimiterForTests（同为路由模块级状态）。
+ * perf 快照只读进程内预热缓存（perfMetricsCache），而响应缓存 TTL 达 90s——用例之间
+ * 若不清，第二个用例拿到的是第一个用例的快照，跨用例污染会伪装成"缓存生效"。
+ */
+export function resetModelsMarketplaceCacheForTests(): void {
+  modelsMarketplaceCache.clear();
 }
 
 /**
@@ -1106,6 +1120,11 @@ export async function statsRoutes(app: FastifyInstance) {
 
       if (refreshRequested) {
         modelsMarketplaceCache.clear();
+        // S2.5-6：手动刷新同时重拉公示指标热集。刻意**不等、不包进上面的任务**：
+        // - force 只跨过"新鲜期不重拉"，失败退避仍在（上游挂着时连点按钮不放请求风暴）；
+        // - 单飞靠模块级 warmSweepInFlight；调度器 5min 轮撞上来时其中一轮直接返回；
+        // - 失败只记日志：公示指标是旁路信息，绝不让模型广场刷新因它变红。
+        void runPerfWarmSweep({ force: true }).catch((e) => console.warn('[perf-warm] manual sweep failed', e));
         const { task, reused } = startBackgroundTask(
           {
             type: "model",
@@ -1247,6 +1266,17 @@ export async function statsRoutes(app: FastifyInstance) {
             quotaSource: 'auto' | 'manual' | null;
             capturedAt: string | null;
           };
+          /**
+           * S3-1：上游公示指标快照（模型级，站级数据按 Q8 每个 站点×账号 行都挂）。
+           * 数据只读 S2.5 预热缓存组装，缓存没有=未公示空态；渲染路径零上游请求。
+           */
+          perf?: PerfSnapshot | null;
+          /**
+           * S5-1：分组级公示快照（双窗成功率+首字）。键与 groupPricing 的计价分组**逐字符一致**，
+           * 缺键=该站该模型从未预热（徽章不画公示行，绝不回退站级/模型级值）。
+           * 同样只读 S2.5 预热缓存；未热但站点公示过时触发单飞后台补拉，本次响应不变。
+           */
+          groupPerf?: Record<string, PerfSnapshot | null>;
         }>;
       };
 
@@ -1295,8 +1325,16 @@ export async function statsRoutes(app: FastifyInstance) {
           }),
         );
 
+        // 同一次响应内所有快照共用一个时刻：否则逐个 Date.now() 会让临界缓存位在不同
+        // 站点行之间被判成不同 age（fresh/stale 边界抖动），L7 集合/时间判定的同款坑。
+        const perfNowMs = Date.now();
         for (const result of metadataResults) {
           if (!result.catalog) continue;
+
+          // 站点是否公示 perf-metrics：只有 public/auth 才值得触发单飞补拉。
+          // none（404 无源，sub2api/厂商直连）与未探测(null) 一律不补拉——那会白打上游。
+          const sitePerfCapable = result.site.perfMetricsCapability === 'public'
+            || result.site.perfMetricsCapability === 'auth';
 
           for (const model of result.catalog.models) {
             const key = model.modelName.toLowerCase();
@@ -1319,6 +1357,17 @@ export async function statsRoutes(app: FastifyInstance) {
               aggregate.supportedEndpointTypes.add(endpointType);
             }
 
+            // S2.5-5 / S5-1：广场翻页翻到没预热过的 (site,model) 时，触发一次单飞后台补拉
+            // 并立即返回（本次响应仍是空态）。判据 5 的结构保证：这里只 startBackgroundTask，
+            // 不 await 上游。双窗都无详情缓存才算"未热"——只缺一窗由下一轮 5min sweep 补齐。
+            // 有分组要展示才补拉：groupPricing 为空的行没有徽章，补了也没人消费（none 站更白打）。
+            const needGroupPerf = Object.keys(model.groupPricing).length > 0;
+            const perfDetail24 = getCachedPerfDetail(result.site.id, model.modelName, 24);
+            const perfDetail1 = getCachedPerfDetail(result.site.id, model.modelName, 1);
+            if (sitePerfCapable && needGroupPerf && !perfDetail24 && !perfDetail1) {
+              requestPerfDetailWarm(result.site.id, model.modelName);
+            }
+
             aggregate.pricingSources.push({
               siteId: result.site.id,
               siteName: result.site.name,
@@ -1334,6 +1383,23 @@ export async function statsRoutes(app: FastifyInstance) {
               // null 的含义是"未探测且未手动维护"，前端必须据此显示"汇率未知"，
               // 不得用任何默认汇率换算（R3 严禁伪造）。
               billingProfile: toMarketplaceBillingProfile(billingProfileBySiteId.get(result.site.id)),
+              // S3-1：只读预热缓存（summary 双窗 + 详情 24h 拿 ttft），miss/过期由快照层归空态；
+              // 绝不在这里 await 上游——判据 5 的渲染路径零同步等待。
+              perf: buildModelPerfSnapshot({
+                modelName: model.modelName,
+                summary24: getCachedPerfSummary(result.site.id, 24),
+                summary1: getCachedPerfSummary(result.site.id, 1),
+                detail24: perfDetail24,
+                nowMs: perfNowMs,
+              }),
+              // S5-1：分组级快照。键取该模型在本站的计价分组名（与 groupPricing 同源，
+              // 一致性由构造保证，不靠事后核对）；从未预热该 (site,model) 时表为空。
+              groupPerf: buildGroupPerfSnapshotMap({
+                groups: Object.keys(model.groupPricing),
+                detail24: perfDetail24,
+                detail1: perfDetail1,
+                nowMs: perfNowMs,
+              }),
             });
           }
         }

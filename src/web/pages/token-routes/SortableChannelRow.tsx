@@ -9,6 +9,8 @@ import {
 } from './tokenBindingPresentation.js';
 import { getChannelDecisionState, getPriorityTagStyle, getProbabilityColor } from './utils.js';
 import { renderGroupPricingValue, type ModelGroupPricingPresentation } from '../helpers/modelPricingPresentation.js';
+// S4-2：通道行的上游公示 chip（3 常驻 + 弹层 2）。文案/配色/tooltip 走 S0-4 共享出口。
+import { PerfChannelGroup } from '../helpers/upstreamMetricsPresentation.js';
 import { formatMoney, formatBalance as formatBalanceShared, type DisplayCurrency } from '../../numberFormat.js';
 import { useCurrency, type CurrencyContextValue } from '../../currencyContext.js';
 
@@ -242,6 +244,11 @@ function renderChannelInsightBadges(
           </span>
         ) : null}
       </span>
+      {/* S4-2：上游公示 chip 组。快照为 null（该站该模型从未预热）时整组不渲染，不给无数据行挂空 chip；
+          过期但有缓存则渲染"上游未公示"（判据 5 的诚实降级）。置于计费弹层之后，保持 .billing-badge-wrap[0]=计费。 */}
+      {billing?.status === 'ready'
+        ? <PerfChannelGroup snapshot={billing.perfGroup} suppressTooltip={suppressTooltips} />
+        : null}
     </>
   );
 }

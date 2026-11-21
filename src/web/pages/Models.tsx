@@ -13,6 +13,9 @@ import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
 import { formatAutoTierLabel, renderGroupPricingValue, type ModelGroupPricingPresentation } from './helpers/modelPricingPresentation.js';
+// S3-2：上游公示 chip 一律走 S0-4 共享出口（badge/tooltip/配色同源），页面不自行拼文案。
+import { PerfChipsSquare, formatGroupPerfBadgeText } from './helpers/upstreamMetricsPresentation.js';
+import type { PerfSnapshot } from '../../shared/perfMetricsValue.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
@@ -38,6 +41,16 @@ interface ModelPricingSource {
   groupPricing: Record<string, ModelGroupPricing>;
   /** auto 聚合链路的成员分组（T4.4）。 */
   autoGroups?: string[];
+  /**
+   * S3：该站点行的上游公示指标快照（模型级，站级数据按 Q8 每行都挂）。
+   * 后端只读 S2.5 预热缓存组装，渲染路径零上游请求；缺省=无公示数据（老数据/未探测）。
+   */
+  perf?: PerfSnapshot | null;
+  /**
+   * S5：分组级公示快照（双窗成功率）。键与 groupPricing 的计价分组逐字符一致（后端同源）；
+   * 缺键=从未预热该站该模型 → 徽章不挂公示行（空态与缺失分开，绝不回退站级值）。
+   */
+  groupPerf?: Record<string, PerfSnapshot | null>;
 }
 
 interface ModelAccountInfo {
@@ -728,14 +741,14 @@ export default function Models() {
                       <span
                         className={`badge ${getLatencyBadgeClass(m.avgLatency)}`}
                         style={{ fontVariantNumeric: 'tabular-nums' }}
-                        data-tooltip={tr('平均延迟')}
+                        data-tooltip={tr('本机测活探测上游的单次往返耗时均值')}
                       >
                         {tr('延迟')} {formatLatency(m.avgLatency)}
                       </span>
                       <span
                         className={`badge ${getSuccessBadgeClass(m.successRate)}`}
                         style={{ fontVariantNumeric: 'tabular-nums' }}
-                        data-tooltip={tr('成功率')}
+                        data-tooltip={tr('本机近7天请求成功率')}
                       >
                         {tr('成功率')} {m.successRate != null ? `${m.successRate}%` : '—'}
                       </span>
@@ -819,12 +832,30 @@ export default function Models() {
                                 <div style={{ fontSize: 12, marginBottom: 6 }}>
                                   <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
                                 </div>
+                                {/* S3-2 上游公示 5 项：走共享出口，中性色不进告警色阶；有公示数据才画 */}
+                                {source.perf && (
+                                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+                                    <PerfChipsSquare snapshot={source.perf} />
+                                  </div>
+                                )}
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                  {Object.entries(source.groupPricing).map(([group, pricing]) => (
-                                    <span key={group} className="badge badge-info">
-                                      {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
-                                    </span>
-                                  ))}
+                                  {Object.entries(source.groupPricing).map(([group, pricing]) => {
+                                    // 用户 2026-11-20 点 4：分组级双窗成功率不再内联进徽章正文，
+                                    // 改为并入徽章的悬停弹层详情（data-tooltip 单行 · 拼接，attr 不分行）。
+                                    // 数据=同份 perf-metrics 详情 groups[]，键与计价分组逐字符同源（后端构造保证）。
+                                    // 缺键（从未预热该站该模型）→ perfText=null → 不挂公示弹层，也不回退站级值。
+                                    const perfText = formatGroupPerfBadgeText(source.groupPerf?.[group]);
+                                    return (
+                                      <span
+                                        key={group}
+                                        className="badge badge-info"
+                                        data-tooltip={perfText?.tooltip}
+                                        data-group-perf={perfText ? group : undefined}
+                                      >
+                                        {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
+                                      </span>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             ))}
@@ -1018,12 +1049,27 @@ export default function Models() {
                                         <div style={{ fontSize: 12, marginBottom: 6 }}>
                                           <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
                                         </div>
+                                        {/* S3-2 上游公示 5 项：走共享出口，中性色不进告警色阶；有公示数据才画 */}
+                                        {source.perf && (
+                                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+                                            <PerfChipsSquare snapshot={source.perf} />
+                                          </div>
+                                        )}
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                          {Object.entries(source.groupPricing).map(([group, pricing]) => (
-                                            <span key={group} className="badge badge-info">
-                                              {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
-                                            </span>
-                                          ))}
+                                          {Object.entries(source.groupPricing).map(([group, pricing]) => {
+                                            // 点 4：与卡片分支同形——分组公示双窗成功率并入徽章悬停弹层（单行 · 拼接）。
+                                            const perfText = formatGroupPerfBadgeText(source.groupPerf?.[group]);
+                                            return (
+                                              <span
+                                                key={group}
+                                                className="badge badge-info"
+                                                data-tooltip={perfText?.tooltip}
+                                                data-group-perf={perfText ? group : undefined}
+                                              >
+                                                {formatAutoTierLabel(group)}: {renderGroupPricingValue(pricing, source.siteId, convertSitePrice)}
+                                              </span>
+                                            );
+                                          })}
                                         </div>
                                       </div>
                                     ))}

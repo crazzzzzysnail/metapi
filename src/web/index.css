@@ -6963,3 +6963,10 @@ textarea {
   display: flex;
   opacity: 1;
 }
+
+/* ===== 路由通道上游公示 chip 字号统一（用户 2026-11-21 点 6） =====
+   公示 chip 走 .badge 默认 12px，比同屏的计费/权重/余额 badge（inline fontSize:10）明显偏大。
+   只作用于通道公示组，不动 PerfBadge 在模型广场的同款 chip（广场仍 12px）。 */
+.perf-channel-group .badge {
+  font-size: 10px;
+}
