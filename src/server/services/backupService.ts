@@ -790,6 +790,8 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       // F8 第 3 期新增列：旧备份里没有这两个键，导入时按默认值补齐
       excludeFromTotalBalance: false,
       balanceCapability: null,
+      // S2 新增列：旧备份无此键，导入按"未探测"补齐，等下次预热重写
+      perfMetricsCapability: null,
       createdAt: input.createdAt,
       updatedAt: input.updatedAt,
     });
@@ -1039,6 +1041,8 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         postRefreshProbeLatencyThresholdMs: 0,
         excludeFromTotalBalance: false,
         balanceCapability: null,
+        // S2：旧备份无此键，按"未探测"补齐
+        perfMetricsCapability: null,
         createdAt: toIsoString(item.created_at),
         updatedAt: toIsoString(item.updated_at),
       });
@@ -1645,6 +1649,8 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         postRefreshProbeLatencyThresholdMs: row.postRefreshProbeLatencyThresholdMs ?? 0,
         excludeFromTotalBalance: row.excludeFromTotalBalance ?? false,
         balanceCapability: row.balanceCapability ?? null,
+        // S2：导出携带 perf-metrics 能力列（与 balance_capability 同构）
+        perfMetricsCapability: row.perfMetricsCapability ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       }).run();

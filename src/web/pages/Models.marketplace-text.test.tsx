@@ -784,7 +784,7 @@ describe('Models marketplace text', () => {
 
       const latencyBadge = root!.root.find((node) => (
         node.type === 'span'
-        && node.props['data-tooltip'] === '平均延迟'
+        && node.props['data-tooltip'] === '本机测活探测上游的单次往返耗时均值'
       ));
 
       expect(String(latencyBadge.props.className || '')).toContain('badge-muted');
@@ -793,6 +793,132 @@ describe('Models marketplace text', () => {
       expect(collectText(root!.root)).not.toContain('680ms');
     } finally {
       root?.unmount();
+    }
+  });
+
+  /**
+   * S5-1/S5-2 页面接线：展开态分组徽章内的**分组级**双窗成功率。
+   *
+   * 锁三件事（都是 helper 纯函数测覆盖不到的）：
+   * 1. 徽章行读的是 `source.groupPerf[group]`，按计价分组逐字符取档（不是拿站级 perf 凑）；
+   * 2. 表里缺键（该站该模型从未预热）→ 该分组徽章**不挂**公示行，计价文本照常；
+   * 3. `groupPerf` 整体缺省（旧响应/未探测）→ 页面不炸，且不出现任何公示行。
+   * 卡片与表格两处刻意同形，这里走默认的卡片分支。
+   */
+  async function renderExpandedWithGroupPerf(source: Record<string, unknown>) {
+    apiMock.getModelsMarketplace.mockResolvedValue({
+      models: [
+        {
+          name: 'gpt-4o',
+          accountCount: 1,
+          tokenCount: 0,
+          avgLatency: 500,
+          successRate: 96,
+          description: 'demo model',
+          tags: ['chat'],
+          supportedEndpointTypes: ['openai'],
+          pricingSources: [source],
+          accounts: [],
+        },
+      ],
+    });
+
+    const root = create(
+      <MemoryRouter initialEntries={['/models']}>
+        <ToastProvider>
+          <Models />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await flushMicrotasks();
+
+    const cards = root.root.findAll((node) => (
+      node.type === 'div'
+      && typeof node.props.className === 'string'
+      && node.props.className.includes('model-card')
+      && typeof node.props.onClick === 'function'
+    ));
+    expect(cards.length).toBeGreaterThan(0);
+    await act(async () => {
+      cards[0]!.props.onClick();
+    });
+    await flushMicrotasks();
+
+    const expanded = root.root.findAll((node) => (
+      node.type === 'div'
+      && typeof node.props.className === 'string'
+      && node.props.className.includes('model-card-expand')
+    ));
+    expect(expanded.length).toBe(1);
+    return {
+      root,
+      text: collectText(expanded[0]!),
+      perfNodes: root.root.findAll((node) => node.props['data-group-perf'] !== undefined),
+    };
+  }
+
+  const okCell = (value: number) => ({ value, present: true, dubious: false, emptyReason: null });
+
+  it('挂载分组级公示行：每个计价分组取自己那一档，缺键分组不挂', async () => {
+    let result!: Awaited<ReturnType<typeof renderExpandedWithGroupPerf>>;
+    try {
+      result = await renderExpandedWithGroupPerf({
+        siteId: 1,
+        siteName: '站点 A',
+        accountId: 1,
+        username: 'user-a',
+        ownerBy: null,
+        enableGroups: ['grp-codex', '组甲'],
+        groupPricing: {
+          'grp-codex': { quotaType: 0, inputPerMillion: 0.3, outputPerMillion: 1.5 },
+          '组甲': { quotaType: 0, inputPerMillion: 0.6, outputPerMillion: 2.25 },
+        },
+        // grp-codex 双窗齐；组甲=null → 从未预热，该徽章不挂公示行。
+        groupPerf: {
+          'grp-codex': {
+            state: 'value',
+            groupName: 'grp-codex',
+            capturedAt: 1790000000000,
+            success24: okCell(99.1),
+            success1h: okCell(100),
+          },
+        },
+      });
+
+      expect(result.perfNodes).toHaveLength(1);
+      expect(result.perfNodes[0]!.props['data-group-perf']).toBe('grp-codex');
+      // 点 4：分组公示不再进徽章正文，改为徽章 data-tooltip 单行 · 拼接；成功率两位小数。
+      const tip = String(result.perfNodes[0]!.props['data-tooltip']);
+      expect(tip).toContain('来源上游公示模型分组数据');
+      expect(tip).toContain('分组 grp-codex');
+      expect(tip).toContain('24h成功率 99.1%');
+      expect(tip).toContain('1h成功率 100%');
+      // 计价分组本身照常渲染（不能被公示行吞掉）。
+      expect(result.text).toContain('组甲');
+    } finally {
+      result?.root?.unmount();
+    }
+  });
+
+  it('groupPerf 缺省（旧响应/未探测）→ 不挂任何公示行且不报错', async () => {
+    let result!: Awaited<ReturnType<typeof renderExpandedWithGroupPerf>>;
+    try {
+      result = await renderExpandedWithGroupPerf({
+        siteId: 1,
+        siteName: '站点 A',
+        accountId: 1,
+        username: 'user-a',
+        ownerBy: null,
+        enableGroups: ['default'],
+        groupPricing: {
+          default: { quotaType: 0, inputPerMillion: 1, outputPerMillion: 2 },
+        },
+      });
+      expect(result.perfNodes).toHaveLength(0);
+      expect(result.text).not.toContain('上游公示');
+      expect(result.text).toContain('default');
+    } finally {
+      result?.root?.unmount();
     }
   });
 });

@@ -113,6 +113,34 @@ const zhToEn: Record<string, string> = {
   '覆盖槽位': 'Coverage Slots',
   '去重账号': 'Unique Accounts',
   '平均延迟': 'Avg Latency',
+  // S0-1 口径分列（用户 2026-11-20 再判：chip 标签裸名化，来源与窗口一律只写进 tooltip）。
+  // proxy_logs 徽章 tooltip 保留来源详情；上游公示 tooltip 见下方 KIND_META 出口。
+  '本机测活探测上游的单次往返耗时均值': 'Average single round-trip cost of local probe requests to upstream',
+  '本机近7天请求成功率': 'Success rate of local requests over the last 7 days',
+  // S0-4 上游公示出口（upstreamMetricsPresentation）固定文案。chip/tooltip 一律走该出口，
+  // 页面不得自拼（S0-5 架构测守卫）。动态部分（窗口/分组名/次数/时刻）在 tr() 之外拼接。
+  // 用户 2026-11-20 改判：chip 标签去"上游公示"前缀（来源只写进 tooltip）。
+  // 用户 2026-11-21 改判：TPS 单位移进读数（TPS 200 tok/s）、首字/平均"延迟"→"耗时"。
+  // 注意：上方既有 '平均延迟' 键服务本机 proxy_logs 的本地平均延迟（Models.tsx），与上游公示无关，保留不动。
+  'TPS': 'TPS',
+  'tok/s': 'tok/s',
+  '首字耗时': 'TTFT',
+  '平均耗时': 'Avg Latency',
+  '24h成功率': '24h Success',
+  '1h成功率': '1h Success',
+  // tooltip 来源句（按粒度分流）与附加段。
+  '来源上游公示模型24h内数据': 'Source: upstream published model data within 24h',
+  '来源上游公示模型分组数据': 'Source: upstream published model group data',
+  '分组': 'Group',
+  '吞吐数值存疑（上游 TPS 算法不稳定）': 'Throughput figure dubious (upstream TPS algorithm unstable)',
+  '数据截至': 'Data as of',
+  '数据已过期': 'Data expired',
+  '预热失败': 'warm-up failures',
+  '次': '',
+  // 空态短词（来源不再入文案，判据 1 由 perfEmptyLabel 产出）。
+  '无调用': 'No traffic',
+  '未公示': 'Not published',
+  '存疑': 'dubious',
   '共': 'Total',
   '个模型': 'models',
   '个账号': 'accounts',

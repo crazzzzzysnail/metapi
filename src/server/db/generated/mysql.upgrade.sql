@@ -1,2 +1,1 @@
-ALTER TABLE `sites` ADD COLUMN `exclude_from_total_balance` BOOLEAN DEFAULT false;
-ALTER TABLE `sites` ADD COLUMN `balance_capability` TEXT;
+ALTER TABLE `sites` ADD COLUMN `perf_metrics_capability` TEXT;

@@ -1,6 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode, RefCallback } from 'react';
 import type { BrandInfo } from '../../components/BrandIcon.js';
 import type { RouteDecision, RouteDecisionCandidate, RouteMode } from '../../../shared/tokenRouteContract.js';
+import type { PerfSnapshot } from '../../../shared/perfMetricsValue.js';
 export type { RouteDecision, RouteDecisionCandidate, RouteMode } from '../../../shared/tokenRouteContract.js';
 
 export type RouteSortBy = 'modelPattern' | 'channelCount';
@@ -57,6 +58,8 @@ export type RouteChannelBilling = {
   } | null;
   refreshTaskId?: string | null;
   message: string;
+  /** S4-1：本行计价分组对应的上游公示快照（分组级）；未预热该站该模型时为 null。 */
+  perfGroup?: PerfSnapshot | null;
 } | null;
 
 export type RouteChannelHealth = {
