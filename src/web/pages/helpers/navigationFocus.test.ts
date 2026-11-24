@@ -48,7 +48,7 @@ describe('navigationFocus helpers', () => {
     expect(clearFocusParams('?focusAccountId=2')).toBe('');
   });
 
-  // F4：汇率未知提示 → 站点编辑弹窗汇率框。
+  // F4：充值价未知提示 → 站点编辑弹窗汇率框。
   describe('unknown rate site navigation', () => {
     it('builds a single-site path that opens the editor on the rate field', () => {
       const path = buildUnknownRateSitesPath([7]);

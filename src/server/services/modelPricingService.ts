@@ -2,7 +2,7 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { withSiteProxyRequestInit } from './siteProxy.js';
 import { ratioToUsdPerMillion, tokensToUsd } from './billing/quotaScale.js';
 import type { BillingMeter, BillingTier, ParsedBillingPlanV2, TierCondition, TierRates } from './billing/billingPlanV2.js';
-import { parseBillingExprV2, tierMatchesAt } from './billing/billingPlanV2.js';
+import { parseBillingExprV2, tierMatchesAt, projectCalendarWindows } from './billing/billingPlanV2.js';
 import { isAutoGroupName } from './billing/groupNames.js';
 import { resolveBillingGroup, type BillingGroupHint } from './billing/billingGroupResolution.js';
 import {
@@ -156,6 +156,13 @@ export interface ModelGroupPricing {
   perCallOutput?: number;
   perCallTotal?: number;
   /**
+   * `fixed(X)` 的**每请求固定美元价**（已乘分组倍率）。
+   * 与每百万四项互斥：存在时 inputPerMillion 等一律缺省。
+   * 注意上游 quota_type 仍是 0 —— 不能用 quotaType 判断"是不是按次"，
+   * 必须看这个字段（或实扣明细里的 perCallPrice）。
+   */
+  fixedPerRequest?: number;
+  /**
    * 多档动态计费的**全部**档位（二-3）。
    * 只有 len/时间分档的表达式才有值；单档与非动态计费不填。
    * inputPerMillion 仍是第一档的代表价，用于路由参考价等单值场景。
@@ -233,10 +240,19 @@ export interface ProxyBillingDetails {
     groupName?: string | null;
   };
   breakdown: {
-    inputPerMillion: number;
-    outputPerMillion: number;
-    cacheReadPerMillion: number;
-    cacheCreationPerMillion: number;
+    /**
+     * 以下四个每百万单价只属于 token 计费（quotaType===0）。
+     * 按次计费不写它们 —— 缺省表示"口径不适用"，不是"$0 免费"。
+     */
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    cacheReadPerMillion?: number;
+    cacheCreationPerMillion?: number;
+    /**
+     * 按次计费（quotaType===1）的每次单价（USD，已乘分组倍率）。
+     * token 计费不写此字段 —— 它的单价口径是每百万，两者不可混用同一渲染。
+     */
+    perCallPrice?: number;
     inputCost: number;
     outputCost: number;
     cacheReadCost: number;
@@ -1076,13 +1092,36 @@ interface ResolvedPerMillion {
   allTiers?: DynamicTierPrice[];
 }
 
+/**
+ * 取价结果：两种**互斥**口径。
+ *
+ * - `per-million`：按 token 计费，单价是每百万 token 的美元价；
+ * - `per-request`：`fixed(X)` 按次计费，单价是**每请求**的美元价。
+ *
+ * 必须用判别式而不是"再挂一个可选字段"：两种口径的渲染单位（/1M vs /call）
+ * 与实扣算式完全不同，混用会把"每次一个价"显示成"每百万一个价"。
+ */
+type ResolvedPrice =
+  | ({ kind: 'per-million' } & ResolvedPerMillion)
+  | {
+      kind: 'per-request';
+      /** 每请求固定美元价（已乘分组倍率）。 */
+      usdPerRequest: number;
+      evidenceSource: 'upstream-dynamic-expr';
+      tierName?: string;
+      allTiers?: DynamicTierPrice[];
+    };
+
 /** 一档的每百万单价 + 档位身份（供 UI 分别渲染各档）。 */
 export interface DynamicTierPrice {
   name: string;
-  input: number;
+  /** 每百万输入价；`fixed()` 按次档缺省（不是 0）。 */
+  input?: number;
   output?: number;
   cacheRead?: number;
   cacheCreation?: number;
+  /** `fixed(X)` 档的每请求固定美元价（已乘分组倍率）。与 input 互斥。 */
+  fixedPerRequest?: number;
   /** 人类可读的适用条件，例如 `≤272K` / `峰段 周一至周五 09:00-18:00`。无法判定为 null。 */
   condition?: string | null;
 }
@@ -1168,9 +1207,36 @@ function fmtThresholdTokens(value: number): string {
 const WEEKDAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 /**
+ * 时间分档的**展示时区**（用户要求把 UTC 分段计费换算成北京时间）。
+ * 判档仍按上游声明时区精确执行（见 billingPlanV2.tierMatchesAt），这里只改"给人看的那串"。
+ */
+const DISPLAY_TIMEZONE = 'Asia/Shanghai';
+
+/** 连续星期压缩成 "周一至五"，否则逐个列出。 */
+function fmtWeekdaySpan(days: number[]): string {
+  const unique = [...new Set(days)].sort((a, b) => a - b);
+  const labels = unique.map((day) => WEEKDAY_LABELS[day - 1]).filter(Boolean);
+  const contiguous = unique.length > 1
+    && unique.every((day, index) => index === 0 || day === unique[index - 1]! + 1);
+  return contiguous && labels.length > 1
+    ? `${labels[0]}至${labels[labels.length - 1]}`
+    : labels.join('、');
+}
+
+/** `09:00-12:00`；hourTo>24 时显示为 `22:00-次日02:00`。 */
+function fmtHourRange(from: number, to: number): string {
+  const start = `${String(from).padStart(2, '0')}:00`;
+  if (to <= 24) return `${start}-${String(to).padStart(2, '0')}:00`;
+  return `${start}-次日${String(to - 24).padStart(2, '0')}:00`;
+}
+
+/**
  * 把档位条件翻成人话（二-3）。
  * UI 需要向用户解释"哪一档在什么时候生效"，因此条件必须可读而不是原文表达式。
  * 无法判定的形态返回 null —— 调用方退回只显示档位名，不编造条件。
+ *
+ * 时间分档统一投影到 Asia/Shanghai 并尾标时区；上游本就写 Asia/Shanghai 时
+ * 原样显示，偏移非整小时等投影不了的情况退回声明时区并如实标注，绝不显示错窗。
  */
 export function describeTierCondition(condition: TierCondition): string | null {
   if (condition.kind === 'always') return null;
@@ -1181,18 +1247,33 @@ export function describeTierCondition(condition: TierCondition): string | null {
   }
 
   if (condition.kind === 'calendar') {
-    // 连续区间压缩成 "周一至五"，非连续才逐个列出，避免长串噪声。
-    const days = [...new Set(condition.weekdays)].sort((a, b) => a - b);
-    const labels = days.map((day) => WEEKDAY_LABELS[day - 1]).filter(Boolean);
-    const contiguous = days.length > 1
-      && days.every((day, index) => index === 0 || day === days[index - 1]! + 1);
-    const dayText = contiguous && labels.length > 1
-      ? `${labels[0]}至${labels[labels.length - 1]}`
-      : labels.join('、');
-    const hours = condition.hourRanges
-      .map((range) => `${String(range.from).padStart(2, '0')}:00-${String(range.to).padStart(2, '0')}:00`)
+    // 已是展示时区（或声明时区非法）→ 直接用原始窗口。
+    if (condition.timezone === DISPLAY_TIMEZONE) {
+      const hours = condition.hourRanges.map((r) => fmtHourRange(r.from, r.to)).join(' / ');
+      return [fmtWeekdaySpan(condition.weekdays), hours, `(${DISPLAY_TIMEZONE})`]
+        .filter(Boolean).join(' ') || null;
+    }
+
+    const projected = projectCalendarWindows(condition, DISPLAY_TIMEZONE);
+    if (!projected || projected.length === 0) {
+      // 投影失败（非整小时偏移等）：保留原始窗口 + 声明时区标注，不谎报成上海时间。
+      const hours = condition.hourRanges.map((r) => fmtHourRange(r.from, r.to)).join(' / ');
+      return [fmtWeekdaySpan(condition.weekdays), hours, `(${condition.timezone})`]
+        .filter(Boolean).join(' ') || null;
+    }
+
+    // 同一星期集合的多个时段合并成一条，避免 "周一至周五 … / 周一至周五 …" 的重复噪声。
+    const byDays = new Map<string, string[]>();
+    for (const window of projected) {
+      const dayKey = fmtWeekdaySpan(window.weekdays);
+      const list = byDays.get(dayKey) ?? [];
+      list.push(fmtHourRange(window.hourFrom, window.hourTo));
+      byDays.set(dayKey, list);
+    }
+    const text = Array.from(byDays.entries())
+      .map(([dayText, hourList]) => `${dayText} ${hourList.join(' / ')}`)
       .join(' / ');
-    return [dayText, hours].filter(Boolean).join(' ') || null;
+    return `${text} (${DISPLAY_TIMEZONE})`;
   }
 
   return null;
@@ -1213,13 +1294,21 @@ function materializeAllTiers(
 ): DynamicTierPrice[] {
   const result: DynamicTierPrice[] = [];
   for (const tier of tiers) {
-    const prices = materializeSingleTier(tier.rates, multiplier, tier.name);
-    if (!prices) continue;
     // 时间分档的 else 分支解析成 always —— 多档语境下它就是"其余时段"，
     // 直说比留空更有用（留空会让人以为这一档没有适用条件）。
     const condition = tier.condition.kind === 'always' && tiers.length > 1
       ? '其余'
       : describeTierCondition(tier.condition);
+    if (tier.fixedPerRequest != null) {
+      result.push({
+        name: tier.name,
+        fixedPerRequest: roundCost(tier.fixedPerRequest * multiplier),
+        condition,
+      });
+      continue;
+    }
+    const prices = materializeSingleTier(tier.rates, multiplier, tier.name);
+    if (!prices) continue;
     result.push({
       name: tier.name,
       input: prices.input,
@@ -1242,11 +1331,28 @@ interface TierSelectionContext {
   atMs?: number;
 }
 
+/**
+ * 把单个档位落成取价结果。
+ * `fixed(X)` 档按**每请求**计价；其余档按每百万 token 计价。
+ */
+function materializeTier(tier: BillingTier, multiplier: number): ResolvedPrice | null {
+  if (tier.fixedPerRequest != null) {
+    return {
+      kind: 'per-request',
+      usdPerRequest: roundCost(tier.fixedPerRequest * multiplier),
+      evidenceSource: 'upstream-dynamic-expr',
+      tierName: tier.name,
+    };
+  }
+  const prices = materializeSingleTier(tier.rates, multiplier, tier.name);
+  return prices ? { kind: 'per-million', ...prices } : null;
+}
+
 function resolvePerMillionPrices(
   model: PricingModel,
   multiplier: number,
   tierContext?: TierSelectionContext,
-): ResolvedPerMillion | null {
+): ResolvedPrice | null {
   const cacheRatio = model.cacheRatio ?? 1;
   const cacheCreationRatio = model.cacheCreationRatio ?? 1;
 
@@ -1272,6 +1378,7 @@ function resolvePerMillionPrices(
     const output = toNumber(model.modelPrice.output, Number.NaN);
     if (Number.isFinite(input) && Number.isFinite(output) && (input > 0 || output > 0)) {
       return {
+        kind: 'per-million',
         input: roundCost(input * multiplier),
         output: roundCost(output * multiplier),
         // 缓存倍率是相对输入价的比值，直采口径下同样乘到输入单价上
@@ -1291,7 +1398,7 @@ function resolvePerMillionPrices(
     const planV2 = parsedDynamicPlanV2;
 
     if (planV2?.kind === 'single') {
-      return materializeSingleTier(planV2.tier.rates, multiplier, planV2.tier.name);
+      return materializeTier(planV2.tier, multiplier);
     }
 
     if (planV2?.kind === 'conditional') {
@@ -1300,11 +1407,11 @@ function resolvePerMillionPrices(
         const matched = selectDynamicTierForUsage(planV2, tierContext);
         // 一档都没命中：说明上游表达式覆盖不到这次请求，宁可不记账也不硬套一个档。
         if (!matched) return null;
-        return materializeSingleTier(matched.rates, multiplier, matched.name);
+        return materializeTier(matched, multiplier);
       }
       // 目录展示需要一个"代表价"：取第一档作基础档（上游约定 peak/低阈值档在前）。
       // 同时把**全部**档位透出供 UI 分别显示（二-3）—— 只报代表价会让用户以为模型就这一个价。
-      const base = materializeSingleTier(planV2.tiers[0]!.rates, multiplier, planV2.tiers[0]!.name);
+      const base = materializeTier(planV2.tiers[0]!, multiplier);
       if (base) {
         const allTiers = materializeAllTiers(planV2.tiers, multiplier);
         if (allTiers.length > 0) base.allTiers = allTiers;
@@ -1313,6 +1420,7 @@ function resolvePerMillionPrices(
     }
 
     return {
+      kind: 'per-million',
       input: perMillion(model.modelRatio),
       output: perMillion(model.modelRatio * model.completionRatio),
       cacheRead: perMillion(model.modelRatio * cacheRatio),
@@ -1322,6 +1430,7 @@ function resolvePerMillionPrices(
   }
 
   return {
+    kind: 'per-million',
     input: perMillion(model.modelRatio),
     output: perMillion(model.modelRatio * model.completionRatio),
     cacheRead: perMillion(model.modelRatio * cacheRatio),
@@ -1346,15 +1455,43 @@ export function calculateModelUsageBreakdown(
   /** 本次请求的令牌分组（三-3）。缺省沿用旧的模型分组启发式。 */
   groupHint?: BillingGroupHint | null,
 ): ProxyBillingDetails | null {
-  if (model.quotaType === 1) {
-    return null;
-  }
-
   const resolvedGroup = resolveBillingGroup(model, groupRatio, groupHint);
   // 倍率未知时不出账：宁可没有成本，也不按 1× 悄悄扣一个可能错的价格。
   if (resolvedGroup === null) return null;
   const multiplier = resolvedGroup.ratio;
   const normalizedUsage = normalizeUsageBreakdownInput(usage);
+
+  // 按次计费（quotaType===1）：一次请求一个价，与 token 数无关。
+  // 过去这里直接 return null，于是日志的 billing_details 是空的 ——
+  // 用户看到的是"成本 $2 但没有任何分组信息"，无法回答"这 2 块按哪个档扣的"。
+  // 单价与 calculateModelUsageCost 复用同一个 calculatePerCallCost，两条算式不会漂移。
+  if (model.quotaType === 1) {
+    const perCallPrice = roundCost(calculatePerCallCost(model.modelPrice, multiplier));
+    return {
+      quotaType: 1,
+      usage: normalizedUsage,
+      pricing: {
+        modelRatio: model.modelRatio,
+        completionRatio: model.completionRatio,
+        cacheRatio: model.cacheRatio ?? 1,
+        cacheCreationRatio: model.cacheCreationRatio ?? 1,
+        groupRatio: multiplier,
+        groupName: resolvedGroup.groupName,
+        // 按次的价来自上游 model_price（每请求价），口径独立于倍率体系。
+        evidenceSource: 'upstream-per-call',
+      },
+      breakdown: {
+        // 每百万四项不写：按次没有"每百万"口径，写 0 会被读成"免费"。
+        perCallPrice,
+        inputCost: 0,
+        outputCost: 0,
+        cacheReadCost: 0,
+        cacheCreationCost: 0,
+        totalCost: perCallPrice,
+      },
+    };
+  }
+
   // 取值口径集中在 resolvePerMillionPrices：直采价优先、倍率兜底、缺失即未知。
   // T6.3：实扣路径传入选档上下文（本次输入量 + 时刻），多档表达式据此精确命中；
   //       billablePromptTokens 与上游 len 语义一致（扣除缓存后的计费输入量）。
@@ -1363,6 +1500,35 @@ export function calculateModelUsageBreakdown(
     atMs: atMs ?? Date.now(),
   });
   if (!prices) return null;
+
+  // fixed(X)：按**请求**收费，与 token 数无关。走独立的明细形状 ——
+  // 每百万四项一律不写（写 0 会被读成"免费"），只写 perCallPrice。
+  // quotaType 仍保留上游原值（0），前端按 perCallPrice 是否存在判断口径。
+  if (prices.kind === 'per-request') {
+    return {
+      quotaType: model.quotaType,
+      usage: normalizedUsage,
+      pricing: {
+        modelRatio: model.modelRatio,
+        completionRatio: model.completionRatio,
+        cacheRatio: model.cacheRatio ?? 1,
+        cacheCreationRatio: model.cacheCreationRatio ?? 1,
+        groupRatio: multiplier,
+        groupName: resolvedGroup.groupName,
+        evidenceSource: prices.evidenceSource,
+        tierName: prices.tierName,
+      },
+      breakdown: {
+        perCallPrice: prices.usdPerRequest,
+        inputCost: 0,
+        outputCost: 0,
+        cacheReadCost: 0,
+        cacheCreationCost: 0,
+        totalCost: prices.usdPerRequest,
+      },
+    };
+  }
+
   const { input: inputPerMillion } = prices;
   // 动态计费表达式没提的计量项在这里就是 undefined；实扣按 0 计（不收该项的钱），
   // 而不是拿失效倍率编一个数。缺省语义：上游不认这个计量项。
@@ -1502,6 +1668,20 @@ export function buildModelPricingCatalogFromData(pricingData: PricingData): Mode
           acc[group] = {
             quotaType: 0,
             evidence: unknownPriceEvidence(resolveMissingPriceReason(model)),
+            billingMode: model.billingMode,
+            billingExpr: model.billingExpr ?? null,
+          };
+          return acc;
+        }
+
+        // fixed(X)：按次固定价。quotaType 保留上游原值（0），
+        // 展示层据 fixedPerRequest 是否存在决定渲染成 `/ call` 而不是 `/ 1M`。
+        if (prices.kind === 'per-request') {
+          acc[group] = {
+            quotaType: 0,
+            fixedPerRequest: prices.usdPerRequest,
+            tiers: prices.allTiers,
+            evidence: knownPriceEvidence(prices.evidenceSource),
             billingMode: model.billingMode,
             billingExpr: model.billingExpr ?? null,
           };
@@ -1691,7 +1871,10 @@ export async function buildProxyBillingDetails(input: EstimateProxyCostInput): P
     const pricingData = await getPricingDataCached(input);
     if (pricingData) {
       const model = resolveModel(input.modelName, pricingData);
-      if (model && model.quotaType !== 1) {
+      // 按次计费同样走目录明细（2026-11-22 修复）：旧写法把 quotaType===1 排除在外，
+      // 于是按次模型的日志永远没有 billing_details，界面上只有金额没有分组。
+      // calculateModelUsageBreakdown 内部已按 quotaType 分流两种口径。
+      if (model) {
         const catalogDetails = calculateModelUsageBreakdown(model, usage, pricingData.groupRatio, undefined, groupHint);
         if (catalogDetails) return catalogDetails;
       }

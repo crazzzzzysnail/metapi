@@ -583,20 +583,33 @@ export const events = sqliteTable('events', {
 }));
 
 /**
- * 站点计费参数（S6 / T8.2）。
- *
- * 记录"这个站点的钱是怎么算出来的"两类事实：
- *   1) 额度标尺（quota_per_unit）——上游 /api/status 的 quota_per_unit，缺省按平台默认；
- *   2) 汇率（cny_per_usd）——切 CNY 时把 USD 换算成人民币。
- *
- * rate_source / quota_source 区分自动探测与人工覆盖：
- * 用户可手动维护汇率补全探测不到的站点（R7 决议），但**绝不允许伪造**——
- * 两列都允许 null，null 的含义是"未知"，展示层必须如实说"汇率未知"。
+ * 站点计费参数（S6 / T8.2）：
+ *   1) 额度标尺（quota_per_unit）—— 上游 /api/status 的 quota_per_unit；
+ *   2) 充值价（cny_per_usd）—— 每 1 美元额度实付的人民币（站主售卖价，非官方汇率）。
+ * 上游 new-api 的 `price` 是售卖价、默认 7.3 与官方汇率同值，但站主可独立改，
+ * 因此不能当 USD→CNY 汇率；官方汇率是另一个字段 `usd_exchange_rate`，不进本档案。
+ * rate_source / quota_source 区分 auto 探测 / manual 手填。三列都允许 null，
+ * null 含义是"未知"，展示层必须如实标注、不得伪造。
  */
 export const siteBillingProfiles = sqliteTable('site_billing_profiles', {
   siteId: integer('site_id').primaryKey(),
   quotaPerUnit: integer('quota_per_unit'), // 500000 / 1000000 / 其它；null = 未探测
-  cnyPerUsd: real('cny_per_usd'),           // 1 USD ≈ N CNY；null = 未知
+  cnyPerUsd: real('cny_per_usd'),           // 充值价：每 1 美元额度实付人民币；null = 未知
+  /**
+   * 上游展示口径（S6）。站点可把金额显示成自定义货币（`quota_display_type=CUSTOM`）：
+   * 显示值 = USD 值 × custom_currency_exchange_rate，符号是站主自由填的文本。
+   * 这不是汇率、不影响计费，仅用于让界面标出"上游把同一笔钱显示成多少"。
+   * 三列都允许 null（未知 / 上游没配）；展示层读到 null 就不标。
+   */
+  quotaDisplayType: text('quota_display_type'),          // 'USD' | 'CNY' | 'CUSTOM' | 'TOKENS' | null
+  customCurrencySymbol: text('custom_currency_symbol'),  // 站主自由填的符号；null = 未提供
+  customCurrencyExchangeRate: real('custom_currency_exchange_rate'), // 每 1 USD = N 自定义单位；null = 未知
+  /**
+   * 展示口径的来源：'auto' 探测 / 'manual' 手填 / null 未知。
+   * 与充值价、标尺同构：部分上游把 /api/status 挡在 WAF 后探测拿不到，
+   * 用户手填补上后，静默探测不得覆盖。
+   */
+  displaySource: text('display_source'),
   quotaSource: text('quota_source'),        // 'auto' | 'manual' | null
   rateSource: text('rate_source'),          // 'auto' | 'manual' | null
   capturedAt: text('captured_at'),          // ISO；最近一次成功探测时间

@@ -46,13 +46,18 @@ export type RouteChannelBilling = {
     perCallInput?: number;
     perCallOutput?: number;
     perCallTotal?: number;
+    /** `fixed(X)` 每请求固定美元价（已乘分组倍率）；与每百万四项互斥。 */
+    fixedPerRequest?: number;
     /** 多档动态计费的全部档位（二-3）。 */
     tiers?: Array<{
       name: string;
-      input: number;
+      /** 每百万输入价；fixed 按次档缺省（不是 0）。 */
+      input?: number;
       output?: number;
       cacheRead?: number;
       cacheCreation?: number;
+      /** `fixed(X)` 档的每请求固定美元价；与 input 互斥。 */
+      fixedPerRequest?: number;
       condition?: string | null;
     }>;
   } | null;

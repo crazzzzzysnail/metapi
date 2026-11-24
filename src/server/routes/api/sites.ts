@@ -444,7 +444,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       extraConfig: schema.accounts.extraConfig,
       lastBalanceRefresh: schema.accounts.lastBalanceRefresh,
     }).from(schema.accounts).all();
-    // T8.9：站点列表要如实展示每个站点的汇率状态（自动探测 / 手动覆盖 / 未知）。
+    // T8.9：站点列表要如实展示每个站点的充值价状态（自动探测 / 手动覆盖 / 未知）。
     const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
     const billingProfileBySiteId: Record<number, typeof schema.siteBillingProfiles.$inferSelect> = {};
     for (const row of billingProfileRows) billingProfileBySiteId[row.siteId] = row;
@@ -505,20 +505,32 @@ export async function sitesRoutes(app: FastifyInstance) {
         subscriptionSummary: subscriptionBySiteId[site.id] || null,
         billingProfile: (() => {
           const p = billingProfileBySiteId[site.id];
-          if (!p) return { cnyPerUsd: null, rateSource: null, quotaPerUnit: null, quotaSource: null, capturedAt: null };
+          if (!p) {
+            return {
+              cnyPerUsd: null, rateSource: null, quotaPerUnit: null, quotaSource: null, capturedAt: null,
+              quotaDisplayType: null, customCurrencySymbol: null, customCurrencyExchangeRate: null,
+              displaySource: null,
+            };
+          }
           return {
             cnyPerUsd: p.cnyPerUsd ?? null,
             rateSource: p.rateSource ?? null,
             quotaPerUnit: p.quotaPerUnit ?? null,
             quotaSource: p.quotaSource ?? null,
             capturedAt: p.capturedAt ?? null,
+            // 上游展示口径（S6）：让界面标出"同一笔钱上游显示成多少自定义单位"。
+            quotaDisplayType: p.quotaDisplayType ?? null,
+            customCurrencySymbol: p.customCurrencySymbol ?? null,
+            customCurrencyExchangeRate: p.customCurrencyExchangeRate ?? null,
+            // 口径来源（auto/manual）：手填与探测要能分辨，否则用户看不出自己填的有没有被覆盖。
+            displaySource: p.displaySource ?? null,
           };
         })(),
       };
     });
   });
 
-  // T8.10：计费参数（汇率/标尺）的人工维护与重新探测
+  // T8.10：计费参数（充值价/标尺）的人工维护与重新探测
   app.post<{ Params: { id: string }; Body: unknown }>('/api/sites/:id/billing-profile', async (request, reply) => {
     const id = parseInt(request.params.id);
     if (Number.isNaN(id)) return reply.code(400).send({ success: false, message: '无效的站点 ID' });
@@ -531,8 +543,8 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (mode === 'probe') {
       const { probeAndPersistSiteBillingProfile } = await import('../../services/billing/siteBillingProfileService.js');
       const { withSiteRecordProxyRequestInit } = await import('../../services/siteProxy.js');
-      // 用户显式点「探测上游汇率」：overrideManual 让上游值覆盖手动值，
-      // 否则手填过汇率的站点会永远探测不动（数字与来源都停在手动）。
+      // 用户显式点「探测上游充值价」：overrideManual 让上游值覆盖手动值，
+      // 否则手填过充值价的站点会永远探测不动（数字与来源都停在手动）。
       // 走 withSiteRecordProxyRequestInit 与保存后的静默探测保持同一套代理/自定义头，
       // 避免"保存能探到、手动点探测却失败"这类因网络路径不同导致的分歧。
       const profile = await probeAndPersistSiteBillingProfile(
@@ -556,10 +568,22 @@ export async function sitesRoutes(app: FastifyInstance) {
       const n = Number(raw);
       return Number.isFinite(n) && n > 0 ? n : null;
     };
+    // 字符串口径与数字覆盖的三态不同：键缺失 = 不改（undefined），
+    // 空串/null = 清除（null），其它 = 原样字符串（合法性由服务层 normalize 把关）。
+    const readStringOverride = (key: string): string | null | undefined => {
+      if (!(key in body)) return undefined;
+      const raw = body[key];
+      if (raw === null) return null;
+      if (typeof raw === 'string') return raw.trim() === '' ? null : raw;
+      return null;
+    };
     const profile = await setManualBillingOverrides({
       siteId: site.id,
       cnyPerUsd: readOverride('cnyPerUsd'),
       quotaPerUnit: readOverride('quotaPerUnit'),
+      quotaDisplayType: readStringOverride('quotaDisplayType'),
+      customCurrencySymbol: readStringOverride('customCurrencySymbol'),
+      customCurrencyExchangeRate: readOverride('customCurrencyExchangeRate'),
     });
     return { success: true, profile };
   });
@@ -910,8 +934,8 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     invalidateSiteCaches();
 
-    // S6 / T8.4：站点保存后异步探测一次计费参数（汇率/标尺）。
-    // 失败不影响本次保存结果 —— 探测不到就留 null，界面显示"汇率未知"。
+    // S6 / T8.4：站点保存后异步探测一次计费参数（充值价/标尺）。
+    // 失败不影响本次保存结果 —— 探测不到就留 null，界面显示"充值价未知"。
     void import('../../services/billing/siteBillingProfileService.js')
       .then(({ probeAndPersistSiteBillingProfile }) => probeAndPersistSiteBillingProfile(
         { id, url: nextUrl },

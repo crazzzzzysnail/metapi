@@ -208,6 +208,9 @@ describe("stats proxy logs routes", () => {
       tierName: "off_peak",
       inputPerMillion: 0.4,
       outputPerMillion: 1.6,
+      // 按次口径字段：token 计费恒为 null（与每百万两项互斥）。
+      // 2026-11-23 补：fixed() 按次计费的摘要也靠它区分口径。
+      perCallPrice: null,
     });
     expect(body.clientOptions).toEqual([
       { value: "family:codex", label: "协议 · Codex" },

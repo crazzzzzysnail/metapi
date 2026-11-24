@@ -934,14 +934,14 @@ export async function settingsRoutes(app: FastifyInstance) {
   });
 
   /**
-   * 全站汇率档案（B1）。
+   * 全站充值价档案（B1）。
    *
    * 顶栏切到人民币后，所有金额显示都要靠它换算。单独开这个轻量端点而不是让前端
    * 去翻 `/api/sites`：站点行里有 url / api_key / extra_config 等大字段，
    * 而换算只需要 siteId + cnyPerUsd 两个数。
    * 服务端已挂 60s 缓存，页面反复加载不会变成每次打库。
    *
-   * `unknownCount`：活跃站里汇率未知的个数（F8）。前端自己也数一遍，
+   * `unknownCount`：活跃站里充值价未知的个数（F8）。前端自己也数一遍，
    * 这里给出是为了让这个提示的口径有一个服务端出处可对账。
    */
   app.get('/api/settings/currency-rates', async () => {

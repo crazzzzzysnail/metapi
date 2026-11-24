@@ -9,7 +9,7 @@ type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
 
 /**
  * F3：金额双轨。后端按**行（站点）**换算后再累加，所以这里能同时拿到
- * USD 原值与人民币值；`unconvertedUsdSpend` 是因汇率未知没进 CNY 的那部分，
+ * USD 原值与人民币值；`unconvertedUsdSpend` 是因充值价未知没进 CNY 的那部分，
  * 界面必须把它说出来，否则 ¥ 数字会"看起来正常地偏小"。
  */
 interface SpendDistributionItem { model: string; spend: number; calls: number; spendCny?: number; unconvertedUsdSpend?: number; }
@@ -59,7 +59,7 @@ function makeCurrencyFormatter(
     if (currency === 'USD') return formatMoney(toSafeNumber(item?.spend));
     const cny = toSafeNumber(item?.spendCny);
     const unconverted = toSafeNumber(item?.unconvertedUsdSpend);
-    // 一部分成本因汇率未知没换算：如实标出来，而不是给一个偏小的 ¥ 数当完整答案
+    // 一部分成本因充值价未知没换算：如实标出来，而不是给一个偏小的 ¥ 数当完整答案
     if (unconverted > 0) {
       return `${formatMoney(cny, 'CNY', 1)}（另有 ${formatMoney(unconverted)} 未换算）`;
     }

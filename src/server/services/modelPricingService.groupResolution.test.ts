@@ -156,6 +156,58 @@ describe('三-3 分组解析：链路按顺序命中', () => {
     expect(detail.pricing.groupRatio).toBe(0.3);
   });
 
+  it('令牌分组过期（本地值不在模型声明里）且声明内只有一个已知倍率分组：按它计价', () => {
+    // 2026-11-22 实测：某站令牌本地仍标 default（手工建后未同步），
+    // 模型只声明 [deepseek套餐, 按次]，其中只有「按次」在 group_ratio 里有倍率。
+    // 请求在上游成功 ⇒ 真实分组必在声明内，且只可能是那唯一一个已知倍率的分组。
+    const stale = normalizeCommonPricingPayload({
+      success: true,
+      group_ratio: { '按次': 0.2 },
+      data: [{
+        model_name: 'sample-model-percall',
+        quota_type: 1,
+        model_ratio: 0,
+        completion_ratio: 0,
+        model_price: 10,
+        enable_groups: ['deepseek套餐', '按次'],
+      }],
+    })!;
+    const detail = calculateModelUsageBreakdown(
+      stale.models.get('sample-model-percall')!,
+      { promptTokens: 34, completionTokens: 146, totalTokens: 180 },
+      stale.groupRatio,
+      undefined,
+      { tokenGroup: 'default' },
+    )!;
+    expect(detail).not.toBeNull();
+    expect(detail.pricing.groupName).toBe('按次');
+    expect(detail.pricing.groupRatio).toBe(0.2);
+    expect(detail.breakdown.perCallPrice).toBe(2);
+  });
+
+  it('令牌分组过期但声明内有多个已知倍率分组：仍拒绝（无法消歧，绝不猜）', () => {
+    const ambiguous = normalizeCommonPricingPayload({
+      success: true,
+      group_ratio: { 'grp-codex': 0.15, 'grp-codex-pro': 0.3 },
+      data: [{
+        model_name: 'sample-model-multi',
+        quota_type: 0,
+        model_ratio: 1,
+        completion_ratio: 1,
+        model_price: 0,
+        enable_groups: ['grp-codex', 'grp-codex-pro'],
+      }],
+    })!;
+    const detail = calculateModelUsageBreakdown(
+      ambiguous.models.get('sample-model-multi')!,
+      USAGE,
+      ambiguous.groupRatio,
+      undefined,
+      { tokenGroup: 'default' },
+    );
+    expect(detail).toBeNull();
+  });
+
   it('有令牌信息但一个分组都对不上：拒绝出价，不退到别的分组', () => {
     const d = data();
     const detail = calculateModelUsageBreakdown(
@@ -177,9 +229,10 @@ describe('二-3 目录侧的多档透出', () => {
 
     expect(pricing.tiers?.length).toBe(2);
     expect(pricing.tiers?.map((tier) => tier.name)).toEqual(['peak', 'off_peak']);
-    // 条件翻成人话，而不是把表达式原文丢给用户
+    // 条件翻成人话；UTC 分段按用户要求投影到 Asia/Shanghai 并尾标时区。
+    // 峰段 UTC 9-12 / 14-18 → 上海 17:00-20:00 / 22:00-次日02:00。
     expect(pricing.tiers?.map((tier) => tier.condition)).toEqual([
-      '周一至周五 09:00-12:00 / 14:00-18:00',
+      '周一至周五 17:00-20:00 / 22:00-次日02:00 (Asia/Shanghai)',
       '其余',
     ]);
     // 代表价仍是第一档，路由参考价等单值场景不受影响

@@ -218,6 +218,20 @@
       "when": 1783200000000,
       "tag": "0031_site_perf_metrics_capability",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1795358000000,
+      "tag": "0032_site_display_currency",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1795360000000,
+      "tag": "0033_display_source",
+      "breakpoints": true
     }
   ]
 }

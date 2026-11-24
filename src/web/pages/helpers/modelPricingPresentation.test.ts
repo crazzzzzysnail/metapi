@@ -3,6 +3,7 @@ import { formatMoney } from '../../numberFormat.js';
 import {
   describeGroupPricing,
   describePriceReason,
+  describeTierDetails,
   isAuthoritativePricing,
   renderGroupPricingValue,
   type ModelGroupPricingPresentation,
@@ -162,8 +163,86 @@ describe('renderGroupPricingValue 的 compact / firstTierOnly', () => {
     expect(cny).not.toContain('$');
   });
 
-  it('CNY 且汇率未知时整行标注，不贴 ¥ 冒充人民币价', () => {
+  it('CNY 且充值价未知时整行标注，不贴 ¥ 冒充人民币价', () => {
     const unknown = renderGroupPricingValue(multi, 1, () => null, { compact: true, firstTierOnly: true });
-    expect(unknown).toBe('汇率未知');
+    expect(unknown).toBe('充值价未知');
+  });
+});
+
+/**
+ * fixed(X) 每请求固定价的展示（2026-11-23 抓包实证）。
+ *
+ * 上游把这类模型按"次"收费，而 metapi 旧实现因解析失败回落失效倍率，
+ * 在模型广场显示按每百万口径的推算价（实际是每次一个价）——单位与量级双错。
+ * 这里锁三件事：① 单位必须是 / call；② 人民币模式同样走 / call；
+ * ③ 「参考 · 动态计费未解析」警示在换算分支里不能被吞掉。
+ */
+describe('fixed(X) 每请求固定价展示', () => {
+  const cnyConvert = (_siteId: number, usd: number | undefined): string | null =>
+    usd == null ? null : formatMoney(usd * 7.3, 'CNY', 1);
+
+  it('美元模式：渲染成 $X / call，不写 / 1M', () => {
+    const text = renderGroupPricingValue({
+      quotaType: 0,
+      fixedPerRequest: 0.001,
+      evidence: { source: 'upstream-dynamic-expr', precision: 'exact' },
+      billingMode: 'tiered_expr',
+    });
+    expect(text).toBe('$0.001 / call');
+    expect(text).not.toContain('/ 1M');
+  });
+
+  it('人民币模式：换算后仍是 / call', () => {
+    const text = renderGroupPricingValue(
+      {
+        quotaType: 0,
+        fixedPerRequest: 0.001,
+        evidence: { source: 'upstream-dynamic-expr', precision: 'exact' },
+        billingMode: 'tiered_expr',
+      },
+      1,
+      cnyConvert,
+    );
+    expect(text).toBe('¥0.0073 / call');
+    expect(text).not.toContain('/ 1M');
+  });
+
+  it('多档 fixed：逐档列出各自的每请求价', () => {
+    const text = renderGroupPricingValue({
+      quotaType: 0,
+      fixedPerRequest: 0.01,
+      tiers: [
+        { name: 'short', fixedPerRequest: 0.01, condition: '≤32K' },
+        { name: 'long', fixedPerRequest: 0.03, condition: '>32K' },
+      ],
+      evidence: { source: 'upstream-dynamic-expr', precision: 'exact' },
+      billingMode: 'tiered_expr',
+    });
+    expect(text).toContain('$0.01 / call（short · ≤32K）');
+    expect(text).toContain('$0.03 / call（long · >32K）');
+    expect(text).not.toContain('/ 1M');
+  });
+
+  it('悬停详情：fixed 档也标 / call', () => {
+    const text = describeTierDetails({
+      quotaType: 0,
+      tiers: [{ name: 'base', fixedPerRequest: 0.001, condition: null }],
+    });
+    expect(text).toBe('base：$0.001 / call');
+  });
+
+  it('人民币模式下「参考 · 动态计费未解析」警示不能被换算分支吞掉', () => {
+    const stale = {
+      quotaType: 0,
+      inputPerMillion: 75,
+      outputPerMillion: 75,
+      evidence: { source: 'derived-from-stale-field', precision: 'approximate' as const },
+      billingMode: 'tiered_expr',
+    };
+    // 美元模式：本来就带警示
+    expect(renderGroupPricingValue(stale)).toBe('参考 $75/$75 / 1M · 动态计费未解析');
+    // 人民币模式：旧实现在换算分支提前 return，警示整条消失 —— 这里必须保留
+    expect(renderGroupPricingValue(stale, 1, cnyConvert))
+      .toBe('参考 ¥547.5/¥547.5 / 1M · 动态计费未解析');
   });
 });

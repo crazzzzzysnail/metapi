@@ -455,10 +455,13 @@ export type ProxyLogBillingDetails = {
     evidenceSource?: string;
   };
   breakdown: {
-    inputPerMillion: number;
-    outputPerMillion: number;
-    cacheReadPerMillion: number;
-    cacheCreationPerMillion: number;
+    /** 每百万四项仅 token 计费有；按次缺省表示口径不适用（不是 $0）。 */
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    cacheReadPerMillion?: number;
+    cacheCreationPerMillion?: number;
+    /** 按次计费的每次单价（已乘分组倍率）。 */
+    perCallPrice?: number;
     inputCost: number;
     outputCost: number;
     cacheReadCost: number;
@@ -478,6 +481,8 @@ export type ProxyLogBillingSummary = {
   tierName: string | null;
   inputPerMillion: number | null;
   outputPerMillion: number | null;
+  /** 按次计费的每次单价；token 计费的记录为 null。 */
+  perCallPrice: number | null;
 } | null;
 
 export type ProxyLogListItem = {
@@ -809,7 +814,14 @@ export const api = {
   getSiteDisabledModels: (siteId: number) =>
     request(`/api/sites/${siteId}/disabled-models`),
   // S6 / T8.10：站点计费参数 —— mode=probe 走上游探测，mode=manual 写用户覆盖。
-  saveSiteBillingProfile: (siteId: number, data: { mode: 'probe' | 'manual'; cnyPerUsd?: number | null; quotaPerUnit?: number | null }) =>
+  saveSiteBillingProfile: (siteId: number, data: {
+    mode: 'probe' | 'manual';
+    cnyPerUsd?: number | null;
+    quotaPerUnit?: number | null;
+    quotaDisplayType?: string | null;
+    customCurrencySymbol?: string | null;
+    customCurrencyExchangeRate?: number | null;
+  }) =>
     request(`/api/sites/${siteId}/billing-profile`, { method: "POST", body: JSON.stringify(data) }),
   // F8 第 3 期：站点级余额策略（不计入总余额 / 该站没有余额接口）
   saveSiteBalanceCapability: (siteId: number, data: { excludeFromTotalBalance?: boolean; balanceCapability?: 'auto' | 'none' | null }) =>
@@ -1282,13 +1294,20 @@ export const api = {
   getBrandList: () => request("/api/settings/brand-list"),
   /**
    * 全站汇率档案（B1）。给顶栏切币种后的金额换算用。
-   * cnyPerUsd 为 null 表示该站点汇率未知 —— 调用方必须排除出合计并提示，
+   * cnyPerUsd 为 null 表示该站点充值价未知 —— 调用方必须排除出合计并提示，
    * 不得回退成"按 1 算"或拿别的站汇率凑。
    */
   getCurrencyRates: () =>
     request("/api/settings/currency-rates") as Promise<{
-      rates: Array<{ siteId: number; cnyPerUsd: number | null }>;
-      /** 活跃站中汇率未知的个数（服务端算好，与前端 unknownRateSiteCount 同源）。 */
+      rates: Array<{
+        siteId: number;
+        cnyPerUsd: number | null;
+        /** 上游展示口径（S6）：只用于把 USD 金额换成"上游页面显示的数字"，不参与计费。 */
+        quotaDisplayType?: string | null;
+        customCurrencySymbol?: string | null;
+        customCurrencyExchangeRate?: number | null;
+      }>;
+      /** 活跃站中充值价未知的个数（服务端算好，与前端 unknownRateSiteCount 同源）。 */
       unknownCount?: number;
       generatedAt: string;
       cacheStatus?: string;

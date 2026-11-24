@@ -65,7 +65,7 @@ beforeEach(() => {
   apiMock.getCurrencyRates.mockResolvedValue({
     rates: [
       { siteId: 271, cnyPerUsd: 7.3 },
-      { siteId: 266, cnyPerUsd: null },   // 汇率未知
+      { siteId: 266, cnyPerUsd: null },   // 充值价未知
       { siteId: 272, cnyPerUsd: 0 },      // 非法
       { siteId: 273, cnyPerUsd: -1 },     // 非法
       { siteId: 0, cnyPerUsd: 9 },        // 非法站点 id

@@ -33,6 +33,7 @@ import { useIsMobile } from "../components/useIsMobile.js";
 import { formatDateTimeLocal } from "./helpers/checkinLogTime.js";
 import ModernSelect from "../components/ModernSelect.js";
 import { parseProxyLogPathMeta } from "./helpers/proxyLogPathMeta.js";
+import { formatCustomCurrencyAmount } from "./helpers/upstreamCurrencyDisplay.js";
 import { tr } from "../i18n.js";
 import { formatMoney, formatCostFixed } from "../numberFormat.js";
 import { useCurrency } from "../currencyContext.js";
@@ -338,13 +339,21 @@ export type LogMoneyFormatter = (usd: number | null | undefined) => string;
 
 const defaultUsdMoney: LogMoneyFormatter = (usd) => formatMoney(usd);
 
-function formatPerMillionPrice(value: number, money: LogMoneyFormatter = defaultUsdMoney) {
-  return `${money(value)} / 1M tokens`;
+function formatPerMillionPrice(value: number | undefined, money: LogMoneyFormatter = defaultUsdMoney) {
+  return value == null ? "-- / 1M tokens" : `${money(value)} / 1M tokens`;
 }
 
 function formatBillingDetailSummary(log: ProxyLogRenderItem) {
   const detail = log.billingDetails;
   if (!detail) return null;
+  // 按次口径：`fixed(X)` 上游 quota_type 仍是 0，故以 perCallPrice 是否有值判定，
+  // 只报每次价与分组倍率（token 价字段对按次无意义）。
+  if (Number(detail.quotaType) === 1 || detail.breakdown.perCallPrice != null) {
+    const perCall = detail.breakdown.perCallPrice;
+    return perCall != null
+      ? `按次计费 ${formatCompactNumber(perCall)} / call，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`
+      : `按次计费，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
+  }
   return `模型倍率 ${formatCompactNumber(detail.pricing.modelRatio)}，输出倍率 ${formatCompactNumber(detail.pricing.completionRatio)}，缓存倍率 ${formatCompactNumber(detail.pricing.cacheRatio)}，缓存创建倍率 ${formatCompactNumber(detail.pricing.cacheCreationRatio)}，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
 }
 
@@ -375,6 +384,10 @@ export function buildGroupBillingLines(
   const tierName = (input.details?.pricing?.tierName ?? input.summary?.tierName ?? "")?.trim() || "";
 
   // 单价优先用详情里的 breakdown（与算式同源），退回列表摘要的标量。
+  // 按次与每百万是两种互斥口径：明细里谁有值就按谁的单位渲染，
+  // 绝不把按次价除以 1M 或反之（那会把 $2/call 显示成 $2/1M）。
+  const rawPerCall = input.details?.breakdown?.perCallPrice ?? input.summary?.perCallPrice ?? null;
+  const perCallPrice = typeof rawPerCall === "number" && Number.isFinite(rawPerCall) ? rawPerCall : null;
   const rawInput = input.details?.breakdown?.inputPerMillion ?? input.summary?.inputPerMillion ?? null;
   const rawOutput = input.details?.breakdown?.outputPerMillion ?? input.summary?.outputPerMillion ?? null;
   const inputPrice = typeof rawInput === "number" && Number.isFinite(rawInput) ? rawInput : null;
@@ -388,9 +401,11 @@ export function buildGroupBillingLines(
     lines.push(`×${formatCompactNumber(groupRatio)}`);
   }
 
-  const priceText = inputPrice != null
-    ? (outputPrice != null ? `${money(inputPrice)}/${money(outputPrice)} / 1M` : `${money(inputPrice)} / 1M`)
-    : "";
+  const priceText = perCallPrice != null
+    ? `${money(perCallPrice)} / call`
+    : inputPrice != null
+      ? (outputPrice != null ? `${money(inputPrice)}/${money(outputPrice)} / 1M` : `${money(inputPrice)} / 1M`)
+      : "";
   const secondLine = [tierName, priceText].filter(Boolean).join(" · ");
   if (secondLine) lines.push(secondLine);
 
@@ -428,6 +443,19 @@ function renderDownstreamKeySummary(log: ProxyLogRenderItem) {
 function buildBillingProcessLines(log: ProxyLogRenderItem, money: LogMoneyFormatter = defaultUsdMoney) {
   const detail = log.billingDetails;
   if (!detail) return [];
+
+  // 按次计费：一次请求一个价，算式里没有 token 数参与的乘法。
+  // 每百万四个字段对按次不存在（服务端不写），沿用 token 模板会把
+  // "undefined × tokens" 渲染进日志，比不显示更糟。
+  // ⚠️ `fixed(X)` 的上游 quota_type 仍是 0，必须同时看 breakdown.perCallPrice。
+  if (Number(detail.quotaType) === 1 || detail.breakdown.perCallPrice != null) {
+    const perCall = detail.breakdown.perCallPrice;
+    if (perCall == null) return ['每次价格：--'];
+    return [
+      `每次价格：${money(perCall)} / call`,
+      `1 call × ${money(perCall)} = ${money(detail.breakdown.totalCost)}（已含分组倍率 ×${formatCompactNumber(detail.pricing.groupRatio)}）`,
+    ];
+  }
 
   const lines = [
     `提示价格：${formatPerMillionPrice(detail.breakdown.inputPerMillion, money)}`,
@@ -826,18 +854,31 @@ export default function ProxyLogs() {
   const location = useLocation();
   const navigate = useNavigate();
   // 七：日志金额跟随设置里的显示货币，与模型广场同源。
-  const { currency, getSiteRate } = useCurrency();
+  const { currency, getSiteRate, getSiteDisplayProfile } = useCurrency();
   /**
    * 按站点汇率生成金额格式化器。
-   * 汇率未知时**不换算**（退回美元数字并标注），因为贴个 ¥ 前缀冒充人民币价
+   * 充值价未知时**不换算**（退回美元数字并标注），因为贴个 ¥ 前缀冒充人民币价
    * 比显示美元更危险 —— 与模型广场 R3 的"缺汇率排除"同一判据。
    */
   const makeMoney = useCallback((siteId: number | null | undefined): LogMoneyFormatter => {
     if (currency === 'USD') return defaultUsdMoney;
     const rate = getSiteRate(siteId);
-    if (rate == null) return (usd) => `${formatMoney(usd)}（汇率未知）`;
+    if (rate == null) return (usd) => `${formatMoney(usd)}（充值价未知）`;
     return (usd) => formatMoney(Number(usd || 0) * rate, 'CNY', 1);
   }, [currency, getSiteRate]);
+
+  /**
+   * S6：把 USD 金额换算成"上游页面会显示的数字"。
+   * 仅当该站 `quota_display_type=CUSTOM` 且有自定义汇率时返回；否则 null。
+   * 用于避免"两边数字不同看着像少算 N 倍"的误解 —— 上游只是把 1 USD 显示成
+   * N 个自定义单位，两者是同一笔钱。
+   */
+  const makeUpstreamAmount = useCallback((siteId: number | null | undefined) => {
+    const profile = getSiteDisplayProfile(siteId);
+    if (!profile) return null;
+    return (usd: number | null | undefined): string | null =>
+      formatCustomCurrencyAmount(profile.symbol, profile.rate, usd);
+  }, [getSiteDisplayProfile]);
   const initialRouteState = useMemo(
     () => readProxyLogsRouteState(location.search),
     [location.search],
@@ -3534,6 +3575,20 @@ export default function ProxyLogs() {
                                           >
                                             {makeMoney(detailLog.siteId)(detailLog.estimatedCost)}
                                           </strong>
+                                          {/* S6：上游按自定义货币显示时，把上游读数一并标出，
+                                              避免"两边数字差 N 倍"被误读成少算。 */}
+                                          {(() => {
+                                            const upstream = makeUpstreamAmount(detailLog.siteId);
+                                            const text = upstream ? upstream(detailLog.estimatedCost) : null;
+                                            return text ? (
+                                              <span
+                                                style={{ color: 'var(--color-text-muted)' }}
+                                                title={tr('站点自定义货币显示读数')}
+                                              >
+                                                {text}
+                                              </span>
+                                            ) : null;
+                                          })()}
                                         </>
                                       )}
                                     </span>

@@ -546,7 +546,7 @@ export default function Dashboard({
   const totalUsed = pickAmount('totalUsed', 'totalUsedCny');
   const todaySpend = pickAmount('todaySpend', 'todaySpendCny');
   const todayReward = pickAmount('todayReward', 'todayRewardCny');
-  /** 因汇率未知被排除出 CNY 合计的站点数；仅人民币模式下才有提示意义。 */
+  /** 因充值价未知被排除出 CNY 合计的站点数；仅人民币模式下才有提示意义。 */
   const currencyExcludedSiteCount = dashboardCurrency === 'CNY'
     ? safeNumber(data?.currencyExcludedSiteCount || 0)
     : 0;
@@ -742,9 +742,9 @@ export default function Dashboard({
                     cursor: 'pointer',
                     textDecoration: 'none',
                   }}
-                  title={tr('点击查看并设置这些站点的汇率')}
+                  title={tr('点击查看并设置这些站点的充值价')}
                 >
-                  {`${tr('已排除')} ${currencyExcludedSiteCount} ${tr('个汇率未知的站点')}`}
+                  {`${tr('已排除')} ${currencyExcludedSiteCount} ${tr('个充值价未知的站点')}`}
                 </Link>
               ) : null}
               {/*

@@ -29,7 +29,7 @@ import { getBalanceEvidenceFromExtraConfig, reduceSiteBalanceAvailability } from
 export type DashboardSummaryPayload = {
   totalBalance: number;
   /**
-   * S6 / T8.8：人民币口径（逐站换算，汇率未知的站点已排除）。
+   * S6 / T8.8：人民币口径（逐站换算，充值价未知的站点已排除）。
    * 可选字段 —— 老快照里没有该键，读取方须按"未知"处理而不是当成 0。
    */
   totalBalanceCny?: number;
@@ -37,7 +37,7 @@ export type DashboardSummaryPayload = {
   balanceExcludedSiteCount?: number;
   /**
    * F8 第 3 期：被用户显式标记「不计入总余额」的站点数（USD/CNY 合计都已剔除）。
-   * 与 balanceExcludedSiteCount 语义不同 —— 后者是"汇率未知、算不出来"，
+   * 与 balanceExcludedSiteCount 语义不同 —— 后者是"充值价未知、算不出来"，
    * 这里是"用户要求不算"，两者都要提示，否则合计会静默偏小。
    */
   balanceOptOutSiteCount?: number;
@@ -45,14 +45,14 @@ export type DashboardSummaryPayload = {
   todaySpend: number;
   todayReward: number;
   /**
-   * B2：消耗/收入三个指标的人民币口径（逐站换算，汇率未知的站点已排除）。
+   * B2：消耗/收入三个指标的人民币口径（逐站换算，充值价未知的站点已排除）。
    * 与 USD 字段并列存在，读取方按显示货币择一使用；缺键须当作"未知"而不是 0。
    */
   totalUsedCny?: number;
   todaySpendCny?: number;
   todayRewardCny?: number;
   /**
-   * 因汇率未知被排除出 CNY 合计的站点数（取四个指标的最大值，非相加）。
+   * 因充值价未知被排除出 CNY 合计的站点数（取四个指标的最大值，非相加）。
    * 前端在 CNY 模式下必须提示，否则总额会"看起来正常地偏小"。
    */
   currencyExcludedSiteCount?: number;
@@ -119,7 +119,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     0,
   );
   // S6 / T8.8：双轨口径 —— USD 合计保持不变，另按站点逐笔换算出 CNY 合计。
-  // 汇率未知的站点不进 CNY，但必须计入 excludedSiteCount 供前端提示（R7）。
+  // 充值价未知的站点不进 CNY，但必须计入 excludedSiteCount 供前端提示（R7）。
   const billingProfileRowsForSummary = await db.select().from(schema.siteBillingProfiles).all();
   const cnyRateBySiteId = new Map<number, number | null>();
   for (const row of billingProfileRowsForSummary) {
@@ -133,7 +133,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
       (balanceBySiteForCurrency.get(row.sites.id) || 0) + (row.accounts.balance || 0),
     );
   }
-  // F8：余额「从未读到」的站点也要进 CNY 排除集，理由与缺汇率同构（R7）。
+  // F8：余额「从未读到」的站点也要进 CNY 排除集，理由与缺充值价同构（R7）。
   // accounts.balance 有 schema 默认 0，一条从没刷新成功的连接在这里贡献的是 0 美元，
   // 换算成人民币同样贡献 0 —— 数字上无害，但总额会"看起来正常地偏小"而没有任何说明。
   // 判据与 /api/sites 的 balanceAvailability 完全一致（时间戳最硬 → 证据归并），
@@ -170,10 +170,10 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     Array.from(balanceBySiteForCurrency.entries()).map(([siteId, usd]) => ({
       siteId,
       usd,
-      // 汇率未知优先；否则按余额不可得排除。
+      // 充值价未知优先；否则按余额不可得排除。
       // ⚠️ cnyPerUsd 的类型是 number | null，而 Map.get 可能返回 undefined ——
-      // 直接写三元很容易让"读到过汇率的站点"掉进 undefined 分支，被
-      // summarizeByCurrency 当成汇率未知整批排除（且 totalBalanceCny 静默归 0）。
+      // 直接写三元很容易让"读到过充值价的站点"掉进 undefined 分支，被
+      // summarizeByCurrency 当成充值价未知整批排除（且 totalBalanceCny 静默归 0）。
       // 这里必须显式收敛成 null，不要依赖 ?? 之外的隐式兜底。
       cnyPerUsd: balanceUnreadSiteIds.has(siteId) ? null : (cnyRateBySiteId.get(siteId) ?? null),
     })),
@@ -215,7 +215,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
       )
       .all(),
     // S6 / T8.8 → B2：改成按站点分组返回，USD 合计由这些行求和得出（与旧的
-    // 单值 SUM 等价），同时让 CNY 能逐站乘各自汇率。缺这一步的话累计消耗
+    // 单值 SUM 等价），同时让 CNY 能逐站乘各自充值价。缺这一步的话累计消耗
     // 只能显示美元，会和同一张卡上已换算的余额自相矛盾。
     db
       .select({
@@ -317,8 +317,8 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   /**
    * B2：四个金额指标统一走"逐站汇总 → 双币拆分"（判据见 currencySplit）。
    *
-   * USD 合计仍等于全部站点之和（含汇率未知站点 —— 美元不需要汇率），
-   * 与改造前的单值 SUM 等价；CNY 只累计汇率已知的站点，并单独交出被排除数。
+   * USD 合计仍等于全部站点之和（含充值价未知站点 —— 美元不需要充值价），
+   * 与改造前的单值 SUM 等价；CNY 只累计充值价已知的站点，并单独交出被排除数。
    */
   const usedBySite = (totalUsedRows ?? []).map((row) => ({
     siteId: Number(row?.siteId),
@@ -355,10 +355,10 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
   const todayReward = rewardSplit.usdSum;
 
   // 方案 a1：四个指标各算一次排除数，UI 只取最大值提示一句「N 个站点未计入」。
-  // 取最大值而不是相加：缺汇率通常就是同几个站四处都缺，相加会重复计数、
+  // 取最大值而不是相加：缺充值价通常就是同几个站四处都缺，相加会重复计数、
   // 反而夸大问题规模。
   // F8 起余额这一路还包含"余额从未读到"的站点（见上方 balanceUnreadSiteIds），
-  // 与缺汇率共用同一句提示 —— 两者对用户是同一个后果：这个 CNY 总额不完整。
+  // 与缺充值价共用同一句提示 —— 两者对用户是同一个后果：这个 CNY 总额不完整。
   const currencyExcludedSiteCount = maxExcludedSiteCount(
     currencySplit.excludedSiteCount,
     usedSplit.excludedSiteCount,
@@ -380,7 +380,7 @@ async function loadDashboardSummaryPayload(): Promise<DashboardSummaryPayload> {
     todaySpendCny: toRoundedMicroNumber(todaySpendSplit.cnyTotal),
     todayRewardCny: toRoundedMicroNumber(rewardSplit.cnyTotal),
     /**
-     * 因汇率未知被排除出 CNY 合计的站点数（四个指标取最大值，见上方注释）。
+     * 因充值价未知被排除出 CNY 合计的站点数（四个指标取最大值，见上方注释）。
      * 前端在 CNY 模式下必须提示这个数 —— 否则总额会"看起来正常地偏小"，
      * 用户会当成 bug 报回来。
      */
@@ -439,7 +439,7 @@ async function loadDashboardInsightsPayload(): Promise<DashboardInsightsPayload>
         .from(schema.modelDayUsage)
         .where(gte(schema.modelDayUsage.localDay, modelAnalysisSinceDay))
         .all(),
-      // F3：模型数据分析要出人民币轨道，所以这里也要汇率。
+      // F3：模型数据分析要出人民币轨道，所以这里也要充值价。
       // 复用站点档案读取（同一实现、同一语义），避免在 insights 里再抄一遍解析规则。
       listSiteCurrencyRates(),
     ]);

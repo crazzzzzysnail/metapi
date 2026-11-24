@@ -20,10 +20,13 @@ export interface PriceEvidencePresentation {
 /** 多档动态计费的一档（二-3）。后端 DynamicTierPrice 的前端镜像。 */
 export interface PricingTierPresentation {
   name: string;
-  input: number;
+  /** 每百万输入价；`fixed()` 按次档缺省（不是 0）。 */
+  input?: number;
   output?: number;
   cacheRead?: number;
   cacheCreation?: number;
+  /** `fixed(X)` 档的每请求固定美元价（已乘分组倍率）。与 input 互斥。 */
+  fixedPerRequest?: number;
   /** 适用条件的人话描述，例如 `≤272K`、`周一至周五 09:00-12:00 / 14:00-18:00`。 */
   condition?: string | null;
 }
@@ -37,6 +40,11 @@ export interface ModelGroupPricingPresentation {
   perCallInput?: number;
   perCallOutput?: number;
   perCallTotal?: number;
+  /**
+   * `fixed(X)` 的每请求固定美元价（已乘分组倍率）。
+   * 与每百万四项互斥；上游 quotaType 仍是 0，不能用 quotaType 判断按次。
+   */
+  fixedPerRequest?: number;
   /** 多档动态计费的全部档位（二-3）。只有 len/时间分档的表达式才有。 */
   tiers?: PricingTierPresentation[];
   evidence?: PriceEvidencePresentation;
@@ -70,7 +78,10 @@ export function isAuthoritativePricing(pricing: ModelGroupPricingPresentation): 
 /** 是否存在可用于展示的数值（token 或按次任一有值）。 */
 function hasDisplayableNumbers(pricing: ModelGroupPricingPresentation): boolean {
   if (pricing.quotaType === 0) {
-    return pricing.inputPerMillion != null || pricing.outputPerMillion != null;
+    // fixed(X) 的 quotaType 仍是 0，但单价是每请求价，必须一并认作可展示。
+    return pricing.inputPerMillion != null
+      || pricing.outputPerMillion != null
+      || pricing.fixedPerRequest != null;
   }
   return pricing.perCallInput != null
     || pricing.perCallOutput != null
@@ -111,15 +122,22 @@ function renderTierTable(
       // 与模型广场的 `$0.8/$3.2` 不同形（四-4）。
       return formatPrice(usd);
     };
-    const input = money(tier.input);
-    // 汇率未知：整表都不能给数，否则等于用一个可信的数字掩盖另一部分不可信。
-    if (input === null) return '汇率未知';
-    const output = money(tier.output);
-    const price = output !== null ? `${input}/${output}` : input;
     // 精简模式只保留档位名；完整条件走 title 悬停（三-3）。
     const label = compact
       ? String(tier.name || '')
       : [tier.name, tier.condition].filter(Boolean).join(' · ');
+    // fixed(X) 档：每请求固定价，单位是 / call 而不是 / 1M。
+    if (tier.fixedPerRequest != null) {
+      const fixed = money(tier.fixedPerRequest);
+      if (fixed === null) return '充值价未知';
+      parts.push(label ? `${fixed} / call（${label}）` : `${fixed} / call`);
+      continue;
+    }
+    const input = money(tier.input);
+    // 充值价未知：整表都不能给数，否则等于用一个可信的数字掩盖另一部分不可信。
+    if (input === null) return '充值价未知';
+    const output = money(tier.output);
+    const price = output !== null ? `${input}/${output}` : input;
     parts.push(label ? `${price} / 1M（${label}）` : `${price} / 1M`);
   }
   return parts.join(compact ? ' ｜ ' : ' ｜ ');
@@ -134,7 +152,10 @@ export function describeTierDetails(pricing: ModelGroupPricingPresentation): str
   if (!tiers || tiers.length === 0) return null;
   return tiers
     .map((tier) => {
-      const price = formatPricePair(tier.input, tier.output, 'perMillion');
+      // fixed(X) 档：每请求固定价，单位是 / call。
+      const price = tier.fixedPerRequest != null
+        ? `${formatPrice(tier.fixedPerRequest)} / call`
+        : formatPricePair(tier.input, tier.output, 'perMillion');
       return `${tier.name}${tier.condition ? `（${tier.condition}）` : ''}：${price}`;
     })
     .join('；');
@@ -145,7 +166,7 @@ export function describeTierDetails(pricing: ModelGroupPricingPresentation): str
  *
  * @param pricing   目录里的分组价（美元口径）
  * @param siteId    所属站点；CNY 模式下按该站点汇率换算，USD 模式可不传
- * @param convert   换算回调：返回 null 表示该站点汇率未知，必须显式标注而不是显示美元数
+ * @param convert   换算回调：返回 null 表示该站点充值价未知，必须显式标注而不是显示美元数
  */
 export function renderGroupPricingValue(
   pricing: ModelGroupPricingPresentation,
@@ -171,27 +192,36 @@ export function renderGroupPricingValue(
     return renderTierTable(pricing.tiers, siteId, convert, compact, firstTierOnly);
   }
 
-  // S6 / T8.7：非美元口径下逐站换算；汇率未知的站点明确标注，不显示美元数字冒充人民币。
-  if (convert && siteId != null) {
-    const convertedInput = convert(siteId, pricing.quotaType === 0 ? pricing.inputPerMillion : pricing.perCallTotal ?? pricing.perCallInput);
-    if (convertedInput === null) {
-      return '汇率未知';
-    }
-    // 换算成功时以换算串为主、保留倍率关系描述
-    if (pricing.quotaType === 0) {
-      const convertedOutput = convert(siteId, pricing.outputPerMillion);
-      return `${convertedInput}${convertedOutput !== null ? `/${convertedOutput}` : ''} / 1M`;
-    }
-    return `${convertedInput} / call`;
-  }
+  // 金额出口：人民币走逐站换算，美元带符号。USD/CNY 共用此出口，
+  // 使下面的"参考"警示在两种币种下都不丢。
+  const money = (usd: number | undefined): string | null => {
+    if (usd == null) return null;
+    if (convert && siteId != null) return convert(siteId, usd);
+    return formatPrice(usd);
+  };
 
-  // 四-4：没有 convert 的调用方（路由通道卡片）过去拼成 `0.8/3.2 USD /1M`，
-  // 与模型广场的 `$0.8/$3.2 / 1M` 不同形。现在统一走带符号的成对出口。
-  const value = pricing.quotaType === 0
-    ? formatPricePair(pricing.inputPerMillion, pricing.outputPerMillion, 'perMillion')
-    : (pricing.perCallInput != null || pricing.perCallOutput != null)
-      ? formatPricePair(pricing.perCallInput, pricing.perCallOutput, 'perCall')
-      : formatPricePair(pricing.perCallTotal, undefined, 'perCall');
+  let value: string;
+  if (pricing.fixedPerRequest != null) {
+    // fixed(X)：每请求固定价，单位是 / call 而不是 / 1M。
+    const fixed = money(pricing.fixedPerRequest);
+    if (fixed === null) return '充值价未知';
+    value = `${fixed} / call`;
+  } else if (pricing.quotaType === 0) {
+    const input = money(pricing.inputPerMillion);
+    if (input === null) return '充值价未知';
+    const output = money(pricing.outputPerMillion);
+    value = `${input}${output !== null ? `/${output}` : ''} / 1M`;
+  } else {
+    // 按次计费（上游 quota_type=1）：单价口径是每次，不能除以 1M。
+    const input = money(pricing.perCallTotal ?? pricing.perCallInput);
+    if (input === null) return '充值价未知';
+    if (pricing.perCallInput != null || pricing.perCallOutput != null) {
+      const output = money(pricing.perCallOutput);
+      value = `${input}${output !== null ? `/${output}` : ''} / call`;
+    } else {
+      value = `${input} / call`;
+    }
+  }
 
   // ③ 失效字段推算的要标"参考"。其余口径（上游倍率、直采价、已解析的动态计费表达式）
   //    都是上游实际执行的单价，直接显示 —— S5c 后动态计费不再降级。

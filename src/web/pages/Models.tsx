@@ -193,17 +193,17 @@ export default function Models() {
   } = useCurrency();
   /**
    * 按站点汇率把美元单价换算成展示金额字符串。
-   * 汇率未知时返回 null —— 调用方必须显式渲染"汇率未知"，不得回退原数字加 ¥。
+   * 充值价未知时返回 null —— 调用方必须显式渲染"充值价未知"，不得回退原数字加 ¥。
    */
   const convertSitePrice = useCallback((siteId: number, usd: number | undefined): string | null => {
     if (usd == null) return null;
     if (displayCurrency === 'USD') return formatMoney(usd);
-    // getSiteRate 对"未维护 / 非法 / 缺档案"统一返回 null，这里据此显示"汇率未知"
+    // getSiteRate 对"未维护 / 非法 / 缺档案"统一返回 null，这里据此显示"充值价未知"
     const rate = getSiteRate(siteId);
     if (rate == null) return null;
     return formatMoney(usd * rate, 'CNY', 1);
   }, [displayCurrency, getSiteRate]);
-  /** CNY 下汇率未知的站点数，用于列表页顶部的排除提示（R3：逐站换算，缺汇率排除）。 */
+  /** CNY 下充值价未知的站点数，用于列表页顶部的排除提示（R3：逐站换算，缺汇率排除）。 */
   const excludedUnknownRateSiteCount = displayCurrency === 'CNY' ? unknownRateSiteCount : 0;
   /**
    * F4：提示里可跳转的缺汇率站点 id。
@@ -222,12 +222,12 @@ export default function Models() {
    *
    * ⚠️ 复用 convertSitePrice 而不是另写一份换算 —— 它已经是模型广场价格的唯一出口，
    * 两处各算各的会让同一屏出现「价格 ¥、余额 $」这种自相矛盾。
-   * 它返回 null 表示该站汇率未知；此处不留空而是明确标注，避免被读成"没余额"。
+   * 它返回 null 表示该站充值价未知；此处不留空而是明确标注，避免被读成"没余额"。
    */
   const renderAccountBalance = useCallback((account: ModelAccountInfo): string => {
     const text = convertSitePrice(Number(account.siteId ?? 0), Number(account.balance || 0));
     if (text != null) return text;
-    return `${formatMoney(Number(account.balance || 0))}（汇率未知）`;
+    return `${formatMoney(Number(account.balance || 0))}（充值价未知）`;
   }, [convertSitePrice]);
   const location = useLocation();
   const siteIdByName = useMemo(() => {
@@ -617,7 +617,7 @@ export default function Models() {
               <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
                 {tr('共')} {filteredModels.length} {tr('个模型')}
               </span>
-              {/* S6 / T8.7：CNY 下汇率未知的站点必须显式说明被排除，不能静默少算。
+              {/* S6 / T8.7：CNY 下充值价未知的站点必须显式说明被排除，不能静默少算。
                   F4：这一串同时是可点击入口 —— 已知具体站点就逐个滚动高亮并把第一个
                   送进编辑弹窗的汇率框；拿不到 id（本页不持站点表）则退化成跳站点管理页。 */}
               {excludedUnknownRateSiteCount > 0 && (
@@ -625,9 +625,9 @@ export default function Models() {
                   to={buildUnknownRateSitesPath(unknownRateSiteIds)}
                   className="badge badge-warning"
                   style={{ fontSize: 12, fontWeight: 500, cursor: 'pointer', textDecoration: 'none' }}
-                  title={tr('点击查看并设置这些站点的汇率')}
+                  title={tr('点击查看并设置这些站点的充值价')}
                 >
-                  {`${tr('已排除')} ${excludedUnknownRateSiteCount} ${tr('个汇率未知的站点')}`}
+                  {`${tr('已排除')} ${excludedUnknownRateSiteCount} ${tr('个充值价未知的站点')}`}
                 </Link>
               )}
             </h2>
