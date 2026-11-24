@@ -51,12 +51,12 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
   /**
    * F3：spend 按该站汇率换算成当前显示币种。
    * calls 是次数不是金额，绝不参与换算。
-   * 缺 siteId（老快照）或汇率未知时保留美元并标注，不贴 ¥ 冒充人民币。
+   * 缺 siteId（老快照）或充值价未知时保留美元并标注，不贴 ¥ 冒充人民币。
    */
   const formatSpend = (usd: number, siteId?: number): string => {
     if (currency === 'USD') return formatAmountInCurrency(usd, 'USD');
     const rate = getSiteRate(siteId ?? null);
-    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（汇率未知）`;
+    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（充值价未知）`;
     return formatAmountInCurrency(usd * rate, 'CNY');
   };
 

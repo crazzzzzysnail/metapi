@@ -231,6 +231,11 @@ export interface ProxyLogBillingSummary {
   tierName: string | null;
   inputPerMillion: number | null;
   outputPerMillion: number | null;
+  /**
+   * 按次计费（quotaType===1）的每次单价；token 计费为 null。
+   * 与上面两个每百万字段互斥 —— 同一行只会有一种口径有值。
+   */
+  perCallPrice: number | null;
 }
 
 function toFiniteOrNull(value: unknown): number | null {
@@ -255,14 +260,17 @@ export function extractProxyLogBillingSummary(value: unknown): ProxyLogBillingSu
       : null,
     inputPerMillion: toFiniteOrNull(breakdown.inputPerMillion),
     outputPerMillion: toFiniteOrNull(breakdown.outputPerMillion),
+    perCallPrice: toFiniteOrNull(breakdown.perCallPrice),
   };
 
   // 全空说明这条记录压根没有可用计费信息（旧数据或未记账），返回 null 让前端显示占位。
+  // 按次记录只有 groupName/groupRatio/perCallPrice，因此三者都要参与判定。
   const hasAnything = summary.groupName !== null
     || summary.groupRatio !== null
     || summary.tierName !== null
     || summary.inputPerMillion !== null
-    || summary.outputPerMillion !== null;
+    || summary.outputPerMillion !== null
+    || summary.perCallPrice !== null;
   return hasAnything ? summary : null;
 }
 

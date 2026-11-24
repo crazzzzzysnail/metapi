@@ -9,7 +9,7 @@ import type { RouteChannel } from './types.js';
  * 通道余额的币种分支（F3 遗留项，2026-11-13 补）。
  *
  * 此前 `RouteCard.test.tsx` 只断言了美元口径的 `余额：$12.34`，
- * 而这行代码真正的复杂处全在人民币分支上：有汇率要乘、汇率未知要标注且不乘。
+ * 而这行代码真正的复杂处全在人民币分支上：有汇率要乘、充值价未知要标注且不乘。
  * 两种错法（用 1 当汇率、拿 7.2 兜底）在美元用例里都看不出来。
  *
  * 为什么单独开文件：`useCurrency()` 在没包 Provider 时落到 EMPTY_CONTEXT（恒 USD），
@@ -129,11 +129,11 @@ describe('通道余额按站点汇率换算', () => {
     expect(renderRow(buildChannel(12.34))).toContain('余额：¥90.08');
   });
 
-  it('汇率未知时保留美元并标注，不拿 1 或 7.2 冒充换算', () => {
+  it('充值价未知时保留美元并标注，不拿 1 或 7.2 冒充换算', () => {
     currencyState.current = 'CNY';
     currencyState.rate = null;
     const text = renderRow(buildChannel(12.34));
-    expect(text).toContain('余额：$12.34（汇率未知）');
+    expect(text).toContain('余额：$12.34（充值价未知）');
     expect(text).not.toContain('¥');
   });
 

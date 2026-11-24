@@ -16,6 +16,18 @@ export interface CurrencyContextValue {
   currency: DisplayCurrency;
   /** 站点汇率；null = 未知（调用方须显式标注，不得回退成美元数字冒充人民币）。 */
   getSiteRate: (siteId: number | null | undefined) => number | null;
+  /**
+   * 站点计费档案里的"上游展示口径"（S6）。
+   *
+   * 只在 `quota_display_type=CUSTOM` 且探到自定义汇率时返回；
+   * 用途是把 metapi 的 USD 金额换算成"上游页面会显示的数字"，
+   * 让用户拿两边一对就知道是同一笔钱的不同单位（上游把 1 USD 显示成 N 个自定义单位）。
+   * 它**不参与**任何计费或人民币换算。
+   */
+  getSiteDisplayProfile: (siteId: number | null | undefined) => {
+    symbol: string | null;
+    rate: number;
+  } | null;
   /** 汇率档案是否已就绪；未就绪时调用方应显示占位而不是猜测值。 */
   loaded: boolean;
   /**
@@ -48,6 +60,7 @@ export interface CurrencyContextValue {
 const EMPTY_CONTEXT: CurrencyContextValue = {
   currency: 'USD',
   getSiteRate: () => null,
+  getSiteDisplayProfile: () => null,
   loaded: false,
   unknownRateSiteCount: 0,
   unknownRateSiteIds: [],
@@ -62,13 +75,15 @@ CurrencyContext.displayName = 'CurrencyContext';
 /**
  * Provider 自己拉一次运行时配置与站点列表。
  * 不做成每组件各自 fetch 的原因：一屏几十张卡片会打出 N 次相同请求，
- * 而且"哪个站点汇率未知"必须整屏一致，不能各算各的。
+ * 而且"哪个站点充值价未知"必须整屏一致，不能各算各的。
  */
 export function CurrencyProvider(props: { children: React.ReactNode }) {
   const [currency, setCurrency] = useState<DisplayCurrency>('USD');
   // 存三态：number = 有效汇率，null = 该活跃站点未维护汇率。
   // 之前只存有效值，于是"有多少站没设汇率"这个数算不出来，各页面只好自己再拉一份。
   const [ratesBySiteId, setRatesBySiteId] = useState<Map<number, number | null>>(() => new Map());
+  // S6：上游展示口径（仅 CUSTOM 站）。与汇率分开存 —— 它是"上游怎么显示"，不是"我们怎么换算"。
+  const [displayProfileBySiteId, setDisplayProfileBySiteId] = useState<Map<number, { symbol: string | null; rate: number }>>(() => new Map());
   const [loaded, setLoaded] = useState(false);
   // 并发保护：多个挂载点同时触发 refresh 时只发一轮请求。
   const inflight = useRef<Promise<void> | null>(null);
@@ -89,6 +104,7 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
         const next = String((runtimeInfo as any)?.displayCurrency || 'USD').toUpperCase();
         setCurrency(next === 'CNY' ? 'CNY' : 'USD');
         const map = new Map<number, number | null>();
+        const displayMap = new Map<number, { symbol: string | null; rate: number }>();
         for (const row of (Array.isArray(ratesRes?.rates) ? ratesRes.rates : [])) {
           const id = Number(row?.siteId);
           const raw = Number(row?.cnyPerUsd);
@@ -96,9 +112,20 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
           // 才能数出到底有几个活跃站点没设汇率（unknownRateSiteCount）。
           if (Number.isFinite(id) && id > 0) {
             map.set(id, Number.isFinite(raw) && raw > 0 ? raw : null);
+            // 上游展示口径：只有 CUSTOM 且有正汇率才记，其它模式上游显示的就是 USD/￥，
+            // 与 metapi 已展示的口径一致，不需要再标一行。
+            const customRate = Number((row as any)?.customCurrencyExchangeRate);
+            const isCustom = String((row as any)?.quotaDisplayType || '').toUpperCase() === 'CUSTOM';
+            if (isCustom && Number.isFinite(customRate) && customRate > 0) {
+              const symbol = typeof (row as any)?.customCurrencySymbol === 'string'
+                ? String((row as any).customCurrencySymbol).trim()
+                : '';
+              displayMap.set(id, { symbol: symbol || null, rate: customRate });
+            }
           }
         }
         setRatesBySiteId(map);
+        setDisplayProfileBySiteId(displayMap);
       } catch {
         // 探测失败保持 USD：这是展示口径，不该因为一次网络抖动报错或给出假汇率。
         setCurrency('USD');
@@ -121,6 +148,12 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
     const rate = ratesBySiteId.get(id);
     return typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : null;
   }, [ratesBySiteId]);
+
+  const getSiteDisplayProfile = useCallback((siteId: number | null | undefined) => {
+    const id = Number(siteId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    return displayProfileBySiteId.get(id) ?? null;
+  }, [displayProfileBySiteId]);
 
   const unknownRateSiteCount = useMemo(
     () => Array.from(ratesBySiteId.values()).filter((rate) => rate == null).length,
@@ -163,8 +196,8 @@ export function CurrencyProvider(props: { children: React.ReactNode }) {
   }, [currency]);
 
   const value = useMemo<CurrencyContextValue>(
-    () => ({ currency, getSiteRate, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling }),
-    [currency, getSiteRate, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling],
+    () => ({ currency, getSiteRate, getSiteDisplayProfile, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling }),
+    [currency, getSiteRate, getSiteDisplayProfile, loaded, unknownRateSiteCount, unknownRateSiteIds, refresh, toggleCurrency, toggling],
   );
 
   return <CurrencyContext.Provider value={value}>{props.children}</CurrencyContext.Provider>;

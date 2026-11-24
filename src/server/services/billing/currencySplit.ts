@@ -1,13 +1,13 @@
 /**
  * 跨站金额的逐站换算与排除（S6 / T8.7、T8.8）。
  *
- * R7 决议：**逐站换算，汇率未知的站点排除并提示数量**。
+ * R7 决议：**逐站换算，充值价未知的站点排除并提示数量**。
  * 本模块只做"求和 + 分类"这一件事，三个汇总点（仪表盘快照、站点统计快照、
  * 站点列表）共用同一实现，避免各自写一套导致同屏数字对不上。
  *
  * 口径约定（用户确认的"双轨"）：
  *   - `usdTotal` 永远保留原始美元合计，**不因货币开关改变**；
- *   - `cnyTotal` 只累计汇率已知的站点；
+ *   - `cnyTotal` 只累计充值价已知的站点；
  *   - `excludedSiteCount` 是被排除的站点数，前端必须显示出来——
  *     静默少算是把错误藏进"看起来正常"的数字里，比报错更糟。
  */
@@ -19,18 +19,18 @@ export interface SiteUsdAmount {
   platform?: string | null;
   /** 该站点的美元金额（余额或花费，语义由调用方决定）。 */
   usd: number;
-  /** 站点汇率档案里的 cny_per_usd；null/非法 = 未知。 */
+  /** 站点计费档案里的充值价 cny_per_usd（每 1 美元额度实付人民币）；null/非法 = 未知。 */
   cnyPerUsd: number | null;
 }
 
 export interface CurrencySplitSummary {
-  /** 全部站点的美元合计（含汇率未知站点，因为 USD 不需要汇率）。 */
+  /** 全部站点的美元合计（含充值价未知站点，因为 USD 不需要换算）。 */
   usdTotal: number;
-  /** 仅汇率已知站点换算后的人民币合计。 */
+  /** 仅充值价已知站点换算后的人民币合计。 */
   cnyTotal: number;
   /** 计入 CNY 合计的站点数。 */
   includedSiteCount: number;
-  /** 因汇率未知被排除出 CNY 合计的站点数。 */
+  /** 因充值价未知被排除出 CNY 合计的站点数。 */
   excludedSiteCount: number;
   /** 被排除站点的名称/ID，供 UI 给出可操作的提示。 */
   excludedSites: Array<{ siteId: number; reason: 'rate-unknown' | 'rate-invalid' }>;
@@ -43,7 +43,7 @@ function roundMicro(value: number): number {
 }
 
 /**
- * 逐站换算并分类。不做任何默认汇率兜底 —— 汇率缺失就是排除，不是猜。
+ * 逐站换算并分类。不做任何默认充值价兜底 —— 充值价缺失就是排除，不是猜。
  */
 export function summarizeByCurrency(items: SiteUsdAmount[]): CurrencySplitSummary {
   let usdTotal = 0;
@@ -53,7 +53,7 @@ export function summarizeByCurrency(items: SiteUsdAmount[]): CurrencySplitSummar
 
   for (const item of items) {
     const usd = Number.isFinite(item.usd) ? item.usd : 0;
-    // USD 合计始终纳入：换算不涉及汇率，缺汇率不影响美元准确性
+    // USD 合计始终纳入：换算不涉及充值价，缺充值价不影响美元准确性
     usdTotal += usd;
 
     const rate = Number(item.cnyPerUsd);
@@ -80,7 +80,7 @@ export function summarizeByCurrency(items: SiteUsdAmount[]): CurrencySplitSummar
 
 /**
  * 单站点金额换算（用于行内展示，不做合计）。
- * 返回 null 表示汇率未知，调用方必须显式标注而不是显示美元数加 ¥。
+ * 返回 null 表示充值价未知，调用方必须显式标注而不是显示美元数加 ¥。
  */
 export function convertSiteUsdToCny(
   usd: number,
@@ -115,10 +115,10 @@ export interface MetricCurrencySplit extends CurrencySplitSummary {
  * 把「按站点分组的某指标金额」换算成双币口径。
  *
  * @param amounts 每站一条（来自 GROUP BY siteId 的聚合结果）
- * @param rateBySiteId 站点 → 汇率；缺键或非法值一律按"未知"处理
+ * @param rateBySiteId 站点 → 充值价；缺键或非法值一律按"未知"处理
  *
- * 关键不变式：**usdSum 必须等于全部站点之和（含汇率未知站点）**。
- * 美元不需要汇率，所以把缺汇率的站从 USD 里剔掉才是错的。
+ * 关键不变式：**usdSum 必须等于全部站点之和（含充值价未知站点）**。
+ * 美元不需要换算，所以把缺充值价的站从 USD 里剔掉才是错的。
  */
 export function splitMetricBySite(
   amounts: SiteAmount[],
@@ -140,7 +140,7 @@ export function splitMetricBySite(
 /**
  * 多个指标的"被排除站点数"合并。
  *
- * 取最大值而非相加：缺汇率通常就是同几个站在四个指标上都缺，
+ * 取最大值而非相加：缺充值价通常就是同几个站在四个指标上都缺，
  * 相加会把同一批站点重复计数、夸大问题规模（方案 a1）。
  */
 export function maxExcludedSiteCount(...counts: number[]): number {

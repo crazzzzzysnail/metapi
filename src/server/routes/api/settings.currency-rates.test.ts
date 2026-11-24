@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
- * F8：汇率端点的 unknownCount。
+ * F8：充值价端点的 unknownCount。
  *
  * 缓存不用管：readSnapshotCache 在 VITEST 下恒为 bypass（snapshotCacheService.ts:69），
  * 每个用例都会真的跑一次 loader，读到的是本次种下的数据。
@@ -64,7 +64,7 @@ describe('GET /api/settings/currency-rates 的 unknownCount', () => {
     return site;
   }
 
-  it('活跃站里汇率未知的数量如实回传', async () => {
+  it('活跃站里充值价未知的数量如实回传', async () => {
     await seedSite('siteA', 'active', 7.2);
     await seedSite('siteB', 'active', null);
     await seedSite('siteC', 'active', null);
@@ -79,7 +79,7 @@ describe('GET /api/settings/currency-rates 的 unknownCount', () => {
   it('禁用站点不参与 unknownCount（否则提示数量虚增）', async () => {
     await seedSite('siteA', 'active', 7.2);
     await seedSite('siteB', 'active', null);
-    // 禁用站即使缺汇率也不算"未计入"：它压根不在任何金额合计里
+    // 禁用站即使缺充值价也不算"未计入"：它压根不在任何金额合计里
     await seedSite('siteD', 'disabled', null);
 
     const body = (await app.inject({ method: 'GET', url: '/api/settings/currency-rates' })).json();
@@ -87,7 +87,7 @@ describe('GET /api/settings/currency-rates 的 unknownCount', () => {
     expect(body.unknownCount).toBe(1);
   });
 
-  it('非法汇率值同样计为未知，而不是当成有效值', async () => {
+  it('非法充值价同样计为未知，而不是当成有效值', async () => {
     await seedSite('siteA', 'active', 0);
 
     const body = (await app.inject({ method: 'GET', url: '/api/settings/currency-rates' })).json();

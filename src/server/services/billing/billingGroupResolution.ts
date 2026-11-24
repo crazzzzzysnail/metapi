@@ -78,7 +78,19 @@ export function resolveBillingGroup(
         : null;
     }
 
-    // ③ 有令牌信息但一个都对不上：拒绝出价，绝不退到别的分组。
+    // ③ 显式令牌分组不在模型声明里：**本地令牌元数据可能过期**。
+    //    实测 2026-11-22：某站令牌本地仍标 default（11-21 手工建），
+    //    而模型只声明 [deepseek套餐, 按次]；请求在上游成功、且上游日志记的组是「按次」。
+    //    请求既然成功，真实分组必在声明内 —— 只有"声明内恰有一个已知倍率的分组"时
+    //    才按它计价（无歧义，等于元数据过期自愈）；多于一个就仍拒绝，绝不瞎猜。
+    if (tokenGroup && !isAutoGroupName(tokenGroup) && groups.length > 0) {
+      const known = groups.filter((group) => hasExplicitRatio(groupRatio, group));
+      if (known.length === 1) {
+        return { ratio: groupRatio[known[0]]!, groupName: known[0] };
+      }
+    }
+
+    // ④ 其余情况：有令牌信息但无法确定分组 —— 拒绝出价，绝不退到别的分组。
     return null;
   }
 

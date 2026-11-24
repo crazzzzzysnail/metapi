@@ -290,6 +290,25 @@ describe('proxyLogStore', () => {
         tierName: 'off_peak',
         inputPerMillion: 0.4,
         outputPerMillion: 1.6,
+        perCallPrice: null,
+      });
+    });
+
+    it('按次记录抽出 perCallPrice，每百万字段为 null', () => {
+      // 按次模型的明细只有 perCallPrice；两族字段互斥，混渲染会把 $2/call 显示成 $2/1M。
+      const raw = JSON.stringify({
+        quotaType: 1,
+        usage: { promptTokens: 0, completionTokens: 0 },
+        pricing: { groupRatio: 0.2, groupName: '按次' },
+        breakdown: { perCallPrice: 2, totalCost: 2 },
+      });
+      expect(extractProxyLogBillingSummary(raw)).toEqual({
+        groupName: '按次',
+        groupRatio: 0.2,
+        tierName: null,
+        inputPerMillion: null,
+        outputPerMillion: null,
+        perCallPrice: 2,
       });
     });
 
@@ -303,6 +322,7 @@ describe('proxyLogStore', () => {
         tierName: null,
         inputPerMillion: 0.3,
         outputPerMillion: 1.8,
+        perCallPrice: null,
       });
     });
 
@@ -319,7 +339,20 @@ describe('proxyLogStore', () => {
         tierName: null,
         inputPerMillion: 2,
         outputPerMillion: null,
+        perCallPrice: null,
       });
+    });
+
+    it('仅 perCallPrice 有值时也算可用（旧判定会把它整条剔成 null）', () => {
+      // hasAnything 判据扩了一个字段后必须验这一态：按次记录没有每百万字段，
+      // 若沿用旧判据，界面会把一条正常记账的按次请求显示成"无计费信息"。
+      const summary = extractProxyLogBillingSummary(JSON.stringify({
+        quotaType: 1,
+        pricing: {},
+        breakdown: { perCallPrice: 0.5 },
+      }));
+      expect(summary).not.toBeNull();
+      expect(summary!.perCallPrice).toBe(0.5);
     });
 
     it('returns null when there is nothing usable at all', () => {

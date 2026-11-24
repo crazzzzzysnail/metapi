@@ -107,13 +107,13 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
    * F3：按站点汇率把美元换算成当前显示币种。
    *
    * 汇率优先取 context（顶栏切换后全站同一份），退回快照行里带的 cnyPerUsd。
-   * 汇率未知时**保留美元并标注**，不贴 ¥ —— 与模型广场、日志同一判据：
+   * 充值价未知时**保留美元并标注**，不贴 ¥ —— 与模型广场、日志同一判据：
    * 一个看起来可信的错数比"这是美元"更危险。
    */
   const formatSiteValue = (item: SiteDistributionData, usd: number): string => {
     if (currency === 'USD') return formatAmountInCurrency(usd, 'USD');
     const rate = getSiteRate(item.siteId) ?? (Number(item.cnyPerUsd) > 0 ? Number(item.cnyPerUsd) : null);
-    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（汇率未知）`;
+    if (rate == null) return `${formatAmountInCurrency(usd, 'USD')}（充值价未知）`;
     return formatAmountInCurrency(usd * rate, 'CNY');
   };
 

@@ -83,6 +83,55 @@ describe('billing_details 的口径与档位留痕', () => {
     expect(detail.pricing.tierName).toBeUndefined();
   });
 
+  it('按次计费也产出明细（分组名/倍率/每次价），过去直接返回 null', () => {
+    // 真实上游形态（已中性化）：quota_type=1 按次、model_price 为每请求价、
+    // enable_groups 含一个低倍率的"按次"分组。旧实现 estimated_cost 落库正确，
+    // 但 billing_details 为空 → 日志"分组/计费"整行消失，无法知道按哪档扣的。
+    const perCall = normalizeCommonPricingPayload({
+      success: true,
+      group_ratio: { 'grp-a': 1, '按次': 0.2 },
+      data: [{
+        model_name: 'img-model', quota_type: 1, model_ratio: 0, completion_ratio: 0,
+        model_price: 10, enable_groups: ['grp-a', '按次'],
+      }],
+    })!;
+    const detail = calculateModelUsageBreakdown(perCall.models.get('img-model')!, {
+      promptTokens: 1200, completionTokens: 300, totalTokens: 1500,
+    }, perCall.groupRatio, undefined, { tokenGroup: '按次' })!;
+
+    expect(detail).not.toBeNull();
+    expect(detail.quotaType).toBe(1);
+    expect(detail.pricing.groupName).toBe('按次');
+    expect(detail.pricing.groupRatio).toBe(0.2);
+    expect(detail.pricing.evidenceSource).toBe('upstream-per-call');
+    // 每次价 = model_price × 分组倍率，与 calculateModelUsageCost 同源
+    expect(detail.breakdown.perCallPrice).toBe(2);
+    expect(detail.breakdown.totalCost).toBe(2);
+    // 每百万四字段一律不写：写了就是把"口径不适用"显示成 $0 免费
+    expect(detail.breakdown.inputPerMillion).toBeUndefined();
+    expect(detail.breakdown.outputPerMillion).toBeUndefined();
+    expect(detail.breakdown.cacheReadPerMillion).toBeUndefined();
+    expect(detail.breakdown.cacheCreationPerMillion).toBeUndefined();
+    // 档位名不适用（按次没有动态档）
+    expect(detail.pricing.tierName).toBeUndefined();
+  });
+
+  it('按次模型倍率未知时仍不出账（与 token 同一判据）', () => {
+    const perCall = normalizeCommonPricingPayload({
+      success: true,
+      group_ratio: { default: 1 },
+      data: [{
+        model_name: 'img-orphan', quota_type: 1, model_ratio: 0, completion_ratio: 0,
+        model_price: 10, enable_groups: ['未列倍率组'],
+      }],
+    })!;
+    // enableGroups 里的分组在 group_ratio 中不存在 → resolveBillingGroup 判未知
+    const detail = calculateModelUsageBreakdown(perCall.models.get('img-orphan')!, {
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+    }, { default: 1 });
+    expect(detail).toBeNull();
+  });
+
   it('序列化后仍可读回两个字段（JSON 往返）', () => {
     const { model } = modelOf('sample-model-cal');
     const detail = calculateModelUsageBreakdown(model, {

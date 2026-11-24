@@ -99,36 +99,36 @@ describe('formatMoney 币种与汇率', () => {
 
   it('CNY 但汇率缺失时明确标注，不静默按 USD 数字加 ¥', () => {
     const text = formatMoney(2, 'CNY', null);
-    expect(text).toContain('汇率未知');
+    expect(text).toContain('充值价未知');
     // 关键：不得伪装成一个可信的人民币价
     expect(text).not.toBe('¥14.4');
-    expect(formatMoney(2, 'CNY', 0)).toContain('汇率未知');
-    expect(formatMoney(2, 'CNY', Number.NaN)).toContain('汇率未知');
+    expect(formatMoney(2, 'CNY', 0)).toContain('充值价未知');
+    expect(formatMoney(2, 'CNY', Number.NaN)).toContain('充值价未知');
   });
 
   it('负汇率同样视为不可用', () => {
-    expect(formatMoney(2, 'CNY', -7)).toContain('汇率未知');
+    expect(formatMoney(2, 'CNY', -7)).toContain('充值价未知');
   });
 });
 
 /**
  * 2026-11-12：站点管理与连接管理接币种时暴露的口径漏洞。
  *
- * 原先「汇率未知」分支用的是当前币种符号，于是 `¥75.00（汇率未知）`
+ * 原先「充值价未知」分支用的是当前币种符号，于是 `¥75.00（充值价未知）`
  * ——数字根本没换算，却顶着一个 ¥。用户看到的第一反应是"人民币才 75 元"。
- * 判据：汇率未知 = 保留美元符号 + 标注，和 SearchModal / 图表同一口径。
+ * 判据：充值价未知 = 保留美元符号 + 标注，和 SearchModal / 图表同一口径。
  */
-describe('CNY 汇率未知时保留美元符号', () => {
+describe('CNY 充值价未知时保留美元符号', () => {
   it('formatBalance 不得给未换算的美元数字贴 ¥', () => {
-    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（汇率未知）');
-    expect(formatBalance(75, 'CNY', 0)).toBe('$75.00（汇率未知）');
-    expect(formatBalance(0, 'CNY', null)).toBe('$0.00（汇率未知）');
-    expect(formatBalance(0.8, 'CNY', null)).toBe('$0.8（汇率未知）');
+    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（充值价未知）');
+    expect(formatBalance(75, 'CNY', 0)).toBe('$75.00（充值价未知）');
+    expect(formatBalance(0, 'CNY', null)).toBe('$0.00（充值价未知）');
+    expect(formatBalance(0.8, 'CNY', null)).toBe('$0.8（充值价未知）');
   });
 
   it('formatMoney / formatCostFixed 同一判据', () => {
-    expect(formatMoney(2, 'CNY', null)).toBe('$2（汇率未知）');
-    expect(formatCostFixed(0.5, 6, 'CNY', null)).toBe('$0.500000（汇率未知）');
+    expect(formatMoney(2, 'CNY', null)).toBe('$2（充值价未知）');
+    expect(formatCostFixed(0.5, 6, 'CNY', null)).toBe('$0.500000（充值价未知）');
   });
 
   it('汇率有效时仍按汇率换算', () => {
@@ -138,15 +138,15 @@ describe('CNY 汇率未知时保留美元符号', () => {
 
   /**
    * F6 修订（2026-11-12）：站点管理有独立汇率列、连接管理每条记录带站点徽标，
-   * 汇率未知在别处已可见；金额后面再缀「（汇率未知）」会让整列被重复文字淹没。
+   * 充值价未知在别处已可见；金额后面再缀「（充值价未知）」会让整列被重复文字淹没。
    * 内联出口在同样场景下只退回 `$` 数字，不加后缀。
    */
-  it('formatBalanceInline 汇率未知时不追加后缀', () => {
+  it('formatBalanceInline 充值价未知时不追加后缀', () => {
     expect(formatBalanceInline(75, 'CNY', null)).toBe('$75.00');
     expect(formatBalanceInline(75, 'CNY', 0)).toBe('$75.00');
     expect(formatBalanceInline(0.8, 'CNY', null)).toBe('$0.8');
     // 与带标注版本形成对照：同一个入参，只有后缀差异
-    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（汇率未知）');
+    expect(formatBalance(75, 'CNY', null)).toBe('$75.00（充值价未知）');
   });
 
   it('formatBalanceInline 汇率有效时与 formatBalance 完全一致', () => {
@@ -212,7 +212,7 @@ describe('formatBalanceOrDash', () => {
 
   it('读到过时与 formatBalanceInline 完全一致', () => {
     expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: 7.3, neverRead: false })).toBe('¥547.50');
-    // 汇率未知仍走 F6 口径：退回纯美元数字，不加「（汇率未知）」后缀
+    // 充值价未知仍走 F6 口径：退回纯美元数字，不加「（充值价未知）」后缀
     expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: null, neverRead: false })).toBe('$75.00');
   });
 
@@ -243,9 +243,9 @@ describe('formatBalanceOrDash', () => {
    * withRateNote：搜索结果这类没有旁路提示的地方，缺汇率必须写进数字本身。
    * 只影响"出数字"的分支，`—`/`∞` 不受影响。
    */
-  it('withRateNote 让汇率未知的分支保留标注', () => {
+  it('withRateNote 让充值价未知的分支保留标注', () => {
     expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: null, neverRead: false, withRateNote: true }))
-      .toBe('$75.00（汇率未知）');
+      .toBe('$75.00（充值价未知）');
     // 汇率已知时与默认口径完全一致，不会多出任何文字
     expect(formatBalanceOrDash(75, { currency: 'CNY', cnyPerUsd: 7.3, neverRead: false, withRateNote: true }))
       .toBe('¥547.50');

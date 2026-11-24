@@ -29,7 +29,7 @@ function formatRouteUnitMemberLabel(member: { accountId: number; username: strin
  *
  * 它遮蔽了 numberFormat 里的同名共享出口，于是"设置切到人民币、通道卡片仍是 $"
  * ——而且这类局部实现每加一处，全站一致性就多一个失守点。
- * 现在余额按该账号所属站点的汇率换算；汇率未知则保留美元并标注，不贴 ¥ 冒充。
+ * 现在余额按该账号所属站点的汇率换算；充值价未知则保留美元并标注，不贴 ¥ 冒充。
  */
 function formatChannelBalance(
   value: number | null | undefined,
@@ -39,7 +39,7 @@ function formatChannelBalance(
   const balance = typeof value === 'number' && Number.isFinite(value) ? value : 0;
   if (currencyCtx.currency === 'USD') return formatBalanceShared(balance);
   const rate = currencyCtx.getSiteRate(siteId);
-  if (rate == null) return `${formatBalanceShared(balance)}（汇率未知）`;
+  if (rate == null) return `${formatBalanceShared(balance)}（充值价未知）`;
   return formatBalanceShared(balance * rate, 'CNY', 1);
 }
 
@@ -94,7 +94,7 @@ function makeChannelMoney(
   return (usd: number | undefined) => {
     if (usd == null) return null;
     if (currency === 'USD') return formatMoney(usd);
-    // CNY 但汇率未知：返回 null 让上层显式标注，绝不贴 ¥ 冒充人民币价。
+    // CNY 但充值价未知：返回 null 让上层显式标注，绝不贴 ¥ 冒充人民币价。
     if (rate == null) return null;
     return formatMoney(usd * rate, 'CNY', 1);
   };
@@ -164,7 +164,7 @@ function buildBillingTooltipLines(
 
   // ④ 四：只有切到人民币才需要解释换算；美元是目录原值，没有"换算"可言。
   if (currencyCtx.currency === 'CNY') {
-    lines.push(rate != null ? `以上价格按站点汇率 ×${rate} 换算` : '该站点汇率未知，未做换算');
+    lines.push(rate != null ? `以上价格按站点汇率 ×${rate} 换算` : '该站点充值价未知，未做换算');
   }
   return lines;
 }

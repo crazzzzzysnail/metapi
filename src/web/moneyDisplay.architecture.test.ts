@@ -135,7 +135,7 @@ describe('金额显示必须走共享出口（不得散写 $ 字面量）', () =
  * 而是"走了共享出口但没传币种"：formatBalance(value) 默认 USD，顶栏怎么切都不动。
  * 与上面那条硬编码守卫互补 —— 那条防新写的 `$${x}`，这条防参数缺省。
  */
-// 两个余额出口都要带币种：formatBalance（带「汇率未知」标注）与
+// 两个余额出口都要带币种：formatBalance（带「充值价未知」标注）与
 // formatBalanceInline（站点管理/连接管理的内联版，不加后缀）。
 const SINGLE_ARG_BALANCE = /formatBalance(?:Inline)?\(\s*[^(),]+\s*\)/;
 
@@ -174,7 +174,7 @@ describe('余额格式化必须显式传币种', () => {
  * 而且类型检查与渲染测试都发现不了。
  *
  * 为什么只查这两个文件：其余页面（搜索结果、图表）没有"每行都是连接余额格"的结构，
- * 它们该用带「汇率未知」标注的 formatBalance —— 一刀切会误伤。
+ * 它们该用带「充值价未知」标注的 formatBalance —— 一刀切会误伤。
  */
 const DIRECT_BALANCE_CELL = [
   // a.balance / props.balance / row.balance 作为**整个**首参

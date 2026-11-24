@@ -1861,6 +1861,30 @@
           "notNull": false,
           "defaultValue": "datetime('now')",
           "primaryKey": false
+        },
+        "quota_display_type": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "custom_currency_symbol": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "custom_currency_exchange_rate": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "display_source": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

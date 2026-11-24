@@ -145,7 +145,7 @@ export function resetModelsMarketplaceCacheForTests(): void {
 
 /**
  * 把站点计费档案行转成模型广场需要的展示结构（T8.6）。
- * 无档案行 → 全 null，语义是"未探测"，由前端标「汇率未知」；绝不补默认值。
+ * 无档案行 → 全 null，语义是"未探测"，由前端标「充值价未知」；绝不补默认值。
  */
 function toMarketplaceBillingProfile(
   row: typeof schema.siteBillingProfiles.$inferSelect | undefined,
@@ -1251,13 +1251,15 @@ export async function statsRoutes(app: FastifyInstance) {
               perCallInput?: number;
               perCallOutput?: number;
               perCallTotal?: number;
+              /** `fixed(X)` 每请求固定美元价（已乘分组倍率）。 */
+              fixedPerRequest?: number;
             }
           >;
           /** auto 聚合分组的下属链路（T4.4）。空数组 = 无 auto 或聚合入口即 default。 */
           autoGroups?: string[];
           /**
            * 站点计费档案（T8.6）。全 null 表示"未探测且未手动维护"，
-           * 前端切 CNY 时必须显示「汇率未知」而不是猜一个汇率。
+           * 前端切 CNY 时必须显示「充值价未知」而不是猜一个汇率。
            */
           billingProfile: {
             cnyPerUsd: number | null;
@@ -1295,7 +1297,7 @@ export async function statsRoutes(app: FastifyInstance) {
           .all();
 
         // T8.6：站点计费档案单独取（左连接语义 —— 没档案的站点也必须出现在结果里，
-        // 只是汇率为 null 由前端标"未知"）。用 innerJoin 会把未探测过的站点整批丢掉。
+        // 只是充值价为 null 由前端标"未知"）。用 innerJoin 会把未探测过的站点整批丢掉。
         const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
         const billingProfileBySiteId = new Map<number, typeof schema.siteBillingProfiles.$inferSelect>();
         for (const row of billingProfileRows) billingProfileBySiteId.set(row.siteId, row);
@@ -1379,9 +1381,9 @@ export async function statsRoutes(app: FastifyInstance) {
               // T4.4：auto 链路成员分组（如 siteA 的 grp-daily/grp-perf）。
               // 空数组表示该站点没有 auto 聚合，或聚合入口就是 default。
               autoGroups: result.catalog.autoGroups ?? [],
-              // T8.6 / T8.7：把该站点的汇率与标尺档案一并带出。
-              // null 的含义是"未探测且未手动维护"，前端必须据此显示"汇率未知"，
-              // 不得用任何默认汇率换算（R3 严禁伪造）。
+              // T8.6 / T8.7：把该站点的充值价与标尺档案一并带出。
+              // null 的含义是"未探测且未手动维护"，前端必须据此显示"充值价未知"，
+              // 不得用任何默认充值价换算（R3 严禁伪造）。
               billingProfile: toMarketplaceBillingProfile(billingProfileBySiteId.get(result.site.id)),
               // S3-1：只读预热缓存（summary 双窗 + 详情 24h 拿 ttft），miss/过期由快照层归空态；
               // 绝不在这里 await 上游——判据 5 的渲染路径零同步等待。
@@ -1414,7 +1416,7 @@ export async function statsRoutes(app: FastifyInstance) {
             {
               id: number;
               site: string;
-              /** F3：余额按站点汇率换算所需（site 只有名字，不足以定位汇率）。 */
+              /** F3：余额按站点充值价换算所需（site 只有名字，不足以定位汇率）。 */
               siteId: number;
               username: string | null;
               latency: number | null;
@@ -1451,7 +1453,7 @@ export async function statsRoutes(app: FastifyInstance) {
           modelMap[m.modelName].accountsById.set(a.id, {
             id: a.id,
             site: s.name,
-            // F3：前端要按站点汇率换算余额，只有名字换不了（名字可重复、可改名）
+            // F3：前端要按站点充值价换算余额，只有名字换不了（名字可重复、可改名）
             siteId: s.id,
             username: a.username,
             latency: m.latencyMs,

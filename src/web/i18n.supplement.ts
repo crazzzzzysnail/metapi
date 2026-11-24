@@ -366,15 +366,15 @@ export const zhToEnSupplemental: Record<string, string> = {
   '浅色': 'light color',
   '浅色模式': 'light mode',
   // F5：本轮新增的用户可见串。
-  // 「已排除 N 个汇率未知的站点」沿用仓库既有的分段翻译范式（见 Models.tsx / Dashboard.tsx），
+  // 「已排除 N 个充值价未知的站点」沿用仓库既有的分段翻译范式（见 Models.tsx / Dashboard.tsx），
   // 不在此引入插值机制，否则同一种提示会在两处用两种写法。
   '已排除': 'Excluded',
-  '个汇率未知的站点': 'site(s) with unknown exchange rate',
-  // F4：汇率未知提示做成可点击入口后新增的文案（模型广场/仪表盘提示、站点页横幅、站点徽标）。
-  '点击查看并设置这些站点的汇率': 'Click to view and set exchange rates for these sites',
-  '未探测到汇率，该站点不计入人民币合计；点击直接填写汇率': 'Exchange rate not detected; this site is excluded from the CNY total. Click to set it.',
+  '个充值价未知的站点': 'site(s) with unknown top-up price',
+  // F4：充值价未知提示做成可点击入口后新增的文案（模型广场/仪表盘提示、站点页横幅、站点徽标）。
+  '点击查看并设置这些站点的充值价': 'Click to view and set the top-up price for these sites',
+  '未探测到充值价，该站点不计入人民币合计；点击直接填写充值价': 'Top-up price not detected; this site is excluded from the CNY total. Click to set it.',
   '另有': 'Another',
-  '个站点待设置汇率': 'site(s) awaiting an exchange rate',
+  '个站点待设置充值价': 'site(s) awaiting a top-up price',
   '继续处理': 'Continue',
   '忽略': 'Dismiss',
   '切换货币': 'Switch currency',

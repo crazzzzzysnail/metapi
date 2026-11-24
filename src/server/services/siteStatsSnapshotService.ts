@@ -21,14 +21,14 @@ export type SiteStatsSnapshotPayload = {
     totalBalance: number;
     totalSpend: number;
     accountCount: number;
-    /** S6 / T8.9：该站点汇率（null = 未知，前端须标「汇率未知」而非换算）。 */
+    /** S6 / T8.9：该站点充值价（null = 未知，前端须标「充值价未知」而非换算）。 */
     cnyPerUsd?: number | null;
-    /** 汇率来源标记，用于列表页区分"自动探测 / 手动覆盖 / 未知"。 */
+    /** 充值价来源标记，用于列表页区分"自动探测 / 手动覆盖 / 未知"。 */
     rateSource?: 'auto' | 'manual' | 'unknown';
   }>;
   trend: Array<{
     date: string;
-    /** siteId 供前端按站取汇率换算（F3）；老读取方可忽略这个新增字段。 */
+    /** siteId 供前端按站取充值价换算（F3）；老读取方可忽略这个新增字段。 */
     sites: Record<string, { spend: number; calls: number; siteId: number }>;
   }>;
   sites: Array<typeof schema.sites.$inferSelect>;
@@ -83,7 +83,7 @@ async function loadSiteStatsSnapshotPayload(
     spendBySiteId.set(row.siteId, Number(row.totalSpend || 0));
   }
 
-  // S6 / T8.8：站点级汇率档案。逐站换算，汇率未知的站点不进 CNY 合计但必须计数。
+  // S6 / T8.8：站点级充值价档案。逐站换算，充值价未知的站点不进 CNY 合计但必须计数。
   const billingProfileRows = await db.select().from(schema.siteBillingProfiles).all();
   const cnyRateBySiteId = new Map<number, number | null>();
   for (const row of billingProfileRows) {
@@ -98,7 +98,7 @@ async function loadSiteStatsSnapshotPayload(
     totalBalance: toRoundedMicroNumber(Number(row.totalBalance || 0)),
     totalSpend: toRoundedMicroNumber(spendBySiteId.get(row.siteId) || 0),
     accountCount: Number(row.accountCount || 0),
-    // 该站点的汇率状态（T8.9 列表页要用）：auto / manual / unknown
+    // 该站点的充值价状态（T8.9 列表页要用）：auto / manual / unknown
     cnyPerUsd: cnyRateBySiteId.get(row.siteId) ?? null,
     rateSource: (() => {
       const profile = billingProfileRows.find((p) => p.siteId === row.siteId);
@@ -131,8 +131,8 @@ async function loadSiteStatsSnapshotPayload(
   /**
    * F3：trend 每个站点值带上 siteId。
    *
-   * 为什么不让前端按站点名反查汇率：名字可重复、可改名，后端在这里还用
-   * `"unknown"` 兜底空名 —— 拿它当汇率键会静默算错某些站的趋势金额。
+   * 为什么不让前端按站点名反查充值价：名字可重复、可改名，后端在这里还用
+   * `"unknown"` 兜底空名 —— 拿它当充值价键会静默算错某些站的趋势金额。
    * siteId 才是稳定标识。新增字段不破坏既有读取方（老代码只读 spend/calls）。
    */
   const trend = Object.entries(dayMap)

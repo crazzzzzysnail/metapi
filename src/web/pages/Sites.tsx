@@ -28,6 +28,7 @@ import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { buildBatchSelectionInfo } from './helpers/batchSelectionInfo.js';
 import { balanceUnavailableHint } from './helpers/balanceAvailability.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
+import { formatCustomCurrencyAmount } from './helpers/upstreamCurrencyDisplay.js';
 import {
   buildSiteSaveAction,
   emptySiteApiEndpoint,
@@ -81,13 +82,21 @@ type SiteRow = {
   excludeFromTotalBalance?: boolean;
   /** F8 第 3 期：'none' 表示该站点压根没有余额接口（null 等价 auto）。 */
   balanceCapability?: string | null;
-  /** S6 / T8.9：站点计费档案（汇率/标尺及其来源）。缺省表示从未探测。 */
+  /** S6 / T8.9：站点计费档案（充值价/标尺/上游展示口径及其来源）。缺省表示从未探测。 */
   billingProfile?: {
     cnyPerUsd: number | null;
     rateSource: 'auto' | 'manual' | null;
     quotaPerUnit: number | null;
     quotaSource: 'auto' | 'manual' | null;
     capturedAt: string | null;
+    /** 上游展示口径：USD / CNY / CUSTOM / TOKENS；null = 未探测。 */
+    quotaDisplayType?: string | null;
+    /** CUSTOM 模式下上游自己用的符号（自由文本）。 */
+    customCurrencySymbol?: string | null;
+    /** CUSTOM 模式下每 1 USD 等于多少自定义单位。 */
+    customCurrencyExchangeRate?: number | null;
+    /** 展示口径来源：auto 探测 / manual 手填 / null 未知。 */
+    displaySource?: 'auto' | 'manual' | null;
   } | null;
   subscriptionSummary?: SiteSubscriptionSummary | null;
   createdAt?: string;
@@ -169,8 +178,8 @@ function formatUsd(
 ): string {
   // 一-1：余额列固定 2 位小数，只有小于 1 才展开有效位数。
   // 2026-11-12：余额与订阅额度都属于"站点自己的美元账"，必须按该站汇率换算；
-  // 汇率未知时退回纯美元数字——本页有独立「汇率」列做黄色提示，金额后面
-  // 再缀「（汇率未知）」会让整列被重复文字淹没（用户实测反馈）。
+  // 充值价未知时退回纯美元数字——本页有独立「汇率」列做黄色提示，金额后面
+  // 再缀「（充值价未知）」会让整列被重复文字淹没（用户实测反馈）。
   return formatBalanceInline(value, currency, rate);
 }
 
@@ -233,7 +242,7 @@ function buildSubscriptionInlineValue(
     : '--';
   const remainingDuration = formatRemainingDuration(summary.nextExpiresAt);
   const remainingSuffix = remainingDuration ? `（${remainingDuration}）` : '';
-  // 判空用原始数值，不用格式化后的文本：切到人民币后文本会多出符号与「汇率未知」后缀。
+  // 判空用原始数值，不用格式化后的文本：切到人民币后文本会多出符号与「充值价未知」后缀。
   const usedNumber = Number(summary.totalUsedUsd);
   if ((!Number.isFinite(usedNumber) || usedNumber === 0) && remainingValue === '--' && !remainingSuffix) return null;
   return `${remainingValue}${remainingSuffix}`;
@@ -270,12 +279,32 @@ function buildSubscriptionTooltip(
   return parts.join(' | ');
 }
 
+/**
+ * 上游展示口径（S6）：把 USD 金额换算成"上游页面会显示的数字"。
+ * 判据、格式、空符号处理全部走共享出口 upstreamCurrencyDisplay —— 与日志页同一实现，
+ * 避免"同一个数在两页显示成不同格式"。只在 CUSTOM 口径返回，其余（USD/CNY/TOKENS）为 null。
+ */
+function buildUpstreamDisplayAmount(
+  profile: { quotaDisplayType?: string | null; customCurrencySymbol?: string | null; customCurrencyExchangeRate?: number | null } | null | undefined,
+  usd: number | null | undefined,
+): string | null {
+  if (!profile) return null;
+  if (String(profile.quotaDisplayType || '').toUpperCase() !== 'CUSTOM') return null;
+  return formatCustomCurrencyAmount(profile.customCurrencySymbol, profile.customCurrencyExchangeRate, usd);
+}
+
 function SiteBalanceDisplay(props: {
   siteId: number;
   balance?: number | null;
   summary?: SiteSubscriptionSummary | null;
   /** 站点行自带的汇率；禁用站点不在 context 的活跃集里，只能从这里取。 */
   rowRate?: number | null;
+  /** S6：站点计费档案，用于标出"上游显示成多少自定义单位"。 */
+  billingProfile?: {
+    quotaDisplayType?: string | null;
+    customCurrencySymbol?: string | null;
+    customCurrencyExchangeRate?: number | null;
+  } | null;
   /** F8：服务端归并出的余额可得性；'unknown'/缺省表示无法判定，按原样显示数字。 */
   balanceAvailability?: 'known' | 'unavailable' | 'not-applicable' | 'unknown';
   /** 不可得时的原因码（服务端给），只用于 tooltip 说明，不进正文。 */
@@ -313,12 +342,33 @@ function SiteBalanceDisplay(props: {
     : unlimitedBalance ? tr('无限配额，不受额度约束') : null;
   const subscriptionValue = buildSubscriptionInlineValue(summary, currency, rate);
   const tooltip = buildSubscriptionTooltip(summary, currency, rate);
+  // S6：上游页面按自定义货币显示时，把那个数字也标出来（与 metapi 的 USD/CNY 并存）。
+  const upstreamDisplay = buildUpstreamDisplayAmount(props.billingProfile, Number(balance));
+  // 有自定义货币读数时：分两排展示且**左对齐**（用户 2026-11-23 定）。
+  // 桌面余额列默认右对齐（align-end），这里覆盖成左对齐，让第一排余额、
+  // 第二排自定义货币读数都贴左，读数不再挤在余额同一行末尾。
+  const stackUpstream = upstreamDisplay != null;
 
   return (
     <div
-      className={`site-balance-inline ${align === 'end' ? 'align-end' : ''}`.trim()}
+      className={`site-balance-inline ${!stackUpstream && align === 'end' ? 'align-end' : ''}`.trim()}
     >
       <span className="site-balance-primary" title={neverReadHint || undefined}>{walletBalanceText}</span>
+      {upstreamDisplay ? (
+        <span
+          className="site-balance-upstream"
+          style={{
+            // flexBasis 100% → 独占第二排；textAlign left → 左对齐；marginLeft 0 → 与第一排文字对齐
+            flexBasis: '100%',
+            textAlign: 'left',
+            fontSize: 12,
+            color: 'var(--color-text-muted)',
+          }}
+          title={tr('站点自定义货币显示读数')}
+        >
+          {upstreamDisplay}
+        </span>
+      ) : null}
       {subscriptionValue ? (
         <>
           <span className="site-balance-divider">/</span>
@@ -464,11 +514,19 @@ export default function Sites() {
   // S6 / T8.10：计费参数（汇率/标尺）折叠区。空串表示"未维护"，不是 0。
   const [billingCnyRate, setBillingCnyRate] = useState('');
   const [billingQuotaPerUnit, setBillingQuotaPerUnit] = useState('');
+  // S6：上游展示口径（USD/CNY/CUSTOM/TOKENS + 自定义符号/倍率）。
+  // 存在的原因是部分上游把 /api/status 挡在 WAF 后，探测永远拿不到口径，
+  // 而"上游按自定义货币显示"正是用户核对账单时最容易误读成"少算 N 倍"的地方，
+  // 必须允许人工补上。空串 = 未设置。
+  const [billingDisplayType, setBillingDisplayType] = useState('');
+  const [billingCustomSymbol, setBillingCustomSymbol] = useState('');
+  const [billingCustomRate, setBillingCustomRate] = useState('');
   const [billingSourceInfo, setBillingSourceInfo] = useState<{
     rateSource: 'auto' | 'manual' | null;
     quotaSource: 'auto' | 'manual' | null;
+    displaySource: 'auto' | 'manual' | null;
     capturedAt: string | null;
-  }>({ rateSource: null, quotaSource: null, capturedAt: null });
+  }>({ rateSource: null, quotaSource: null, displaySource: null, capturedAt: null });
   const [billingAdvancedOpen, setBillingAdvancedOpen] = useState(false);
   const [billingSaving, setBillingSaving] = useState(false);
   const [probing, setProbing] = useState(false);
@@ -594,7 +652,7 @@ export default function Sites() {
         <>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }} ref={billingRateRowRef}>
             <input
-              placeholder={tr('人民币对美元汇率（如 7.3）')}
+              placeholder={tr('充值价：每 1 美元额度实付人民币（如 7.3）')}
               value={billingCnyRate}
               onChange={(e) => setBillingCnyRate(e.target.value)}
               data-focus-field="cny-rate"
@@ -607,18 +665,59 @@ export default function Sites() {
               style={{ ...formInputStyle, flex: '1 1 200px' }}
             />
           </div>
+          {/* S6：上游展示口径。多数站探测自动填；被 WAF 挡住（探测显示"未知"）时可在此手填，
+              尤其"自定义货币"的倍率——它是解释"metapi 记 USD、上游显示 ×N"读数的唯一根据。 */}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
+            <div style={{ minWidth: 200, flex: '1 1 200px' }}>
+              <ModernSelect
+                options={[
+                  { value: '', label: tr('货币展示单位：未知 / 跟随探测') },
+                  { value: 'USD', label: tr('美元 USD') },
+                  { value: 'CNY', label: tr('人民币 CNY') },
+                  { value: 'TOKENS', label: tr('额度 TOKENS') },
+                  { value: 'CUSTOM', label: tr('自定义货币 CUSTOM') },
+                ]}
+                value={billingDisplayType}
+                onChange={(v) => setBillingDisplayType(v || '')}
+                placeholder={tr('货币展示单位（留空=未知）')}
+                searchable={false}
+              />
+            </div>
+            {billingDisplayType === 'CUSTOM' ? (
+              <>
+                <input
+                  placeholder={tr('自定义符号（如 🍊，可留空）')}
+                  value={billingCustomSymbol}
+                  onChange={(e) => setBillingCustomSymbol(e.target.value)}
+                  style={{ ...formInputStyle, flex: '1 1 140px', minWidth: 120 }}
+                />
+                <input
+                  placeholder={tr('每 1 美元 = 几单位（如 10）')}
+                  value={billingCustomRate}
+                  onChange={(e) => setBillingCustomRate(e.target.value)}
+                  inputMode="decimal"
+                  style={{ ...formInputStyle, flex: '1 1 160px', minWidth: 120 }}
+                />
+              </>
+            ) : null}
+          </div>
           {/* 一-3：两个输入框的"留空"含义不同，过去共用一句说明，容易被读成
               "两个都留空就是都不知道"。这里拆成逐字段标注，各自写清留空的结果。 */}
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
-            {tr('汇率：留空表示未知。切到人民币时，汇率未知的站点会被排除出合计并提示数量。')}
+            {tr('充值价：每 1 美元额度实际支付的人民币（站点售卖价）。留空表示未知；切到人民币时，未知的站点会被排除出合计并提示数量。')}
             <br />
             {tr('额度标尺：留空则使用该平台的默认换算，不是按 0 计算。')}
+            <br />
+            {tr('货币展示单位：站点把金额显示成什么单位。选「自定义货币」后余额与日志会额外标出站点自定义金额。')}
+            <br />
+            {tr('通常由探测自动填入；上游符号为空或显示异常（如只填了空格）时默认为空，请在此手动补充符号与倍率。')}
             {billingSourceInfo.capturedAt ? (
               <>
                 <br />
                 {tr('最近一次探测')}：{new Date(billingSourceInfo.capturedAt).toLocaleString()}
-                （{tr('当前来源')}：{tr('汇率')} {billingSourceInfo.rateSource === 'manual' ? tr('手动') : billingSourceInfo.rateSource === 'auto' ? tr('自动') : tr('未知')}
-                ，{tr('标尺')} {billingSourceInfo.quotaSource === 'manual' ? tr('手动') : billingSourceInfo.quotaSource === 'auto' ? tr('自动') : tr('未知')}）
+                （{tr('当前来源')}：{tr('充值价')} {billingSourceInfo.rateSource === 'manual' ? tr('手动') : billingSourceInfo.rateSource === 'auto' ? tr('自动') : tr('未知')}
+                ，{tr('标尺')} {billingSourceInfo.quotaSource === 'manual' ? tr('手动') : billingSourceInfo.quotaSource === 'auto' ? tr('自动') : tr('未知')}
+                ，{tr('单位')} {billingSourceInfo.displaySource === 'manual' ? tr('手动') : billingSourceInfo.displaySource === 'auto' ? tr('自动') : tr('未知')}）
               </>
             ) : null}
           </div>
@@ -639,9 +738,14 @@ export default function Sites() {
                   setBillingCnyRate(Number.isFinite(rate) && rate > 0 ? String(rate) : '');
                   const scale = Number(res?.profile?.quotaPerUnit);
                   setBillingQuotaPerUnit(Number.isFinite(scale) && scale > 0 ? String(scale) : '');
+                  setBillingDisplayType(String(res?.profile?.quotaDisplayType ?? ''));
+                  setBillingCustomSymbol(String(res?.profile?.customCurrencySymbol ?? ''));
+                  const customRate = Number(res?.profile?.customCurrencyExchangeRate);
+                  setBillingCustomRate(Number.isFinite(customRate) && customRate > 0 ? String(customRate) : '');
                   setBillingSourceInfo({
                     rateSource: res?.profile?.rateSource ?? null,
                     quotaSource: res?.profile?.quotaSource ?? null,
+                    displaySource: res?.profile?.displaySource ?? null,
                     capturedAt: res?.profile?.capturedAt ?? null,
                   });
                   // 探测结果要立刻反映到表格徽标与顶栏汇率（合计口径）：
@@ -653,11 +757,11 @@ export default function Sites() {
                   const probedRate = Number(res?.profile?.cnyPerUsd);
                   const probedSource = String(res?.profile?.rateSource || '');
                   if (Number.isFinite(probedRate) && probedRate > 0 && probedSource === 'auto') {
-                    toast.success(`${tr('已探测到汇率')} ¥${probedRate}`);
+                    toast.success(`${tr('已探测到充值价')} ¥${probedRate}`);
                   } else if (Number.isFinite(probedRate) && probedRate > 0) {
-                    toast.info(tr('上游未提供汇率，保留当前手动值'));
+                    toast.info(tr('上游未提供充值价，保留当前手动值'));
                   } else {
-                    toast.info(tr('上游未提供汇率，汇率保持未知'));
+                    toast.info(tr('上游未提供充值价，充值价保持未知'));
                   }
                 } catch (err: any) {
                   toast.error(err?.message || tr('探测失败'));
@@ -666,7 +770,7 @@ export default function Sites() {
                 }
               }}
             >
-              {billingSaving ? tr('探测中...') : tr('探测上游汇率')}
+              {billingSaving ? tr('探测中...') : tr('探测上游站点')}
             </button>
             <button
               type="button"
@@ -687,12 +791,16 @@ export default function Sites() {
                     mode: 'manual',
                     cnyPerUsd: parseOrNull(billingCnyRate),
                     quotaPerUnit: parseOrNull(billingQuotaPerUnit),
+                    quotaDisplayType: billingDisplayType.trim() || null,
+                    customCurrencySymbol: billingCustomSymbol.trim() || null,
+                    customCurrencyExchangeRate: parseOrNull(billingCustomRate),
                   });
                   // 手动保存后把来源信息一并回填：不清空的话，行内「最近一次探测」
                   // 还挂着上次自动探测的来源，读起来像"刚保存的还是自动值"。
                   setBillingSourceInfo({
                     rateSource: res?.profile?.rateSource ?? null,
                     quotaSource: res?.profile?.quotaSource ?? null,
+                    displaySource: res?.profile?.displaySource ?? null,
                     capturedAt: res?.profile?.capturedAt ?? null,
                   });
                   // 手动保存同理：徽标与顶栏汇率表立即同步。
@@ -909,9 +1017,13 @@ export default function Sites() {
       const profile = site.billingProfile;
       setBillingCnyRate(profile?.cnyPerUsd != null ? String(profile.cnyPerUsd) : '');
       setBillingQuotaPerUnit(profile?.quotaPerUnit != null ? String(profile.quotaPerUnit) : '');
+      setBillingDisplayType(profile?.quotaDisplayType ?? '');
+      setBillingCustomSymbol(profile?.customCurrencySymbol ?? '');
+      setBillingCustomRate(profile?.customCurrencyExchangeRate != null ? String(profile.customCurrencyExchangeRate) : '');
       setBillingSourceInfo({
         rateSource: profile?.rateSource ?? null,
         quotaSource: profile?.quotaSource ?? null,
+        displaySource: profile?.displaySource ?? null,
         capturedAt: profile?.capturedAt ?? null,
       });
       setBillingAdvancedOpen(false);
@@ -1747,7 +1859,7 @@ export default function Sites() {
             color: 'var(--color-text)',
           }}
         >
-          <span>{`${tr('另有')} ${pendingRateSiteIds.length} ${tr('个站点待设置汇率')}`}</span>
+          <span>{`${tr('另有')} ${pendingRateSiteIds.length} ${tr('个站点待设置充值价')}`}</span>
           <button
             type="button"
             className="btn btn-ghost"
@@ -2700,6 +2812,7 @@ export default function Sites() {
                         <SiteBalanceDisplay
                           siteId={site.id}
                           rowRate={site.billingProfile?.cnyPerUsd}
+                          billingProfile={site.billingProfile}
                           balance={site.totalBalance}
                           balanceAvailability={site.balanceAvailability}
                           balanceAvailabilityReason={site.balanceAvailabilityReason}
@@ -2734,7 +2847,7 @@ export default function Sites() {
                                 type="button"
                                 className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
                                 style={{ fontSize: 11, cursor: 'pointer' }}
-                                title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                                title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改充值价')}`}
                                 onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
                               >
                                 {`¥${rate}${source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}`}
@@ -2750,10 +2863,10 @@ export default function Sites() {
                               type="button"
                               className="badge badge-warning billing-rate-badge"
                               style={{ fontSize: 11, cursor: 'pointer' }}
-                              title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                              title={tr('未探测到充值价，该站点不计入人民币合计；点击直接填写充值价')}
                               onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
                             >
-                              {tr('汇率未知')}
+                              {tr('充值价未知')}
                             </button>
                             {noBalanceCapability}
                           </>
@@ -2998,6 +3111,7 @@ export default function Sites() {
                       <SiteBalanceDisplay
                         siteId={site.id}
                         rowRate={site.billingProfile?.cnyPerUsd}
+                          billingProfile={site.billingProfile}
                         balance={site.totalBalance}
                         balanceAvailability={site.balanceAvailability}
                         balanceAvailabilityReason={site.balanceAvailabilityReason}
@@ -3031,10 +3145,10 @@ export default function Sites() {
                                 type="button"
                                 className="badge badge-warning billing-rate-badge"
                                 style={{ fontSize: 11, cursor: 'pointer' }}
-                                title={tr('未探测到汇率，该站点不计入人民币合计；点击直接填写汇率')}
+                                title={tr('未探测到充值价，该站点不计入人民币合计；点击直接填写充值价')}
                                 onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
                               >
-                                {tr('汇率未知')}
+                                {tr('充值价未知')}
                               </button>
                               {noBalanceCapability}
                             </>
@@ -3050,7 +3164,7 @@ export default function Sites() {
                               type="button"
                               className={`badge ${source === 'manual' ? 'badge-info' : 'badge-success'} billing-rate-badge`}
                               style={{ fontSize: 11, cursor: 'pointer' }}
-                              title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改汇率')}`}
+                              title={`${source === 'manual' ? tr('用户手动维护') : tr('自动探测')}；${tr('点击修改充值价')}`}
                               onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'cnyRate' }))}
                             >
                               ¥{rate}{source === 'manual' ? ` · ${tr('手动')}` : ` · ${tr('自动')}`}

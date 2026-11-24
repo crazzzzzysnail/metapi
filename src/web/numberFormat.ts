@@ -63,7 +63,7 @@ function decimalsFor(absoluteValue: number): number {
 
 /**
  * 去掉小数尾部的 0：`$75.50` → `$75.5`、`$75.00` → `$75`、`0.80000` → `0.8`。
- * 只处理带小数点的串，整数与 `汇率未知` 等后缀不受影响。
+ * 只处理带小数点的串，整数与 `充值价未知` 等后缀不受影响。
  */
 export function trimMoneyZeros(text: string): string {
   return text.replace(/(\.\d*?)0+$/g, '$1').replace(/\.$/g, '');
@@ -93,8 +93,8 @@ export function formatBalance(
       })()
       : safe;
     if (amount === null) {
-      // 汇率未知时保留美元符号：数值本身没有换算过，贴 ¥ 会让人把它当成人民币读数。
-      return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(2)}（汇率未知）`;
+      // 充值价未知时保留美元符号：数值本身没有换算过，贴 ¥ 会让人把它当成人民币读数。
+      return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(2)}（充值价未知）`;
     }
     return `${symbol}${amount.toFixed(2)}`;
   }
@@ -102,7 +102,7 @@ export function formatBalance(
   // 例外：0 按 2 位显示（`$0.00`），"0/无余额"写成 `$0` 反而像缺单位。
   if (safe === 0) {
     const rate = Number(cnyPerUsd);
-    if (currency === 'CNY' && (!Number.isFinite(rate) || rate <= 0)) return `${CURRENCY_SYMBOLS.USD}0.00（汇率未知）`;
+    if (currency === 'CNY' && (!Number.isFinite(rate) || rate <= 0)) return `${CURRENCY_SYMBOLS.USD}0.00（充值价未知）`;
     return `${symbol}0.00`;
   }
   return formatMoney(safe, currency, cnyPerUsd, { trim: true });
@@ -132,7 +132,7 @@ export function formatAmountInCurrency(
 /**
  * 站点级余额的内联展示（F6 修订，2026-11-12）。
  *
- * 与 formatBalance 的唯一差异：**汇率未知时不追加「（汇率未知）」后缀**。
+ * 与 formatBalance 的唯一差异：**充值价未知时不追加「（充值价未知）」后缀**。
  * 依据：站点管理有独立的「汇率」列（黄色徽标），连接管理每条记录都带站点徽标，
  * 汇率是否维护过在别处已经可见；每个金额后面再缀同一句话，一屏会出现十几次，
  * 用户实测反馈"过于臃肿"。这里退回纯美元数字（`$75.00`），由 $ 符号本身说明未换算。
@@ -179,7 +179,7 @@ export function formatBalanceOrDash(
     placeholder?: string;
     /** 无限配额：既不是"没读到"也不是"余额为 0"，单独画成 ∞。 */
     unlimited?: boolean;
-    /** 汇率未知时是否保留「（汇率未知）」后缀；搜索弹窗这类无旁路提示的地方需要。 */
+    /** 充值价未知时是否保留「（充值价未知）」后缀；搜索弹窗这类无旁路提示的地方需要。 */
     withRateNote?: boolean;
   },
 ): string {
@@ -220,7 +220,7 @@ export function formatCostFixed(
   const symbol = CURRENCY_SYMBOLS[currency] ?? CURRENCY_SYMBOLS.USD;
   if (currency === 'CNY') {
     const rate = Number(cnyPerUsd);
-    if (!Number.isFinite(rate) || rate <= 0) return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(digits)}（汇率未知）`;
+    if (!Number.isFinite(rate) || rate <= 0) return `${CURRENCY_SYMBOLS.USD}${safe.toFixed(digits)}（充值价未知）`;
     return `${symbol}${(safe * rate).toFixed(digits)}`;
   }
   return `${symbol}${safe.toFixed(digits)}`;
@@ -264,7 +264,7 @@ export function formatMoney(
   if (currency === 'CNY') {
     const rate = Number(cnyPerUsd);
     if (!Number.isFinite(rate) || rate <= 0) {
-      return `${CURRENCY_SYMBOLS.USD}${plain(safe)}（汇率未知）`;
+      return `${CURRENCY_SYMBOLS.USD}${plain(safe)}（充值价未知）`;
     }
     return `${symbol}${plain(safe * rate)}`;
   }
@@ -290,7 +290,7 @@ export function formatRateNumber(value: unknown): string {
  * 规范：**每个数字都带币种符号**、分隔符是 `/`、单位前有一个空格 ——
  *   `$0.8/$3.2 / 1M`、`¥0.8/¥3.2 / 1M`、`$0.1 / call`。
  *
- * @param convert 换算回调；返回 null 表示该站点汇率未知，调用方须显示"汇率未知"而不是猜
+ * @param convert 换算回调；返回 null 表示该站点充值价未知，调用方须显示"充值价未知"而不是猜
  */
 export function formatPricePair(input: number | undefined, output: number | undefined, unit: 'perMillion' | 'perCall'): string {
   const suffix = unit === 'perMillion' ? ' / 1M' : ' / call';

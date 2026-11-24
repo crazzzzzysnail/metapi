@@ -1,1 +1,1 @@
-ALTER TABLE `sites` ADD COLUMN `perf_metrics_capability` TEXT;
+ALTER TABLE `site_billing_profiles` ADD COLUMN `display_source` TEXT;

@@ -7,8 +7,8 @@ import { convertSiteUsdToCny, summarizeByCurrency } from './currencySplit.js';
  *
  * 要守住的不是"能换算"，而是四件事：
  *   ① 精度按量级分档，极小单价不被舍成 $0.00；
- *   ② 汇率缺失必须显式标注，绝不套默认汇率；
- *   ③ 逐站换算、缺汇率站点排除并计数（R7）；
+ *   ② 充值价缺失必须显式标注，绝不套默认充值价；
+ *   ③ 逐站换算、缺充值价站点排除并计数（R7）；
  *   ④ 两个开关彼此正交 —— 切货币不改倍率，切口径不改币种。
  */
 
@@ -42,16 +42,16 @@ describe('① 精度分档', () => {
   });
 });
 
-describe('② 汇率缺失的诚实表达', () => {
-  it('null / 0 / 负数 / NaN 四种无效汇率都标注，不伪装成可信数字', () => {
+describe('② 充值价缺失的诚实表达', () => {
+  it('null / 0 / 负数 / NaN 四种无效充值价都标注，不伪装成可信数字', () => {
     for (const rate of [null, undefined, 0, -7.3, Number.NaN]) {
       const text = formatMoney(2, 'CNY', rate as number | null | undefined);
-      expect(text).toContain('汇率未知');
+      expect(text).toContain('充值价未知');
       expect(text).not.toBe('¥14.600');
     }
   });
 
-  it('有效汇率正常换算', () => {
+  it('有效充值价正常换算', () => {
     expect(formatMoney(2, 'CNY', 7.3)).toBe('¥14.6');
     expect(convertSiteUsdToCny(1, 7.3)).toBe(7.3);
     expect(convertSiteUsdToCny(1, null)).toBeNull();
@@ -79,7 +79,7 @@ describe('③ 逐站换算与排除', () => {
     expect(result.excludedSites).toEqual([{ siteId: 2, reason: 'rate-unknown' }]);
   });
 
-  it('USD 合计永不受汇率影响（这是双轨口径的前提）', () => {
+  it('USD 合计永不受充值价影响（这是双轨口径的前提）', () => {
     const allUnknown = summarizeByCurrency([
       { siteId: 1, usd: 10, cnyPerUsd: null },
       { siteId: 2, usd: 20, cnyPerUsd: null },
@@ -89,26 +89,26 @@ describe('③ 逐站换算与排除', () => {
     expect(allUnknown.excludedSiteCount).toBe(2);
   });
 
-  it('每站用自己的汇率，不共用一个汇率（R7 逐站语义）', () => {
+  it('每站用自己的充值价，不共用一个充值价（R7 逐站语义）', () => {
     const result = summarizeByCurrency([
       { siteId: 1, usd: 10, cnyPerUsd: 7.3 },
       { siteId: 2, usd: 10, cnyPerUsd: 6.5 },
     ]);
     expect(result.cnyTotal).toBeCloseTo(73 + 65, 6);
-    // 若误用统一汇率会得到 146 或 130，而非 138
+    // 若误用统一充值价会得到 146 或 130，而非 138
     expect(result.cnyTotal).not.toBeCloseTo(146, 6);
   });
 });
 
 describe('④ 两个开关的正交性', () => {
-  it('只切货币：金额数值随汇率变，倍率不参与', () => {
+  it('只切货币：金额数值随充值价变，倍率不参与', () => {
     const officialUsd = formatMoney(1);
     const officialCny = formatMoney(1, 'CNY', 7.3);
     expect(officialUsd).toBe('$1');
     expect(officialCny).toBe('¥7.3');
   });
 
-  it('只切口径：美元内部乘倍率，不涉及汇率', () => {
+  it('只切口径：美元内部乘倍率，不涉及充值价', () => {
     // effective = official × group_ratio，两者都在 USD 域内完成
     const ratio = 0.15;
     const official = 2;
@@ -127,8 +127,8 @@ describe('④ 两个开关的正交性', () => {
     expect(viaEffectiveThenConvert).toBe('¥2.19');
   });
 
-  it('CNY + 汇率未知时，即使口径已切换也不能给出伪造成果', () => {
+  it('CNY + 充值价未知时，即使口径已切换也不能给出伪造成果', () => {
     const text = formatMoney(2 * 0.15, 'CNY', null);
-    expect(text).toContain('汇率未知');
+    expect(text).toContain('充值价未知');
   });
 });

@@ -95,8 +95,8 @@ describe("dashboard summary 的站点余额排除", () => {
       })
       .returning()
       .get();
-    // 顺手给一个已知汇率：否则两个站都会因为"汇率未知"进 excludedSites，
-    // 后面那条"排除不等于汇率未知"的断言就分不清是谁贡献的计数了。
+    // 顺手给一个已知充值价：否则两个站都会因为"充值价未知"进 excludedSites，
+    // 后面那条"排除不等于充值价未知"的断言就分不清是谁贡献的计数了。
     await db
       .insert(schema.siteBillingProfiles)
       .values({ siteId: site.id, cnyPerUsd: 7.2, rateSource: "manual" })
@@ -132,7 +132,7 @@ describe("dashboard summary 的站点余额排除", () => {
     // 负控制的意义：只减 5 而不是减成 0/15，证明是按站剔除而不是整体归零
     expect(summary.totalBalance).toBe(10);
     expect(summary.balanceOptOutSiteCount).toBe(1);
-    // "排除"与"汇率未知"是两回事，不应混进同一个计数
+    // "排除"与"充值价未知"是两回事，不应混进同一个计数
     expect(summary.balanceExcludedSiteCount ?? 0).toBe(0);
   });
 
@@ -143,7 +143,7 @@ describe("dashboard summary 的站点余额排除", () => {
    * 静默偏小的总数（R7）。而"库里是默认 0、从没刷新过"的存量连接**不算**这一类 ——
    * 它没有任何证据，既不能证明读到过也不能证明读不到，据此改口径会把大量正常站点误伤。
    */
-  it("汇率已知但证据为 unavailable 的站点：进 CNY 排除集", async () => {
+  it("充值价已知但证据为 unavailable 的站点：进 CNY 排除集", async () => {
     await seedSiteWithAccount({ name: "siteA", balance: 10 });
     const siteB = await seedSiteWithAccount({ name: "siteB", balance: 5 });
     const account = await db.select({ id: schema.accounts.id, extraConfig: schema.accounts.extraConfig })

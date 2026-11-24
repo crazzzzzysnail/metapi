@@ -148,7 +148,7 @@ export default function Accounts() {
   const [expandedAccountIds, setExpandedAccountIds] = useState<number[]>([]);
   const isMobile = useIsMobile();
   // 账号余额/已用都是所属站点自己的美元账，必须按该站汇率换算；
-  // 汇率未知时退回纯美元数字（每条记录都带站点徽标，逐格再标「汇率未知」过于臃肿）。
+  // 充值价未知时退回纯美元数字（每条记录都带站点徽标，逐格再标「充值价未知」过于臃肿）。
   const { currency, getSiteRate } = useCurrency();
   const [showMobileTools, setShowMobileTools] = useState(false);
   const [showAdd, setShowAdd] = useState(false);

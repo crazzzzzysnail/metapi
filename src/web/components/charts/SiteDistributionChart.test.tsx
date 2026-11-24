@@ -58,7 +58,7 @@ describe('SiteDistributionChart', () => {
    *
    * 锁两件事：
    *   ① 有汇率的站按该站汇率换算出 ¥ 值；
-   *   ② 汇率未知的站**保留美元并标注**，不乘 1、不贴 ¥ 冒充人民币。
+   *   ② 充值价未知的站**保留美元并标注**，不乘 1、不贴 ¥ 冒充人民币。
    */
   it('converts each site value by that site rate and flags unknown rates', async () => {
     const captured: any[] = [];
@@ -102,9 +102,9 @@ describe('SiteDistributionChart', () => {
 
     // ① 7.5 × 7.3 = 54.75，必须是 ¥ 且数值正确
     expect(known).toBe('¥54.75');
-    // ② 汇率未知：仍是美元数额，但明确标注；绝不能变成 ¥9 或 ¥65.7
+    // ② 充值价未知：仍是美元数额，但明确标注；绝不能变成 ¥9 或 ¥65.7
     expect(unknown).toContain('$9.00');
-    expect(unknown).toContain('汇率未知');
+    expect(unknown).toContain('充值价未知');
     expect(unknown).not.toContain('¥');
     // 不应残留任何 toFixed(2) 之外的硬编码美元形态
     expect(known).not.toMatch(/^\$\d+\.\d{4,}/);
