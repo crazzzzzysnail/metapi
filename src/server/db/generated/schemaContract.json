@@ -1380,6 +1380,46 @@
         }
       }
     },
+    "proxy_pool": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "url": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "is_default": {
+          "logicalType": "boolean",
+          "notNull": false,
+          "defaultValue": "false",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "proxy_video_tasks": {
       "columns": {
         "id": {
@@ -2213,6 +2253,12 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "proxy_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -2768,6 +2814,14 @@
       "columns": [
         "status",
         "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "proxy_pool_default_idx",
+      "table": "proxy_pool",
+      "columns": [
+        "is_default"
       ],
       "unique": false
     },
