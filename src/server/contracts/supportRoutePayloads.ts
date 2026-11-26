@@ -11,10 +11,13 @@ const monitorConfigPayloadSchema = z.object({
   ldohCookie: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
+const proxyIdField = z.union([z.number().int().positive(), z.null(), z.literal('')]).optional();
+
 const oauthStartPayloadSchema = z.object({
   accountId: z.number().int().positive().optional(),
   projectId: z.string().optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  proxyId: proxyIdField,
   useSystemProxy: z.boolean().optional(),
 }).passthrough();
 
@@ -24,11 +27,13 @@ const oauthManualCallbackPayloadSchema = z.object({
 
 const oauthConnectionRebindPayloadSchema = z.object({
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  proxyId: proxyIdField,
   useSystemProxy: z.boolean().optional(),
 }).passthrough();
 
 const oauthConnectionProxyUpdatePayloadSchema = z.object({
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  proxyId: proxyIdField,
   useSystemProxy: z.boolean().optional(),
 }).passthrough();
 
@@ -40,6 +45,7 @@ const oauthImportPayloadSchema = z.object({
   data: z.unknown().optional(),
   items: z.array(z.object({}).passthrough()).optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  proxyId: proxyIdField,
   useSystemProxy: z.boolean().optional(),
 }).passthrough();
 

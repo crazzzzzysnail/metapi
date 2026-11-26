@@ -53,6 +53,7 @@ import {
   parseAccountUpdatePayload,
   parseAccountVerifyTokenPayload,
 } from "../../contracts/accountsRoutePayloads.js";
+import { proxyPoolIdExists } from "../../services/proxyPoolService.js";
 import {
   requireSiteApiBaseUrl,
   runWithSiteApiEndpointPool,
@@ -172,6 +173,66 @@ function normalizeBatchIds(input: unknown): number[] {
   return input
     .map((item) => Number.parseInt(String(item), 10))
     .filter((id) => Number.isFinite(id) && id > 0);
+}
+
+/**
+ * 批量设置代理载荷解析：与站点批量同形。
+ * proxyUrl/proxyId/useSystemProxy 任一出现即 presentAny；null/空串=清除该格。
+ * 三格共存，由解析链决定生效项，服务端不做互斥清理（前端批量弹窗负责单选语义）。
+ */
+function parseBatchAccountProxySettings(data: unknown): {
+  presentAny: boolean;
+  proxyUrl?: string | null;
+  proxyId?: number | null;
+  useSystemProxy?: boolean;
+  error?: string;
+} {
+  const body = (data && typeof data === 'object' && !Array.isArray(data))
+    ? data as Record<string, unknown>
+    : {};
+  const hasProxyUrl = Object.prototype.hasOwnProperty.call(body, 'proxyUrl');
+  const hasProxyId = Object.prototype.hasOwnProperty.call(body, 'proxyId');
+  const hasUseSystemProxy = Object.prototype.hasOwnProperty.call(body, 'useSystemProxy');
+  const result: {
+    presentAny: boolean;
+    proxyUrl?: string | null;
+    proxyId?: number | null;
+    useSystemProxy?: boolean;
+    error?: string;
+  } = { presentAny: hasProxyUrl || hasProxyId || hasUseSystemProxy };
+
+  if (hasProxyUrl) {
+    const parsed = parseSiteProxyUrlInput(body.proxyUrl);
+    if (!parsed.valid) {
+      result.error = 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.';
+      return result;
+    }
+    result.proxyUrl = parsed.proxyUrl;
+  }
+
+  if (hasProxyId) {
+    const raw = body.proxyId;
+    if (raw === null || raw === '') {
+      result.proxyId = null;
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        result.error = 'Invalid proxyId. Expected a positive integer or null.';
+        return result;
+      }
+      result.proxyId = parsed;
+    }
+  }
+
+  if (hasUseSystemProxy) {
+    if (typeof body.useSystemProxy !== 'boolean') {
+      result.error = 'Invalid useSystemProxy value. Expected boolean.';
+      return result;
+    }
+    result.useSystemProxy = body.useSystemProxy;
+  }
+
+  return result;
 }
 
 function normalizePinnedFlag(input: unknown): boolean | null {
@@ -1523,6 +1584,44 @@ export async function accountsRoutes(app: FastifyInstance) {
         });
       }
 
+      // 账号级代理池引用：undefined=不改；null/空=清除；正整数=设置并校验存在
+      if (Object.prototype.hasOwnProperty.call(body, "proxyId")) {
+        const baseExtraConfig =
+          typeof updates.extraConfig === "string"
+            ? updates.extraConfig
+            : account.extraConfig;
+        const rawProxyId = (body as Record<string, unknown>).proxyId;
+        let normalizedProxyId: number | null = null;
+        if (rawProxyId !== null && rawProxyId !== "") {
+          const parsed = Number(rawProxyId);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            return reply.code(400).send({ message: "Invalid proxyId. Expected a positive integer or null." });
+          }
+          normalizedProxyId = parsed;
+        }
+        if (normalizedProxyId !== null && !await proxyPoolIdExists(normalizedProxyId)) {
+          return reply.code(400).send({ message: "Invalid proxyId. Proxy pool entry not found." });
+        }
+        updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
+          proxyId: normalizedProxyId ?? undefined,
+        });
+      }
+
+      // 账号级“使用系统代理”勾选：与自定义地址、池引用并存，由解析链决定生效项
+      if (Object.prototype.hasOwnProperty.call(body, "useSystemProxy")) {
+        const baseExtraConfig =
+          typeof updates.extraConfig === "string"
+            ? updates.extraConfig
+            : account.extraConfig;
+        const rawUseSystemProxy = (body as Record<string, unknown>).useSystemProxy;
+        if (typeof rawUseSystemProxy !== "boolean") {
+          return reply.code(400).send({ message: "Invalid useSystemProxy value. Expected boolean." });
+        }
+        updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
+          useSystemProxy: rawUseSystemProxy,
+        });
+      }
+
       // F8 第 3 期：手动余额。走 extra_config 而非加列；这里不并入 needsModelRefresh——
       // 改一个展示用数字不需要重拉模型列表，否则每次保存都要白等一轮。
       if (Object.prototype.hasOwnProperty.call(body, "manualBalanceUsd")) {
@@ -1618,6 +1717,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         Object.prototype.hasOwnProperty.call(body, "apiToken") ||
         Object.prototype.hasOwnProperty.call(body, "extraConfig") ||
         Object.prototype.hasOwnProperty.call(body, "proxyUrl") ||
+        Object.prototype.hasOwnProperty.call(body, "proxyId") ||
         wantsManagedSub2ApiAuthPatch;
       const isExpiredApiKeyAccount =
         account.status === "expired" &&
@@ -1665,8 +1765,23 @@ export async function accountsRoutes(app: FastifyInstance) {
     if (ids.length === 0) {
       return reply.code(400).send({ message: "ids is required" });
     }
-    if (!["enable", "disable", "delete", "refreshBalance"].includes(action)) {
+    if (!["enable", "disable", "delete", "refreshBalance", "updateSettings"].includes(action)) {
       return reply.code(400).send({ message: "Invalid action" });
+    }
+
+    // updateSettings 载荷校验：与站点批量同形（undefined 不改、null/空清除）
+    const batchProxy = action === "updateSettings"
+      ? parseBatchAccountProxySettings(parsedBody.data)
+      : null;
+    if (batchProxy?.error) {
+      return reply.code(400).send({ message: batchProxy.error });
+    }
+    if (action === "updateSettings" && !batchProxy?.presentAny) {
+      return reply.code(400).send({ message: "No batch settings provided." });
+    }
+    if (batchProxy?.proxyId !== null && batchProxy?.proxyId !== undefined
+      && !await proxyPoolIdExists(batchProxy.proxyId)) {
+      return reply.code(400).send({ message: "Invalid proxyId. Proxy pool entry not found." });
     }
 
     const successIds: number[] = [];
@@ -1704,6 +1819,20 @@ export async function accountsRoutes(app: FastifyInstance) {
             .where(eq(schema.accounts.id, id))
             .run();
           shouldRebuildRoutes = true;
+        } else if (action === "updateSettings") {
+          // 逐账号合并 extra_config：只动勾选下发的格，未下发的格保持现状
+          const patch: Record<string, unknown> = {};
+          if (batchProxy && 'proxyUrl' in batchProxy) patch.proxyUrl = batchProxy.proxyUrl ?? undefined;
+          if (batchProxy && 'proxyId' in batchProxy) patch.proxyId = batchProxy.proxyId ?? undefined;
+          if (batchProxy && 'useSystemProxy' in batchProxy) patch.useSystemProxy = batchProxy.useSystemProxy;
+          await db
+            .update(schema.accounts)
+            .set({
+              extraConfig: mergeAccountExtraConfig(existing.extraConfig, patch),
+              updatedAt: new Date().toISOString(),
+            })
+            .where(eq(schema.accounts.id, id))
+            .run();
         } else {
           const nextStatus = action === "enable" ? "active" : "disabled";
           await db

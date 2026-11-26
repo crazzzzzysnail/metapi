@@ -5,6 +5,7 @@ import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings }
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
+import { clearProxyPoolCache } from './proxyPoolStore.js';
 
 export const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 
@@ -14,10 +15,13 @@ type FactoryResetDependencies = {
   ensureDefaultSitesSeeded?: typeof ensureDefaultSitesSeeded;
 };
 
+/**
+ * 基础设施保留项。系统代理**不**在此列：它归业务数据（代理池）管理，
+ * 若跨重置保留，下次启动播种会凭残留镜像重新种出默认代理条目，等于没重置干净。
+ */
 type PreservedInfrastructureState = {
   authToken: string;
   proxyToken: string;
-  systemProxyUrl: string;
   dbType: 'sqlite' | 'mysql' | 'postgres';
   dbUrl: string;
   dbSsl: boolean;
@@ -35,6 +39,7 @@ async function clearAllBusinessData() {
     await tx.delete(schema.accountTokens).run();
     await tx.delete(schema.accounts).run();
     await tx.delete(schema.tokenRoutes).run();
+    await tx.delete(schema.proxyPool).run();
     await tx.delete(schema.sites).run();
     await tx.delete(schema.downstreamApiKeys).run();
     await tx.delete(schema.events).run();
@@ -46,7 +51,6 @@ function captureInfrastructureState(): PreservedInfrastructureState {
   return {
     authToken: config.authToken,
     proxyToken: config.proxyToken,
-    systemProxyUrl: config.systemProxyUrl,
     dbType: config.dbType,
     dbUrl: config.dbUrl,
     dbSsl: config.dbSsl,
@@ -62,7 +66,7 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
   Object.assign(config, baseline);
   config.authToken = preserved.authToken || baseline.authToken || FACTORY_RESET_ADMIN_TOKEN;
   config.proxyToken = preserved.proxyToken || baseline.proxyToken;
-  config.systemProxyUrl = preserved.systemProxyUrl || baseline.systemProxyUrl;
+  // 系统代理不再跨重置保留：Object.assign(baseline) 后保持 env 初值（通常为空）
   if (shouldPreserveExternalRuntime(preserved)) {
     config.dbType = preserved.dbType;
     config.dbUrl = preserved.dbUrl;
@@ -81,13 +85,15 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
     retentionDays: config.logCleanupRetentionDays,
   });
   startProxyLogRetentionService();
+  // 池缓存与站点代理缓存同步作废：重置后池表已空，解析必须回到“无默认→直连”
+  clearProxyPoolCache();
   invalidateSiteProxyCache();
 }
 
+/** 系统代理不写回：它随代理池一起被清空，重启后按实际 env/池状态重建 */
 async function restoreInfrastructureSettings(preserved: PreservedInfrastructureState): Promise<void> {
   await upsertSetting('auth_token', preserved.authToken || FACTORY_RESET_ADMIN_TOKEN);
   await upsertSetting('proxy_token', preserved.proxyToken);
-  await upsertSetting('system_proxy_url', preserved.systemProxyUrl);
 
   if (shouldPreserveExternalRuntime(preserved)) {
     await upsertSetting('db_type', preserved.dbType);

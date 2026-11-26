@@ -40,6 +40,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'proxy_debug_attempts',
   'proxy_video_tasks',
   'proxy_files',
+  'proxy_pool',
   'downstream_api_keys',
   'site_announcements',
   'events',

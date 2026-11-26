@@ -5,7 +5,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { api } from '../api.js';
+import { api, type ProxyPoolEntry } from '../api.js';
+import { fetchProxyPoolQuietly } from './helpers/proxyPoolFetch.js';
 import { getAuthToken } from '../authSession.js';
 import { getBrand } from '../components/BrandIcon.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -19,7 +20,7 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteCreatedModal from '../components/SiteCreatedModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
-import { buildSiteFocusPath, clearFocusParams, readFocusSiteId, readPendingSiteIds, readSiteEditorIntent } from './helpers/navigationFocus.js';
+import { buildSiteFocusPath, clearFocusParams, readFocusSiteId, readPendingSiteIds, readSiteEditorIntent, type SiteEditorFocusField } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
 import { formatBalanceInline, formatBalanceOrDash, type DisplayCurrency } from '../numberFormat.js';
 import { useCurrency } from '../currencyContext.js';
@@ -47,6 +48,13 @@ import {
   listSiteInitializationPresets,
 } from '../../shared/siteInitializationPresets.js';
 import { analyzePrimarySiteUrl } from '../../shared/sitePrimaryUrl.js';
+import {
+  buildBatchProxyFields,
+  proxyPoolLabel,
+  proxyPoolOptionLabel,
+  resolveEffectiveProxy,
+  type ProxyPoolSummary,
+} from './helpers/proxySelection.js';
 
 type SiteSubscriptionSummary = {
   activeCount: number;
@@ -66,6 +74,7 @@ type SiteRow = {
   platform?: string;
   status?: string;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
   customHeaders?: string | null;
   globalWeight?: number;
@@ -114,16 +123,18 @@ type SiteRow = {
   }>;
 };
 
-type BatchProxyMode = 'system' | 'custom' | 'clear';
+type BatchProxyMode = 'system' | 'pool' | 'custom' | 'clear';
 
 type BatchSiteSettingsForm = {
   applyGlobalWeight: boolean;
   globalWeight: string;
   /** 是否应用代理批量设置；未勾选=保持现状（不下发代理字段） */
   applyProxy: boolean;
-  /** 代理生效模式单选；勾选代理开关后默认"使用系统代理"；草稿地址跨模式切换保留不清空（访谈决策 12） */
+  /** 代理生效模式单选；勾选代理开关后默认"使用系统代理"；草稿跨模式切换保留不清空 */
   proxyMode: BatchProxyMode;
   proxyUrl: string;
+  /** 池模式选中的条目 id；跨模式切换保留不清空，与 proxyUrl 草稿策略一致 */
+  proxyId: number | null;
 };
 
 /** 校验自定义代理地址：协议需与服务端 SUPPORTED_PROXY_PROTOCOLS 一致（http/https/socks 系列） */
@@ -142,13 +153,26 @@ function getSiteRuntimeStatusRank(site: SiteRow): number {
 }
 
 /**
- * 站点代理生效三态。优先级与运行时 resolveProxyUrlFromExtraConfig 一致：
- * proxyUrl 非空即自定义优先，其次看系统代理开关（修复此前仅按 useSystemProxy 显示导致的误报）。
+ * 站点代理生效态。优先级与运行时 resolveHolderProxyUrl 一致：
+ * 自定义 > 代理池 > 系统代理（勾选才用）；皆空=直连。proxyPool 为空数组时池引用不可解析。
  */
-function resolveSiteProxyMode(site: Pick<SiteRow, 'proxyUrl' | 'useSystemProxy'>): 'custom' | 'system' | 'none' {
-  if (site.proxyUrl?.trim()) return 'custom';
-  if (site.useSystemProxy) return 'system';
-  return 'none';
+function resolveSiteProxyMode(
+  site: Pick<SiteRow, 'proxyUrl' | 'proxyId' | 'useSystemProxy'>,
+  pool: ProxyPoolSummary[],
+): 'custom' | 'pool' | 'system' | 'direct' {
+  return resolveEffectiveProxy(site, pool);
+}
+
+/** 编辑弹窗里“当前生效”一行文本；池名取池内备注 */
+function describeEffectiveProxy(
+  site: Pick<SiteRow, 'proxyUrl' | 'proxyId' | 'useSystemProxy'>,
+  pool: ProxyPoolSummary[],
+): string {
+  const mode = resolveSiteProxyMode(site, pool);
+  if (mode === 'custom') return '自定义代理地址';
+  if (mode === 'pool') return `代理池 · ${proxyPoolLabel(pool, site.proxyId)}`;
+  if (mode === 'system') return '系统代理（默认条目）';
+  return '直连（未设置任何代理）';
 }
 
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
@@ -425,6 +449,7 @@ export default function Sites() {
   // 都还停在旧值，得刷新整页才更新。
   const { refresh: refreshRates } = useCurrency();
   const [sites, setSites] = useState<SiteRow[]>([]);
+  const [proxyPool, setProxyPool] = useState<ProxyPoolEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('custom');
   const [highlightSiteId, setHighlightSiteId] = useState<number | null>(null);
@@ -477,6 +502,7 @@ export default function Sites() {
     applyProxy: false,
     proxyMode: 'system',
     proxyUrl: '',
+    proxyId: null,
   });
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
@@ -490,12 +516,14 @@ export default function Sites() {
   const highlightTimerRef = useRef<number | null>(null);
   /** F4：汇率输入框所在行的容器；focusField 为 cnyRate 时滚动到这里（弹窗内容自身不滚）。 */
   const billingRateRowRef = useRef<HTMLDivElement | null>(null);
+  /** 代理区容器；focusField 为 proxy 时滚动到这里（只定位、不抢焦点） */
+  const proxySectionRef = useRef<HTMLDivElement | null>(null);
   /**
    * F4：待处理的「打开编辑弹窗并定位字段」意图。
    * URL 参数是跨页传递的载体，但消费动作必须等 openEdit 真正渲染完才做，
    * 所以先落到 state，由下方 effect 在 editor 切到该站点后再执行。
    */
-  const [pendingEditorFocus, setPendingEditorFocus] = useState<{ siteId: number; field: 'cnyRate' } | null>(null);
+  const [pendingEditorFocus, setPendingEditorFocus] = useState<{ siteId: number; field: SiteEditorFocusField } | null>(null);
   /**
    * F4：一次跳转带来多个缺汇率站点时，除首个之外的待办 id。
    * 渲染成页面顶部常驻横幅（不用 toast —— message 是 string，带不了按钮）。
@@ -824,8 +852,12 @@ export default function Sites() {
 
   const load = async () => {
     try {
-      const rows = await api.getSites();
+      const [rows, poolItems] = await Promise.all([
+        api.getSites(),
+        fetchProxyPoolQuietly(),
+      ]);
       setSites(rows || []);
+      setProxyPool(poolItems);
       setSelectedSiteIds((current) => current.filter((id) => (rows || []).some((site: SiteRow) => site.id === id)));
     } catch {
       toast.error('加载站点列表失败');
@@ -953,6 +985,24 @@ export default function Sites() {
     setPendingEditorFocus(null);
     return () => window.cancelAnimationFrame(frame);
   }, [pendingEditorFocus, editor, billingAdvancedOpen]);
+
+  /**
+   * 代理徽标点击：编辑弹窗打开后滚动到代理区。
+   * 与 cnyRate 分支的区别：代理区是弹窗顶层内容（非折叠区），开弹窗即在 DOM 里；
+   * 三格共存无“单一输入框”可聚焦，故只 scrollIntoView 定位、不抢焦点。
+   * 仍等一个 rAF 避开 CenteredModal 入场动画打断滚动；ref 未到则本轮不清 pending，下一帧重试。
+   */
+  useEffect(() => {
+    if (!pendingEditorFocus || pendingEditorFocus.field !== 'proxy') return;
+    if (editor?.mode !== 'edit' || editor.editingSiteId !== pendingEditorFocus.siteId) return;
+    const container = proxySectionRef.current;
+    if (!container) return;
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    setPendingEditorFocus(null);
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingEditorFocus, editor]);
 
   useEffect(() => {
     const focusSiteId = readFocusSiteId(location.search);
@@ -1293,6 +1343,7 @@ export default function Sites() {
       platform: form.platform.trim(),
       initializationPresetId: selectedInitializationPresetId,
       proxyUrl: form.proxyUrl.trim(),
+      proxyId: form.proxyId ?? null,
       useSystemProxy: !!form.useSystemProxy,
       apiEndpoints: serializedApiEndpoints.apiEndpoints,
       customHeaders: serializedCustomHeaders.customHeaders,
@@ -1696,6 +1747,7 @@ export default function Sites() {
       applyProxy: false,
       proxyMode: 'system',
       proxyUrl: '',
+      proxyId: null,
     });
     setBatchSettingsOpen(true);
   };
@@ -1721,11 +1773,9 @@ export default function Sites() {
       payload.globalWeight = Number(parsedWeight.toFixed(3));
     }
 
-    // 未勾选"批量设置站点代理"即为保持现状（不下发代理字段）；勾选后三值单选 → 服务端字段映射（后端零改动）：
-    // custom -> 校验地址后下发 proxyUrl + useSystemProxy=false
-    // system -> 下发 useSystemProxy=true + proxyUrl=''（清空自定义地址，避免运行时"自定义优先"架空系统代理）
-    // clear  -> 下发 proxyUrl=''（服务端解析为清空）+ useSystemProxy=false
-    // 说明：运行优先级为"站点自定义地址非空即用，否则才走系统代理/直连"，故凡不选用自定义地址（system/clear）都需清空 proxyUrl 才能与优先级一致。
+    // 未勾选"批量设置站点代理"即为保持现状（不下发代理字段）；勾选后四值互斥单选，
+    // 映射交 proxySelection.buildBatchProxyFields（与连接页批量共用同一真源）。
+    // 凡非自定义模式都清空 proxyUrl、非池模式都清空 proxyId，与"自定义>池>系统"运行优先级一致。
     if (batchSettingsForm.applyProxy) {
       if (batchSettingsForm.proxyMode === 'custom') {
         const trimmed = batchSettingsForm.proxyUrl.trim();
@@ -1733,15 +1783,17 @@ export default function Sites() {
           toast.error(tr('请填写合法的代理地址（支持 http(s)://、socks4://、socks5://）'));
           return;
         }
-        payload.proxyUrl = trimmed;
-        payload.useSystemProxy = false;
-      } else if (batchSettingsForm.proxyMode === 'system') {
-        payload.proxyUrl = '';
-        payload.useSystemProxy = true;
-      } else if (batchSettingsForm.proxyMode === 'clear') {
-        payload.proxyUrl = '';
-        payload.useSystemProxy = false;
+      } else if (batchSettingsForm.proxyMode === 'pool' && !batchSettingsForm.proxyId) {
+        toast.error(tr('请选择代理池中的一个代理'));
+        return;
       }
+      const fields = buildBatchProxyFields(batchSettingsForm.proxyMode, {
+        proxyUrl: batchSettingsForm.proxyUrl,
+        proxyId: batchSettingsForm.proxyId,
+      });
+      payload.proxyUrl = fields.proxyUrl;
+      payload.proxyId = fields.proxyId;
+      payload.useSystemProxy = fields.useSystemProxy;
     }
 
     setBatchActionLoading(true);
@@ -2016,6 +2068,7 @@ export default function Sites() {
                 onChange={(value) => setBatchSettingsForm((prev) => ({ ...prev, proxyMode: value as BatchProxyMode }))}
                 options={[
                   { value: 'system', label: tr('使用系统代理') },
+                  { value: 'pool', label: tr('代理池') },
                   { value: 'custom', label: tr('自定义代理') },
                   { value: 'clear', label: tr('清除代理') },
                 ]}
@@ -2029,8 +2082,24 @@ export default function Sites() {
               placeholder={tr('自定义代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）')}
               disabled={!batchSettingsForm.applyProxy || batchSettingsForm.proxyMode !== 'custom'}
             />
+            {/* 池选择：勾选且池模式才可编辑；草稿跨模式切换保留不清空，与地址框同策略 */}
+            <div style={{ marginTop: 8 }}>
+              <ModernSelect
+                data-testid="sites-batch-proxy-pool"
+                value={batchSettingsForm.proxyId ? String(batchSettingsForm.proxyId) : ''}
+                disabled={!batchSettingsForm.applyProxy || batchSettingsForm.proxyMode !== 'pool'}
+                onChange={(value) => setBatchSettingsForm((prev) => ({ ...prev, proxyId: value ? Number(value) : null }))}
+                options={[
+                  { value: '', label: proxyPool.length > 0 ? tr('请选择代理') : tr('代理池为空，请先到设置页维护') },
+                  ...proxyPool.map((entry) => ({
+                    value: String(entry.id),
+                    label: proxyPoolOptionLabel(entry),
+                  })),
+                ]}
+              />
+            </div>
             <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
-              {tr('未勾选"批量设置站点代理"则保持各站点现状；支持 http(s)://、socks4://、socks5://；"使用系统代理"复用设置页中的系统代理；"清除代理"会同时清空自定义地址与系统代理开关。')}
+              {tr('未勾选"批量设置站点代理"则保持各站点现状；四种模式互斥；"清除代理"会同时清空自定义地址、池引用与系统代理开关。')}
             </div>
           </div>
         </div>
@@ -2169,6 +2238,17 @@ export default function Sites() {
               onChange={(e) => setForm((prev) => ({ ...prev, externalCheckinUrl: e.target.value }))}
               style={formInputStyle}
             />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input
+                placeholder="站点全局权重（默认 1）"
+                value={form.globalWeight}
+                onChange={(e) => setForm((prev) => ({ ...prev, globalWeight: e.target.value }))}
+                style={formInputStyle}
+              />
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                越大越容易被路由选中。建议 0.5-3，默认 1。
+              </div>
+            </div>
           </ResponsiveFormGrid>
           {activeInitializationPreset && (
             <div className="alert alert-info animate-scale-in">
@@ -2675,48 +2755,53 @@ export default function Sites() {
             </div>
           )}
 
-          <ResponsiveFormGrid>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <input
-                placeholder="站点代理（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
-                value={form.proxyUrl}
-                onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
-                style={formInputStyle}
-              />
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                这里只是 HTTP/SOCKS 代理地址，不是上游 API 请求地址。填写后优先使用站点代理；留空则使用系统代理或直连(取决于设置开关状态)。
+          {/* 代理设置独立成组：三格（自定义/池/系统勾选）+ 当前生效一行 */}
+          <div ref={proxySectionRef} data-focus-field="site-proxy" style={{ marginTop: 4 }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
+                padding: 12,
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)',
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{tr('代理设置')}</div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                  <input
+                    type="checkbox"
+                    checked={form.useSystemProxy}
+                    onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
+                  />
+                  {tr('使用系统代理')}
+                </label>
+                <ModernSelect
+                  data-testid="site-edit-proxy-pool"
+                  value={form.proxyId ? String(form.proxyId) : ''}
+                  onChange={(value) => setForm((prev) => ({ ...prev, proxyId: value ? Number(value) : null }))}
+                  options={[
+                    { value: '', label: proxyPool.length > 0 ? tr('代理池（不选）') : tr('代理池为空，请先到设置页维护') },
+                    ...proxyPool.map((entry) => ({
+                      value: String(entry.id),
+                      label: proxyPoolOptionLabel(entry),
+                    })),
+                  ]}
+                />
+                <input
+                  placeholder={tr('自定义代理地址（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）')}
+                  value={form.proxyUrl}
+                  onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
+                  style={{ ...formInputStyle, fontFamily: 'var(--font-mono)' }}
+                />
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+                {tr('三格可共存；生效顺序：自定义地址 > 代理池 > 系统代理勾选，全部为空则直连。当前生效')}：{describeEffectiveProxy(form, proxyPool)}
               </div>
             </div>
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 13,
-              background: 'var(--color-bg)',
-              color: 'var(--color-text-primary)',
-            }}>
-              <input
-                type="checkbox"
-                checked={form.useSystemProxy}
-                onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
-              />
-              使用系统代理
-            </label>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <input
-                placeholder="站点全局权重（默认 1）"
-                value={form.globalWeight}
-                onChange={(e) => setForm((prev) => ({ ...prev, globalWeight: e.target.value }))}
-                style={formInputStyle}
-              />
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                越大越容易被路由选中。建议 0.5-3，默认 1。
-              </div>
-            </div>
-          </ResponsiveFormGrid>
+          </div>
         </CenteredModal>
       )}
 
@@ -2923,11 +3008,18 @@ export default function Sites() {
                         <MobileField
                           label="代理"
                           value={(() => {
-                            const mode = resolveSiteProxyMode(site);
+                            const mode = resolveSiteProxyMode(site, proxyPool);
+                            const label = mode === 'custom' ? tr('自定义代理') : mode === 'pool' ? tr('代理池') : mode === 'system' ? tr('系统代理') : tr('直连');
                             return (
-                              <span className={`badge ${mode === 'none' ? 'badge-muted' : 'badge-info'}`} style={{ fontSize: 11 }}>
-                                {mode === 'custom' ? tr('自定义代理') : mode === 'system' ? tr('系统代理') : tr('无代理')}
-                              </span>
+                              <button
+                                type="button"
+                                className={`badge ${mode === 'direct' ? 'badge-muted' : 'badge-info'} billing-rate-badge`}
+                                style={{ fontSize: 11, cursor: 'pointer' }}
+                                title={tr('点击编辑该站点的代理设置')}
+                                onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'proxy' }))}
+                              >
+                                {label}{mode === 'pool' ? ` · ${proxyPoolLabel(proxyPool, site.proxyId)}` : ''}
+                              </button>
                             );
                           })()}
                         />
@@ -3181,11 +3273,18 @@ export default function Sites() {
                     </td>
                     <td>
                       {(() => {
-                        const mode = resolveSiteProxyMode(site);
+                        const mode = resolveSiteProxyMode(site, proxyPool);
+                        const label = mode === 'custom' ? tr('自定义代理') : mode === 'pool' ? tr('代理池') : mode === 'system' ? tr('系统代理') : tr('直连');
                         return (
-                          <span className={`badge ${mode === 'none' ? 'badge-muted' : 'badge-info'}`} style={{ fontSize: 11 }}>
-                            {mode === 'custom' ? tr('自定义代理') : mode === 'system' ? tr('系统代理') : tr('无代理')}
-                          </span>
+                          <button
+                            type="button"
+                            className={`badge ${mode === 'direct' ? 'badge-muted' : 'badge-info'} billing-rate-badge`}
+                            style={{ fontSize: 11, cursor: 'pointer' }}
+                            title={tr('点击编辑该站点的代理设置')}
+                            onClick={() => navigate(buildSiteFocusPath(site.id, { editField: 'proxy' }))}
+                          >
+                            {label}{mode === 'pool' ? ` · ${proxyPoolLabel(proxyPool, site.proxyId)}` : ''}
+                          </button>
                         );
                       })()}
                     </td>

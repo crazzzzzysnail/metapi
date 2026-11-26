@@ -46,6 +46,7 @@ describe('settings factory reset api', () => {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.proxyPool).run();
     await db.delete(schema.sites).run();
     await db.delete(schema.downstreamApiKeys).run();
     await db.delete(schema.events).run();
@@ -153,7 +154,8 @@ describe('settings factory reset api', () => {
     expect(config.dbType).toBe('sqlite');
     expect(config.dbUrl).toBe('');
     expect(config.dbSsl).toBe(false);
-    expect(config.systemProxyUrl).toBe('http://127.0.0.1:7890');
+    // 系统代理归业务数据：重置后回到 env 基线（测试环境未设 SYSTEM_PROXY_URL → 空）
+    expect(config.systemProxyUrl).toBe('');
 
     const sites = await db.select().from(schema.sites).all();
     expect(sites.map((site) => site.name)).toEqual([
@@ -172,7 +174,9 @@ describe('settings factory reset api', () => {
     expect(dbTypeSetting?.value).toBe(JSON.stringify('sqlite'));
     expect(dbUrlSetting?.value).toBe(JSON.stringify(''));
     expect(dbSslSetting?.value).toBe(JSON.stringify(false));
-    expect(systemProxySetting?.value).toBe(JSON.stringify('http://127.0.0.1:7890'));
+    // 系统代理镜像不再写回：写回会让下次启动播种复活被清空的默认代理
+    expect(systemProxySetting).toBeUndefined();
+    expect(await db.select().from(schema.proxyPool).all()).toHaveLength(0);
 
     expect(await db.select().from(schema.accounts).all()).toHaveLength(0);
     expect(await db.select().from(schema.accountTokens).all()).toHaveLength(0);

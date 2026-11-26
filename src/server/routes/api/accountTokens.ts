@@ -17,7 +17,7 @@ import {
   type TokenSyncUndistinguishable,
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
-import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import { getCredentialModeFromExtraConfig, resolveProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { withAccountProxyOverride } from '../../services/siteProxy.js';
 import { type ModelRefreshResult } from '../../services/modelService.js';
@@ -306,7 +306,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
 
   try {
     const platformUserId = resolvePlatformUserId(row.accounts.extraConfig, row.accounts.username);
-    const accountProxyUrl = getProxyUrlFromExtraConfig(row.accounts.extraConfig);
+    const accountProxyUrl = resolveProxyUrlFromExtraConfig(row.accounts.extraConfig);
     let tokens = await withTimeout(
       () => withAccountProxyOverride(accountProxyUrl,
         () => adapter.getApiTokens(row.sites.url, row.accounts.accessToken, platformUserId)),
@@ -609,7 +609,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
 
     const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
     const createdViaUpstream = await withAccountProxyOverride(
-      getProxyUrlFromExtraConfig(account.extraConfig),
+      resolveProxyUrlFromExtraConfig(account.extraConfig),
       () => adapter.createApiToken(
         site.url,
         account.accessToken,
@@ -685,7 +685,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (shouldDeleteUpstream) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const upstreamDeleted = await withAccountProxyOverride(
-        getProxyUrlFromExtraConfig(account.extraConfig),
+        resolveProxyUrlFromExtraConfig(account.extraConfig),
         () => adapter!.deleteApiToken(
           site.url,
           account.accessToken,
@@ -955,7 +955,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     try {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const groups = await withAccountProxyOverride(
-        getProxyUrlFromExtraConfig(account.extraConfig),
+        resolveProxyUrlFromExtraConfig(account.extraConfig),
         () => adapter.getUserGroups(site.url, account.accessToken, platformUserId),
       );
       const normalized = Array.from(new Set((groups || []).map((item) => String(item || '').trim()).filter(Boolean)));

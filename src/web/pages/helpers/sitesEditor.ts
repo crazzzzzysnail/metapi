@@ -17,6 +17,8 @@ export type SiteForm = {
   externalCheckinUrl: string;
   platform: string;
   proxyUrl: string;
+  /** 引用的代理池条目 id；null=未选择。与 proxyUrl/useSystemProxy 三格共存 */
+  proxyId: number | null;
   useSystemProxy: boolean;
   apiEndpoints: SiteApiEndpointField[];
   customHeaders: SiteCustomHeaderField[];
@@ -34,6 +36,7 @@ export type SiteSavePayload = {
   platform: string;
   initializationPresetId?: string | null;
   proxyUrl: string;
+  proxyId: number | null;
   useSystemProxy: boolean;
   apiEndpoints: Array<{
     url: string;
@@ -76,6 +79,7 @@ export function emptySiteForm(): SiteForm {
     externalCheckinUrl: '',
     platform: '',
     proxyUrl: '',
+    proxyId: null,
     useSystemProxy: false,
     apiEndpoints: [emptySiteApiEndpoint()],
     customHeaders: [emptySiteCustomHeader()],
@@ -85,6 +89,12 @@ export function emptySiteForm(): SiteForm {
 
 function ensureSiteApiEndpointRows(rows: SiteApiEndpointField[]): SiteApiEndpointField[] {
   return rows.length > 0 ? rows : [emptySiteApiEndpoint()];
+}
+
+/** 池引用 id 归一：非正整数一律视为未选择 */
+function normalizeSiteProxyId(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function parseCustomHeadersForEditor(raw: unknown): SiteCustomHeaderField[] {
@@ -131,9 +141,10 @@ function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
   return ensureSiteApiEndpointRows(rows);
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'proxyId' | 'useSystemProxy'>> & {
   externalCheckinUrl?: string | null;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean | null;
   apiEndpoints?: Array<{
     url?: string | null;
@@ -152,6 +163,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     externalCheckinUrl: site.externalCheckinUrl ?? '',
     platform: site.platform ?? '',
     proxyUrl: site.proxyUrl ?? '',
+    proxyId: normalizeSiteProxyId(site.proxyId),
     useSystemProxy: !!site.useSystemProxy,
     apiEndpoints: parseApiEndpointsForEditor(site.apiEndpoints),
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),

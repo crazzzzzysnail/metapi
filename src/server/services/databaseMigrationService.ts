@@ -29,6 +29,7 @@ type BackupSnapshot = {
   timestamp: number;
   accounts: {
     sites: Array<Record<string, unknown>>;
+    proxyPool: Array<Record<string, unknown>>;
     siteApiEndpoints: Array<Record<string, unknown>>;
     siteAnnouncements: Array<Record<string, unknown>>;
     siteDisabledModels: Array<Record<string, unknown>>;
@@ -59,6 +60,7 @@ export interface DatabaseMigrationSummary {
   timestamp: number;
   rows: {
     sites: number;
+    proxyPool: number;
     siteApiEndpoints: number;
     siteAnnouncements: number;
     siteDisabledModels: number;
@@ -253,6 +255,7 @@ async function toBackupSnapshot(): Promise<BackupSnapshot> {
     timestamp: Date.now(),
     accounts: {
       sites: await db.select().from(schema.sites).all() as Array<Record<string, unknown>>,
+      proxyPool: await db.select().from(schema.proxyPool).all() as Array<Record<string, unknown>>,
       siteApiEndpoints: await db.select().from(schema.siteApiEndpoints).all() as Array<Record<string, unknown>>,
       siteAnnouncements: await db.select().from(schema.siteAnnouncements).all() as Array<Record<string, unknown>>,
       siteDisabledModels: await db.select().from(schema.siteDisabledModels).all() as Array<Record<string, unknown>>,
@@ -305,6 +308,7 @@ async function clearTargetData(client: SqlClient): Promise<void> {
     'site_api_endpoints',
     'token_routes',
     'sites',
+    'proxy_pool',
     'downstream_api_keys',
     'events',
     'settings',
@@ -320,10 +324,26 @@ function buildStatements(
 ): InsertStatement[] {
   const statements: InsertStatement[] = [];
 
+  // 代理池先插：sites.proxy_id 引用其 id，目标库开了外键约束时顺序不能反
+  for (const row of snapshot.accounts.proxyPool || []) {
+    statements.push({
+      table: 'proxy_pool',
+      columns: ['id', 'name', 'url', 'is_default', 'created_at', 'updated_at'],
+      values: [
+        asNumber(row.id, 0),
+        asNullableString(row.name),
+        asNullableString(row.url),
+        asBoolean(row.isDefault, false),
+        asNullableString(row.createdAt),
+        asNullableString(row.updatedAt),
+      ],
+    });
+  }
+
   for (const row of snapshot.accounts.sites) {
     statements.push({
       table: 'sites',
-      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'created_at', 'updated_at'],
+      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'proxy_id', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.name),
@@ -331,6 +351,7 @@ function buildStatements(
         asNullableString(row.externalCheckinUrl),
         asNullableString(row.platform),
         asNullableString(row.proxyUrl),
+        asNumber(row.proxyId, null),
         asBoolean(row.useSystemProxy, false),
         serializeColumnValue('sites', 'custom_headers', row.customHeaders, contract),
         asNullableString(row.status) ?? 'active',
@@ -816,6 +837,7 @@ export async function migrateCurrentDatabase(input: DatabaseMigrationInput): Pro
     timestamp: snapshot.timestamp,
     rows: {
       sites: snapshot.accounts.sites.length,
+      proxyPool: (snapshot.accounts.proxyPool || []).length,
       siteApiEndpoints: snapshot.accounts.siteApiEndpoints.length,
       siteAnnouncements: snapshot.accounts.siteAnnouncements.length,
       siteDisabledModels: snapshot.accounts.siteDisabledModels.length,

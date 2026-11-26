@@ -29,6 +29,8 @@ const accountUpdatePayloadSchema = z.object({
   isPinned: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  proxyId: z.union([z.number().int().positive(), z.null(), z.literal('')]).optional(),
+  useSystemProxy: z.boolean().optional(),
   // 手动余额：空串 / null = 清除并回到自动刷新；数值范围在路由里校验（中文错误文案）
   manualBalanceUsd: z.union([z.string(), z.number(), z.null()]).optional(),
 }).passthrough();
@@ -36,6 +38,10 @@ const accountUpdatePayloadSchema = z.object({
 const accountBatchPayloadSchema = z.object({
   ids: z.array(z.number().int().positive()).optional(),
   action: z.string().optional(),
+  // updateSettings 载荷：与站点批量同形，具体合法性在路由层判定
+  proxyUrl: z.unknown().optional(),
+  proxyId: z.unknown().optional(),
+  useSystemProxy: z.unknown().optional(),
 }).passthrough();
 
 const accountRebindSessionPayloadSchema = z.object({

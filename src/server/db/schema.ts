@@ -9,6 +9,8 @@ export const sites = sqliteTable('sites', {
   platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini' | 'codex' | 'gemini-cli' | 'antigravity'
   proxyUrl: text('proxy_url'),
   useSystemProxy: integer('use_system_proxy', { mode: 'boolean' }).default(false),
+  // 引用 proxy_pool.id；null=未选择。方言升级 SQL 不补外键，引用完整性由 proxyPoolService 维护。
+  proxyId: integer('proxy_id'),
   customHeaders: text('custom_headers'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
@@ -395,6 +397,18 @@ export const proxyFiles = sqliteTable('proxy_files', {
 }, (table) => ({
   publicIdUnique: uniqueIndex('proxy_files_public_id_unique').on(table.publicId),
   ownerLookupIdx: index('proxy_files_owner_lookup_idx').on(table.ownerType, table.ownerId, table.deletedAt),
+}));
+
+// 系统代理池：多条命名代理，至多一条为默认（默认条目即系统代理唯一权威）。
+export const proxyPool = sqliteTable('proxy_pool', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  url: text('url').notNull(),
+  isDefault: integer('is_default', { mode: 'boolean' }).default(false),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  defaultIdx: index('proxy_pool_default_idx').on(table.isDefault),
 }));
 
 export const settings = sqliteTable('settings', {

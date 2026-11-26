@@ -23,6 +23,7 @@ import {
   updateOauthRouteUnit,
 } from '../../services/oauth/routeUnitService.js';
 import { parseSiteProxyUrlInput } from '../../services/siteProxy.js';
+import { proxyPoolIdExists } from '../../services/proxyPoolService.js';
 import {
   parseOauthConnectionRebindPayload,
   parseOauthConnectionProxyUpdatePayload,
@@ -157,6 +158,15 @@ function parseOptionalProjectId(value: unknown): string | undefined | null {
   return trimmed || undefined;
 }
 
+/** 池引用入参：undefined=不改；null/空串=清除；正整数=设置。存在性另由调用方校验。 */
+function parseOauthProxyIdInput(value: unknown): { present: boolean; valid: boolean; proxyId: number | null } {
+  if (value === undefined) return { present: false, valid: true, proxyId: null };
+  if (value === null || value === '') return { present: true, valid: true, proxyId: null };
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return { present: true, valid: false, proxyId: null };
+  return { present: true, valid: true, proxyId: parsed };
+}
+
 function resolveRequestOrigin(request: FastifyRequest): string | undefined {
   const forwardedProto = typeof request.headers['x-forwarded-proto'] === 'string'
     ? request.headers['x-forwarded-proto'].split(',')[0]?.trim()
@@ -201,6 +211,13 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
         return reply.code(400).send({ message: 'invalid proxy url' });
       }
+      const normalizedProxyId = parseOauthProxyIdInput(body.proxyId);
+      if (normalizedProxyId.present && !normalizedProxyId.valid) {
+        return reply.code(400).send({ message: 'invalid proxy id' });
+      }
+      if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+        return reply.code(400).send({ message: 'proxy pool entry not found' });
+      }
 
       try {
         return await startOauthProviderFlow({
@@ -208,6 +225,7 @@ export async function oauthRoutes(app: FastifyInstance) {
           rebindAccountId: rebindAccountId ?? undefined,
           projectId: projectId ?? undefined,
           proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
+          proxyId: normalizedProxyId.present ? normalizedProxyId.proxyId : undefined,
           useSystemProxy: body.useSystemProxy,
           requestOrigin: resolveRequestOrigin(request),
         });
@@ -304,12 +322,20 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
         return reply.code(400).send({ message: 'invalid proxy url' });
       }
+      const normalizedProxyId = parseOauthProxyIdInput(parsedBody.data.proxyId);
+      if (normalizedProxyId.present && !normalizedProxyId.valid) {
+        return reply.code(400).send({ message: 'invalid proxy id' });
+      }
+      if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+        return reply.code(400).send({ message: 'proxy pool entry not found' });
+      }
       try {
         return await startOauthRebindFlow(
           accountId,
           {
             requestOrigin: resolveRequestOrigin(request),
             proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
+            proxyId: normalizedProxyId.present ? normalizedProxyId.proxyId : undefined,
             useSystemProxy: parsedBody.data.useSystemProxy,
           },
         );
@@ -342,10 +368,18 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
         return reply.code(400).send({ message: 'invalid proxy url' });
       }
+      const normalizedProxyId = parseOauthProxyIdInput(parsedBody.data.proxyId);
+      if (normalizedProxyId.present && !normalizedProxyId.valid) {
+        return reply.code(400).send({ message: 'invalid proxy id' });
+      }
+      if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+        return reply.code(400).send({ message: 'proxy pool entry not found' });
+      }
       try {
         return await updateOauthConnectionProxySettings({
           accountId,
           proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
+          proxyId: normalizedProxyId.present ? normalizedProxyId.proxyId : undefined,
           useSystemProxy: parsedBody.data.useSystemProxy,
         });
       } catch (error: any) {
@@ -435,11 +469,19 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
         return reply.code(400).send({ message: 'invalid proxy url' });
       }
+      const normalizedProxyId = parseOauthProxyIdInput(parsedBody.data.proxyId);
+      if (normalizedProxyId.present && !normalizedProxyId.valid) {
+        return reply.code(400).send({ message: 'invalid proxy id' });
+      }
+      if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+        return reply.code(400).send({ message: 'proxy pool entry not found' });
+      }
       try {
         return await importOauthConnectionsFromNativeJson({
           data,
           items: hasBatchItems ? parsedBody.data.items : undefined,
           proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
+          proxyId: normalizedProxyId.present ? normalizedProxyId.proxyId : undefined,
           useSystemProxy: parsedBody.data.useSystemProxy,
         });
       } catch (error: any) {

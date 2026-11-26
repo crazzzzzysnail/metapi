@@ -14,6 +14,7 @@ function createDbSchemaMock() {
   return {
     settings: { __table: 'settings' },
     sites: { __table: 'sites' },
+    proxyPool: { __table: 'proxyPool' },
     siteApiEndpoints: { __table: 'siteApiEndpoints' },
     siteAnnouncements: { __table: 'siteAnnouncements' },
     siteDisabledModels: { __table: 'siteDisabledModels' },
