@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { resolveHolderProxyUrl } from './proxyResolution.js';
 import type { SubscriptionPlanSummary, SubscriptionSummary } from './platforms/base.js';
 
 type AutoReloginConfig = {
@@ -139,19 +140,33 @@ export function getProxyUrlFromExtraConfig(extraConfig?: ExtraConfigInput): stri
   return normalizeNonEmptyString(parsed.proxyUrl) ?? null;
 }
 
+/** 账号引用的代理池条目 id；非法/缺失返回 null（视为未选择） */
+export function getProxyIdFromExtraConfig(extraConfig?: ExtraConfigInput): number | null {
+  const parsed = parseExtraConfig(extraConfig);
+  const value = Number(parsed.proxyId);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 export function getUseSystemProxyFromExtraConfig(extraConfig?: ExtraConfigInput): boolean {
   const parsed = parseExtraConfig(extraConfig);
   return parsed.useSystemProxy === true;
 }
 
+/**
+ * 账号层地址轴解析：自定义 > 池(proxyId) > 勾选系统代理。
+ * 第二参保留旧覆盖语义（如按 settings 行取系统代理镜像），仅在池缓存未加载时生效。
+ */
 export function resolveProxyUrlFromExtraConfig(
   extraConfig?: ExtraConfigInput,
   systemProxyUrl = config.systemProxyUrl,
 ): string | null {
   const explicitProxyUrl = getProxyUrlFromExtraConfig(extraConfig);
   if (explicitProxyUrl) return explicitProxyUrl;
-  if (!getUseSystemProxyFromExtraConfig(extraConfig)) return null;
-  return normalizeNonEmptyString(systemProxyUrl) ?? null;
+  return resolveHolderProxyUrl({
+    proxyId: getProxyIdFromExtraConfig(extraConfig),
+    useSystemProxy: getUseSystemProxyFromExtraConfig(extraConfig),
+    systemProxyUrl: normalizeNonEmptyString(systemProxyUrl),
+  });
 }
 
 export function getPlatformUserIdFromExtraConfig(extraConfig?: ExtraConfigInput): number | undefined {

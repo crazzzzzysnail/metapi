@@ -4397,6 +4397,8 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .modern-select-value-content {
@@ -4405,6 +4407,15 @@ textarea {
   gap: 8px;
   min-width: 0;
   max-width: 100%;
+  overflow: hidden;
+}
+
+/* 选项文案过长时在触发器内省略，不能撑破整行（代理池条目名可能很长） */
+.modern-select-value-content > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modern-select-value.is-placeholder {

@@ -85,10 +85,10 @@ describe('factoryResetService', () => {
     expect(runSqliteMigrations).not.toHaveBeenCalled();
     expect(ensureDefaultSitesSeeded).toHaveBeenCalledTimes(1);
     expect(await db.select().from(schema.sites).all()).toHaveLength(0);
+    // 系统代理镜像不再保留：代理池已整体清空，写回 '' 只会复活一个空默认条目
     expect(await db.select().from(schema.settings).all()).toEqual([
       { key: 'auth_token', value: JSON.stringify('external-reset-token') },
       { key: 'proxy_token', value: JSON.stringify('change-me-proxy-sk-token') },
-      { key: 'system_proxy_url', value: JSON.stringify('') },
       { key: 'db_type', value: JSON.stringify('postgres') },
       { key: 'db_url', value: JSON.stringify('postgres://user:pass@127.0.0.1:5432/metapi') },
       { key: 'db_ssl', value: JSON.stringify(true) },

@@ -341,6 +341,17 @@ export type SystemProxyTestRequest = {
   proxyUrl?: string;
 };
 
+export type ProxyPoolEntry = {
+  id: number;
+  name: string;
+  /** 服务端已脱敏（凭据打码）；原文走 revealProxyPoolEntry */
+  url: string;
+  hasCredentials: boolean;
+  isDefault: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
 export type SystemProxyTestResponse = {
   success: true;
   proxyUrl: string;
@@ -725,6 +736,7 @@ export type OAuthConnectionInfo = {
   modelCount: number;
   modelsPreview: string[];
   status: "healthy" | "abnormal";
+  proxyId?: number | null;
   quota?: OAuthQuotaInfo | null;
   routeChannelCount?: number;
   lastModelSyncAt?: string | null;
@@ -1184,6 +1196,7 @@ export const api = {
       accountId?: number;
       projectId?: string;
       proxyUrl?: string | null;
+      proxyId?: number | null;
       useSystemProxy?: boolean;
     },
   ) =>
@@ -1219,7 +1232,7 @@ export const api = {
     }) as Promise<OAuthQuotaBatchRefreshResponse>,
   updateOAuthConnectionProxy: (
     accountId: number,
-    data: { proxyUrl?: string | null; useSystemProxy?: boolean },
+    data: { proxyUrl?: string | null; proxyId?: number | null; useSystemProxy?: boolean },
   ) =>
     request(`/api/oauth/connections/${accountId}/proxy`, {
       method: "PATCH",
@@ -1227,7 +1240,7 @@ export const api = {
     }) as Promise<{ success: true }>,
   rebindOAuthConnection: (
     accountId: number,
-    data?: { proxyUrl?: string | null; useSystemProxy?: boolean },
+    data?: { proxyUrl?: string | null; proxyId?: number | null; useSystemProxy?: boolean },
   ) =>
     request(`/api/oauth/connections/${accountId}/rebind`, {
       method: "POST",
@@ -1360,6 +1373,25 @@ export const api = {
       body: JSON.stringify(data),
       timeoutMs: 20_000,
     }),
+  // 代理池：列表返回脱敏地址；reveal 取原文；test 服务端用原文探测
+  getProxyPool: () =>
+    request("/api/proxy-pool") as Promise<{ items: ProxyPoolEntry[] }>,
+  createProxyPoolEntry: (data: { name: string; url: string }) =>
+    request("/api/proxy-pool", { method: "POST", body: JSON.stringify(data) }) as Promise<{ item: ProxyPoolEntry }>,
+  updateProxyPoolEntry: (id: number, data: { name: string }) =>
+    request(`/api/proxy-pool/${id}`, { method: "PUT", body: JSON.stringify(data) }) as Promise<{ item: ProxyPoolEntry }>,
+  updateProxyPoolEntryUrl: (id: number, data: { url: string }) =>
+    request(`/api/proxy-pool/${id}/url`, { method: "PUT", body: JSON.stringify(data) }) as Promise<{ item: ProxyPoolEntry }>,
+  deleteProxyPoolEntry: (id: number) =>
+    request(`/api/proxy-pool/${id}`, { method: "DELETE" }) as Promise<{ success: boolean; defaultId: number | null }>,
+  setDefaultProxyPoolEntry: (id: number) =>
+    request(`/api/proxy-pool/${id}/default`, { method: "PUT" }) as Promise<{ success: boolean; item: ProxyPoolEntry }>,
+  getProxyPoolUsage: (id: number) =>
+    request(`/api/proxy-pool/${id}/usage`) as Promise<{ siteCount: number; accountCount: number }>,
+  revealProxyPoolEntry: (id: number) =>
+    request(`/api/proxy-pool/${id}/reveal`, { method: "POST" }) as Promise<{ url: string }>,
+  testProxyPoolEntry: (id: number) =>
+    request<SystemProxyTestResponse>(`/api/proxy-pool/${id}/test`, { method: "POST", timeoutMs: 20_000 }),
   getRuntimeDatabaseConfig: () => request("/api/settings/database/runtime"),
   updateRuntimeDatabaseConfig: (data: {
     dialect: "sqlite" | "mysql" | "postgres";

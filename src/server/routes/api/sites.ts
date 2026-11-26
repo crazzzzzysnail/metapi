@@ -20,6 +20,7 @@ import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointS
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
 import { probeSiteModels } from '../../services/modelService.js';
 import { normalizePerfMetricsCapabilityInput } from '../../services/perfMetricsCapability.js';
+import { proxyPoolIdExists } from '../../services/proxyPoolService.js';
 
 function sseWrite(raw: import('http').ServerResponse, event: string, data: unknown) {
   try { raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ }
@@ -47,6 +48,17 @@ function normalizePinnedFlag(input: unknown): boolean | null {
 
 function normalizeUseSystemProxyFlag(input: unknown): boolean | null {
   return normalizePinnedFlag(input);
+}
+
+/**
+ * 代理池引用入参：undefined=不改；null/空=清除；正整数=设置（存在性由调用方校验）。
+ */
+function parseSiteProxyIdInput(input: unknown): { present: boolean; valid: boolean; proxyId: number | null } {
+  if (input === undefined) return { present: false, valid: true, proxyId: null };
+  if (input === null || input === '') return { present: true, valid: true, proxyId: null };
+  const parsed = Number(input);
+  if (!Number.isInteger(parsed) || parsed <= 0) return { present: true, valid: false, proxyId: null };
+  return { present: true, valid: true, proxyId: parsed };
 }
 
 function normalizeSortOrder(input: unknown): number | null {
@@ -675,6 +687,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       platform,
       initializationPresetId,
       proxyUrl,
+      proxyId,
       useSystemProxy,
       customHeaders,
       externalCheckinUrl,
@@ -695,6 +708,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedProxyUrl = parseSiteProxyUrlInput(proxyUrl);
     if (!normalizedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
+    }
+    const normalizedProxyId = parseSiteProxyIdInput(proxyId);
+    if (!normalizedProxyId.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyId. Expected a positive integer or null.' });
+    }
+    if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+      return reply.code(400).send({ error: 'Invalid proxyId. Proxy pool entry not found.' });
     }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
@@ -763,6 +783,7 @@ export async function sitesRoutes(app: FastifyInstance) {
           url: canonicalUrl,
           platform: detectedPlatform,
           proxyUrl: normalizedProxyUrl.proxyUrl,
+          proxyId: normalizedProxyId.proxyId,
           useSystemProxy: normalizedUseSystemProxy ?? false,
           customHeaders: normalizedCustomHeaders.customHeaders,
           externalCheckinUrl: normalizedExternalCheckinUrl.url,
@@ -836,6 +857,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!normalizedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
+    const normalizedProxyId = parseSiteProxyIdInput(body.proxyId);
+    if (!normalizedProxyId.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyId. Expected a positive integer or null.' });
+    }
+    if (normalizedProxyId.proxyId !== null && !await proxyPoolIdExists(normalizedProxyId.proxyId)) {
+      return reply.code(400).send({ error: 'Invalid proxyId. Proxy pool entry not found.' });
+    }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(body.externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
       return reply.code(400).send({ error: 'Invalid externalCheckinUrl. Expected a valid http(s) URL.' });
@@ -886,6 +914,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.url !== undefined) updates.url = nextUrl;
     if (body.platform !== undefined) updates.platform = nextPlatform;
     if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
+    if (normalizedProxyId.present) updates.proxyId = normalizedProxyId.proxyId;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
     if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
@@ -983,6 +1012,17 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (action === 'updateSettings' && !normalizedBatchProxyUrl.valid) {
       return reply.code(400).send({ message: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
+    const normalizedBatchProxyId = parseSiteProxyIdInput(parsedBody.data.proxyId);
+    if (action === 'updateSettings' && !normalizedBatchProxyId.valid) {
+      return reply.code(400).send({ message: 'Invalid proxyId. Expected a positive integer or null.' });
+    }
+    if (
+      action === 'updateSettings'
+      && normalizedBatchProxyId.proxyId !== null
+      && !await proxyPoolIdExists(normalizedBatchProxyId.proxyId)
+    ) {
+      return reply.code(400).send({ message: 'Invalid proxyId. Proxy pool entry not found.' });
+    }
     const normalizedBatchUseSystemProxy = normalizeUseSystemProxyFlag(parsedBody.data.useSystemProxy);
     if (action === 'updateSettings' && parsedBody.data.useSystemProxy !== undefined && normalizedBatchUseSystemProxy === null) {
       return reply.code(400).send({ message: 'Invalid useSystemProxy value. Expected boolean.' });
@@ -991,6 +1031,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       action === 'updateSettings'
       && normalizedBatchGlobalWeight === null
       && !normalizedBatchProxyUrl.present
+      && !normalizedBatchProxyId.present
       && parsedBody.data.useSystemProxy === undefined
     ) {
       return reply.code(400).send({ message: 'No batch settings provided.' });
@@ -1025,6 +1066,7 @@ export async function sitesRoutes(app: FastifyInstance) {
           };
           if (normalizedBatchGlobalWeight !== null) updates.globalWeight = normalizedBatchGlobalWeight;
           if (normalizedBatchProxyUrl.present) updates.proxyUrl = normalizedBatchProxyUrl.proxyUrl;
+          if (normalizedBatchProxyId.present) updates.proxyId = normalizedBatchProxyId.proxyId;
           if (parsedBody.data.useSystemProxy !== undefined) updates.useSystemProxy = normalizedBatchUseSystemProxy;
           await db.update(schema.sites)
             .set(updates)

@@ -13,7 +13,7 @@ const EDIT_TARGET_KEY = 'editTarget';
 const EDIT_FIELD_KEY = 'editField';
 
 /** 站点编辑弹窗里可被外部定位的字段。取值进 URL，改名即是破坏兼容。 */
-export type SiteEditorFocusField = 'cnyRate';
+export type SiteEditorFocusField = 'cnyRate' | 'proxy';
 
 function normalizePositiveId(input: unknown): number | null {
   const value = Number.parseInt(String(input ?? ''), 10);
@@ -108,7 +108,7 @@ export function readSiteEditorIntent(search: string): { siteId: number; field: S
   const siteId = normalizePositiveId(params.get(FOCUS_SITE_ID_KEY));
   if (!siteId) return null;
   const field = params.get(EDIT_FIELD_KEY);
-  if (field !== 'cnyRate') return null;
+  if (field !== 'cnyRate' && field !== 'proxy') return null;
   return { siteId, field };
 }
 

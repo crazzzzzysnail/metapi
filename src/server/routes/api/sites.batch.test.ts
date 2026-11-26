@@ -29,6 +29,7 @@ describe('sites batch routes', () => {
   beforeEach(async () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    await db.delete(schema.proxyPool).run();
   });
 
   afterAll(async () => {
@@ -133,6 +134,50 @@ describe('sites batch routes', () => {
     expect(rowsById.get(2)?.proxyUrl).toBe('socks5://127.0.0.1:1080');
     expect(rowsById.get(1)?.useSystemProxy).toBe(true);
     expect(rowsById.get(2)?.useSystemProxy).toBe(true);
+  });
+
+  // 实机回归：批量池模式校验了 proxyId 却没写库，站点代理池引用必须真正落库
+  it('persists proxyId for selected sites in batch updateSettings', async () => {
+    await db.delete(schema.proxyPool).run();
+    await db.insert(schema.proxyPool).values([
+      { id: 7, name: '池甲', url: 'http://127.0.0.1:7890', isDefault: false },
+    ]).run();
+    await db.insert(schema.sites).values([
+      { id: 1, name: 'site-1', url: 'https://site-1.example.com', platform: 'new-api', proxyId: null },
+      { id: 2, name: 'site-2', url: 'https://site-2.example.com', platform: 'new-api', proxyId: null },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1, 2],
+        action: 'updateSettings',
+        proxyUrl: '',
+        proxyId: 7,
+        useSystemProxy: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rows = await db.select().from(schema.sites).all();
+    expect(rows.map((row) => row.proxyId).sort()).toEqual([7, 7]);
+
+    // 清除模式：三格全空
+    const cleared = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1, 2],
+        action: 'updateSettings',
+        proxyUrl: '',
+        proxyId: null,
+        useSystemProxy: false,
+      },
+    });
+    expect(cleared.statusCode).toBe(200);
+    const rowsAfter = await db.select().from(schema.sites).all();
+    expect(rowsAfter.every((row) => row.proxyId === null)).toBe(true);
   });
 
   it('rejects invalid batch proxy url', async () => {

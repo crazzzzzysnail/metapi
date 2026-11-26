@@ -21,6 +21,7 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     deleteOAuthRouteUnit: vi.fn(),
     getAccountModels: vi.fn(),
     checkModels: vi.fn(),
+    getProxyPool: vi.fn(),
   },
   openMock: vi.fn(),
   focusMock: vi.fn(),
@@ -94,6 +95,7 @@ describe('OAuthManagement page', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     Object.values(apiMock).forEach((mock) => mock.mockReset());
+    apiMock.getProxyPool.mockResolvedValue({ items: [] });
     openMock.mockReturnValue({ focus: focusMock });
     confirmMock.mockReturnValue(true);
     promptMock.mockReturnValue('project-demo');
@@ -1423,6 +1425,8 @@ describe('OAuthManagement page', () => {
             email: 'workspace-b@example.com',
           },
         ],
+        proxyUrl: null,
+        proxyId: null,
         useSystemProxy: true,
       });
       await act(async () => {
@@ -1621,12 +1625,7 @@ describe('OAuthManagement page', () => {
 
       await clickButton(root!, '新建 OAuth 连接');
 
-      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
-
-      await act(async () => {
-        proxyToggle.props.onChange({ target: { checked: true } });
-      });
-
+      // 三格共存：自定义地址直接填，无需单独开启开关
       const proxyInput = findOauthSettingInput(root!, 'proxy-url');
 
       await act(async () => {
@@ -1641,6 +1640,7 @@ describe('OAuthManagement page', () => {
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
         projectId: undefined,
         proxyUrl: 'http://127.0.0.1:7890',
+        proxyId: null,
         useSystemProxy: false,
       });
       expect(openMock).toHaveBeenCalledWith(
@@ -2111,6 +2111,7 @@ describe('OAuthManagement page', () => {
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
         proxyUrl: 'http://127.0.0.1:7890',
+        proxyId: null,
         useSystemProxy: false,
       });
     } finally {
@@ -2170,16 +2171,87 @@ describe('OAuthManagement page', () => {
       expect(collectText(root!.root)).toContain('已打开 OAuth 代理设置');
       expect(collectText(root!.root)).toContain('代理设置 · gemini@example.com');
 
-      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
       const proxyInput = findOauthSettingInput(root!, 'proxy-url');
 
       expect(findOauthSettingInput(root!, 'use-system-proxy').props.checked).toBe(false);
 
-      expect(proxyToggle).toBeTruthy();
-      expect(proxyToggle.props.checked).toBe(true);
+      // 三格共存：地址原样回填、输入框始终可用
       expect(proxyInput).toBeTruthy();
-      expect(proxyInput.props.disabled).toBe(false);
+      expect(proxyInput.props.disabled).toBeFalsy();
       expect(proxyInput.props.value).toBe('http://127.0.0.1:7890');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('saves a proxy pool reference from the proxy drawer', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'gemini-cli',
+          label: 'Gemini CLI',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getProxyPool.mockResolvedValue({
+      items: [
+        { id: 3, name: '池甲', url: 'http://127.0.0.1:7890', hasCredentials: false, isDefault: true },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 11,
+          provider: 'gemini-cli',
+          email: 'gemini@example.com',
+          projectId: 'project-demo',
+          modelCount: 5,
+          modelsPreview: ['gemini-2.5-pro'],
+          status: 'healthy',
+          proxyId: 3,
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.updateOAuthConnectionProxy.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root!.root)).toContain('代理池 · 池甲');
+
+      await clickButton(root!, '代理设置');
+      // 三格共存：池选中项直接回填到下拉，无需开关
+      expect(findOauthSettingInput(root!, 'use-system-proxy').props.checked).toBe(false);
+      expect(findOauthSettingInput(root!, 'proxy-url').props.value).toBe('');
+
+      await clickButton(root!, '保存代理');
+      await flushMicrotasks();
+
+      expect(apiMock.updateOAuthConnectionProxy).toHaveBeenCalledWith(11, {
+        proxyUrl: null,
+        proxyId: 3,
+        useSystemProxy: false,
+      });
     } finally {
       root?.unmount();
     }
@@ -2234,10 +2306,10 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       await clickButton(root!, '代理设置');
-      const customProxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
-
+      // 三格共存：清空三格即回退到站点代理
+      const customProxyInput = findOauthSettingInput(root!, 'proxy-url');
       await act(async () => {
-        customProxyToggle.props.onChange({ target: { checked: false } });
+        customProxyInput.props.onChange({ target: { value: '' } });
       });
 
       await clickButton(root!, '保存代理');
@@ -2245,6 +2317,7 @@ describe('OAuthManagement page', () => {
 
       expect(apiMock.updateOAuthConnectionProxy).toHaveBeenCalledWith(11, {
         proxyUrl: null,
+        proxyId: null,
         useSystemProxy: false,
       });
       expect(apiMock.rebindOAuthConnection).not.toHaveBeenCalled();
@@ -2326,6 +2399,7 @@ describe('OAuthManagement page', () => {
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
         proxyUrl: 'http://127.0.0.1:7890',
+        proxyId: null,
         useSystemProxy: false,
       });
       expect(openMock).toHaveBeenCalledWith(
@@ -2398,6 +2472,7 @@ describe('OAuthManagement page', () => {
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
         projectId: undefined,
         proxyUrl: null,
+        proxyId: null,
         useSystemProxy: true,
       });
     } finally {
@@ -2482,12 +2557,8 @@ describe('OAuthManagement page', () => {
 
       await clickButton(root, '新建 OAuth 连接');
 
-      const proxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
       const proxyInput = findOauthSettingInput(root, 'proxy-url');
 
-      await act(async () => {
-        proxyToggle.props.onChange({ target: { checked: true } });
-      });
       await act(async () => {
         proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
       });
@@ -2497,14 +2568,13 @@ describe('OAuthManagement page', () => {
       expect(apiMock.startOAuthProvider).toHaveBeenNthCalledWith(1, 'codex', {
         projectId: undefined,
         proxyUrl: 'http://127.0.0.1:7890',
+        proxyId: null,
         useSystemProxy: false,
       });
 
-      const resetProxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
       const resetProxyInput = findOauthSettingInput(root, 'proxy-url');
       const resetSystemProxyToggle = findOauthSettingInput(root, 'use-system-proxy');
 
-      expect(resetProxyToggle.props.checked).toBe(false);
       expect(resetProxyInput.props.value).toBe('');
       expect(resetSystemProxyToggle.props.checked).toBe(false);
     } finally {

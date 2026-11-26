@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { db, schema } from '../db/index.js';
 import { eq } from 'drizzle-orm';
-import { config } from '../config.js';
 import { lookup as dnsLookup } from 'node:dns';
 import { isIP, type Socket } from 'node:net';
 import { connect as tlsConnect, type TLSSocket } from 'node:tls';
@@ -11,17 +10,13 @@ import { Agent as UndiciAgent, ProxyAgent } from 'undici';
 import { mergeHeadersWithSiteCustomHeaders } from './siteCustomHeaders.js';
 import { resolveProxyUrlFromExtraConfig } from './accountExtraConfig.js';
 import { stripTrailingSlashes } from './urlNormalization.js';
+import { resolveHolderProxyUrl } from './proxyResolution.js';
+import { SUPPORTED_PROXY_PROTOCOLS, normalizeSiteProxyUrl, parseSiteProxyUrlInput } from './proxyUrlNormalize.js';
+
+// 归一化与入参解析的真源在 proxyUrlNormalize；此处复导出保持既有 import 面不破。
+export { SUPPORTED_PROXY_PROTOCOLS, normalizeSiteProxyUrl, parseSiteProxyUrlInput };
 
 const SITE_PROXY_CACHE_TTL_MS = 3_000;
-const SUPPORTED_PROXY_PROTOCOLS = new Set([
-  'http:',
-  'https:',
-  'socks:',
-  'socks4:',
-  'socks4a:',
-  'socks5:',
-  'socks5h:',
-]);
 const SOCKS_PROXY_PROTOCOLS = new Set([
   'socks:',
   'socks4:',
@@ -35,18 +30,14 @@ const DEFAULT_PROXY_KEEPALIVE_INITIAL_DELAY_MS = 60_000;
 type SiteProxyRow = {
   siteUrl: string;
   proxyUrl: string | null;
+  proxyId: number | null;
   useSystemProxy: boolean;
   customHeaders: unknown;
 };
 
-type ParsedSiteProxyInput = {
-  present: boolean;
-  valid: boolean;
-  proxyUrl: string | null;
-};
-
 export type SiteProxyConfigLike = {
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean | null;
   customHeaders?: unknown;
 };
@@ -119,6 +110,7 @@ async function getCachedSiteProxyRows(nowMs = Date.now()): Promise<SiteProxyRow[
         .select({
           siteUrl: schema.sites.url,
           proxyUrl: schema.sites.proxyUrl,
+          proxyId: schema.sites.proxyId,
           useSystemProxy: schema.sites.useSystemProxy,
           customHeaders: schema.sites.customHeaders,
         })
@@ -146,6 +138,7 @@ async function getCachedSiteProxyRows(nowMs = Date.now()): Promise<SiteProxyRow[
       rows: rows.map((row) => ({
         siteUrl: normalizeSiteUrl(row.siteUrl),
         proxyUrl: normalizeSiteProxyUrl(row.proxyUrl),
+        proxyId: Number.isInteger(row.proxyId) && (row.proxyId as number) > 0 ? row.proxyId as number : null,
         useSystemProxy: !!row.useSystemProxy,
         customHeaders: row.customHeaders ?? null,
       })),
@@ -306,51 +299,6 @@ function createSocksDispatcher(proxyUrl: URL): Dispatcher {
   });
 }
 
-export function normalizeSiteProxyUrl(input: unknown): string | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  try {
-    const parsed = new URL(trimmed);
-    if (!SUPPORTED_PROXY_PROTOCOLS.has(parsed.protocol.toLowerCase())) {
-      return null;
-    }
-    return parsed.toString().replace(/\/+$/, '');
-  } catch {
-    return null;
-  }
-}
-
-export function parseSiteProxyUrlInput(input: unknown): ParsedSiteProxyInput {
-  if (input === undefined) {
-    return { present: false, valid: true, proxyUrl: null };
-  }
-  if (input === null) {
-    return { present: true, valid: true, proxyUrl: null };
-  }
-
-  if (typeof input !== 'string') {
-    return { present: true, valid: false, proxyUrl: null };
-  }
-
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return { present: true, valid: true, proxyUrl: null };
-  }
-
-  const normalized = normalizeSiteProxyUrl(trimmed);
-  if (!normalized) {
-    return { present: true, valid: false, proxyUrl: null };
-  }
-
-  return {
-    present: true,
-    valid: true,
-    proxyUrl: normalized,
-  };
-}
-
 export function invalidateSiteProxyCache(): void {
   siteProxyCache = { loadedAt: 0, rows: [], systemProxyUrl: null };
 }
@@ -389,8 +337,15 @@ async function resolveSiteRequestConfigByRequestUrl(requestUrl: string): Promise
 
   const rows = await getCachedSiteProxyRows();
   const matchedRow = findBestMatchingSiteRow(rows, normalizedRequestUrl);
-  const proxyUrl = matchedRow?.proxyUrl
-    || (matchedRow?.useSystemProxy ? siteProxyCache.systemProxyUrl : null);
+  // 站点层地址轴：自定义 > 池 > 勾选系统代理（镜像回落 settings 行值，与按记录解析同口径）
+  const proxyUrl = matchedRow
+    ? resolveHolderProxyUrl({
+      proxyUrl: matchedRow.proxyUrl,
+      proxyId: matchedRow.proxyId,
+      useSystemProxy: matchedRow.useSystemProxy,
+      systemProxyUrl: siteProxyCache.systemProxyUrl,
+    })
+    : null;
   return {
     proxyUrl: proxyUrl || null,
     customHeaders: matchedRow?.customHeaders ?? null,
@@ -451,10 +406,12 @@ export function withExplicitProxyRequestInit(
 }
 
 export function resolveProxyUrlForSite(site: SiteProxyConfigLike | null | undefined): string | null {
-  const explicitProxyUrl = normalizeSiteProxyUrl(site?.proxyUrl);
-  if (explicitProxyUrl) return explicitProxyUrl;
-  if (!site?.useSystemProxy) return null;
-  return normalizeSiteProxyUrl(config.systemProxyUrl);
+  // 站点层地址轴：自定义 > 池 > 勾选系统代理（取池默认条目）
+  return resolveHolderProxyUrl({
+    proxyUrl: site?.proxyUrl,
+    proxyId: site?.proxyId,
+    useSystemProxy: site?.useSystemProxy,
+  });
 }
 
 export function withSiteRecordProxyRequestInit(

@@ -1,6 +1,5 @@
 import { FastifyInstance } from 'fastify';
 import cron from 'node-cron';
-import { fetch } from 'undici';
 import { config, normalizeTokenRouterFailureCooldownMaxSec } from '../../config.js';
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
@@ -44,7 +43,10 @@ import {
 } from '../../contracts/settingsRoutePayloads.js';
 import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
 import { findInvalidIpAllowlistEntries, getRequestClientIp, isIpAllowed } from '../../middleware/auth.js';
-import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
+import { normalizeSiteProxyUrl } from '../../services/siteProxy.js';
+import { testProxyConnectivity } from '../../services/proxyConnectivityTest.js';
+import { applyLegacySystemProxyUrl } from '../../services/proxyPoolService.js';
+import { redactProxyUrl } from '../../../shared/proxyUrlRedaction.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
@@ -155,8 +157,6 @@ const PROXY_TOKEN_PREFIX = 'sk-';
 const DB_TYPE_SETTING_KEY = 'db_type';
 const DB_URL_SETTING_KEY = 'db_url';
 const DB_SSL_SETTING_KEY = 'db_ssl';
-const SYSTEM_PROXY_TEST_PROBE_URL = 'https://www.gstatic.com/generate_204';
-const SYSTEM_PROXY_TEST_TIMEOUT_MS = 15_000;
 
 function isValidProxyToken(value: string): boolean {
   return value.startsWith(PROXY_TOKEN_PREFIX) && value.length >= 6;
@@ -193,94 +193,6 @@ function toPositiveNumberOrFallback(value: unknown, fallback: number) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return n;
-}
-
-function extractNestedErrorMessages(error: unknown): string[] {
-  const messages: string[] = [];
-  const visited = new Set<unknown>();
-  let current: any = error;
-
-  while (current && !visited.has(current)) {
-    visited.add(current);
-    const message = typeof current?.message === 'string' ? current.message.trim() : '';
-    if (message) {
-      messages.push(message);
-    }
-    current = current?.cause;
-  }
-
-  return messages;
-}
-
-function describeSystemProxyTestFailure(error: unknown): string {
-  const messages = extractNestedErrorMessages(error);
-  const detail = messages.find((message) => message && message !== 'fetch failed')
-    || messages[0]
-    || '未知错误';
-
-  if (/ECONNREFUSED/i.test(detail)) {
-    return '系统代理测试失败：连接被拒绝，请检查代理地址、端口和本地代理程序是否已启动';
-  }
-
-  if (/ETIMEDOUT|timed out|timeout/i.test(detail)) {
-    return '系统代理测试失败：连接超时，请检查代理服务或当前网络是否可用';
-  }
-
-  if (/ENOTFOUND|EAI_AGAIN/i.test(detail)) {
-    return '系统代理测试失败：域名解析失败，请检查网络或代理的 DNS 配置';
-  }
-
-  if (/ECONNRESET/i.test(detail)) {
-    return '系统代理测试失败：连接被对端重置，请检查代理链路是否稳定';
-  }
-
-  if (/407/.test(detail) || /proxy authentication/i.test(detail)) {
-    return '系统代理测试失败：代理要求认证，请检查用户名、密码或代理配置';
-  }
-
-  return `系统代理测试失败：${detail}`;
-}
-
-async function testSystemProxyConnectivity(proxyUrl: string) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SYSTEM_PROXY_TEST_TIMEOUT_MS);
-  const startedAt = Date.now();
-
-  try {
-    const response = await fetch(
-      SYSTEM_PROXY_TEST_PROBE_URL,
-      withExplicitProxyRequestInit(proxyUrl, {
-        method: 'GET',
-        signal: controller.signal,
-        headers: {
-          'cache-control': 'no-cache',
-          'user-agent': 'metapi-system-proxy-tester/1.0',
-        },
-      }),
-    );
-
-    try {
-      await response.arrayBuffer();
-    } catch {
-      // Ignore body drain failures; reachability is determined by receiving a response.
-    }
-
-    return {
-      reachable: true,
-      ok: response.ok,
-      statusCode: response.status,
-      latencyMs: Math.max(1, Date.now() - startedAt),
-      probeUrl: SYSTEM_PROXY_TEST_PROBE_URL,
-      finalUrl: response.url || SYSTEM_PROXY_TEST_PROBE_URL,
-    };
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
-      throw new Error(`系统代理测试超时（${Math.round(SYSTEM_PROXY_TEST_TIMEOUT_MS / 1000)}s）`);
-    }
-    throw new Error(describeSystemProxyTestFailure(error));
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 function toStringList(value: unknown): string[] {
@@ -845,7 +757,8 @@ async function getRuntimeSettingsResponse(currentAdminIp = '') {
     adminIpAllowlist: config.adminIpAllowlist,
     currentAdminIp,
     serverTimeZone: getResolvedTimeZone(),
-    systemProxyUrl: config.systemProxyUrl,
+    // 系统代理权威已归入代理池；下发只给脱敏地址，凭据走 reveal 端点显式获取
+    systemProxyUrl: redactProxyUrl(config.systemProxyUrl),
     payloadRules: config.payloadRules,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
@@ -985,7 +898,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     try {
-      const result = await testSystemProxyConnectivity(normalizedProxyUrl);
+      const result = await testProxyConnectivity(normalizedProxyUrl);
       return {
         success: true,
         proxyUrl: normalizedProxyUrl,
@@ -1327,9 +1240,11 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (normalizedSystemProxyUrl !== config.systemProxyUrl) {
         changedLabels.push('系统代理');
       }
-      config.systemProxyUrl = normalizedSystemProxyUrl || '';
-      upsertSetting('system_proxy_url', config.systemProxyUrl);
-      invalidateSiteProxyCache();
+      // 委托代理池服务：默认条目与 settings 镜像同事务维护
+      const applied = await applyLegacySystemProxyUrl(rawSystemProxyUrl);
+      if (!applied.ok) {
+        return reply.code(applied.status).send({ success: false, message: applied.error });
+      }
     }
 
     if (body.payloadRules !== undefined) {

@@ -17,6 +17,7 @@ export type OAuthSessionRecord = {
   rebindAccountId?: number;
   projectId?: string;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
 };
 
@@ -27,6 +28,7 @@ export interface OAuthSessionStore {
     rebindAccountId?: number;
     projectId?: string;
     proxyUrl?: string | null;
+    proxyId?: number | null;
     useSystemProxy?: boolean;
   }): OAuthSessionRecord;
   get(state: string): OAuthSessionRecord | null;
@@ -70,6 +72,7 @@ class MemoryOAuthSessionStore implements OAuthSessionStore {
     rebindAccountId?: number;
     projectId?: string;
     proxyUrl?: string | null;
+    proxyId?: number | null;
     useSystemProxy?: boolean;
   }): OAuthSessionRecord {
     this.pruneExpiredSessions();
@@ -89,6 +92,7 @@ class MemoryOAuthSessionStore implements OAuthSessionStore {
       rebindAccountId: input.rebindAccountId,
       projectId: input.projectId,
       proxyUrl: input.proxyUrl,
+      proxyId: input.proxyId,
       useSystemProxy: input.useSystemProxy,
     };
     this.sessions.set(state, record);
@@ -141,6 +145,7 @@ export function createOauthSession(input: {
   rebindAccountId?: number;
   projectId?: string;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
 }): OAuthSessionRecord {
   return oauthSessionStore.create(input);

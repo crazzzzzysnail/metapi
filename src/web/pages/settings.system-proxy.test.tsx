@@ -15,6 +15,15 @@ const { apiMock } = vi.hoisted(() => ({
     updateRuntimeSettings: vi.fn(),
     testSystemProxy: vi.fn(),
     getModelTokenCandidates: vi.fn(),
+    getProxyPool: vi.fn(),
+    createProxyPoolEntry: vi.fn(),
+    updateProxyPoolEntry: vi.fn(),
+    updateProxyPoolEntryUrl: vi.fn(),
+    deleteProxyPoolEntry: vi.fn(),
+    setDefaultProxyPoolEntry: vi.fn(),
+    getProxyPoolUsage: vi.fn(),
+    revealProxyPoolEntry: vi.fn(),
+    testProxyPoolEntry: vi.fn(),
   },
 }));
 
@@ -43,7 +52,9 @@ async function flushMicrotasks() {
   });
 }
 
-describe('Settings system proxy', () => {
+// 负控制：旧「单条系统代理」卡片的入口必须彻底消失——留着两套编辑面，
+// 用户改了旧卡片会以为生效，实际权威已在池默认条目那边。
+describe('Settings legacy system proxy card is removed', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     apiMock.getAuthInfo.mockResolvedValue({ masked: 'sk-****' });
@@ -57,7 +68,7 @@ describe('Settings system proxy', () => {
       routingFallbackUnitCost: 1,
       routingWeights: {},
       adminIpAllowlist: [],
-      systemProxyUrl: '',
+      systemProxyUrl: 'http://***@127.0.0.1:7890',
     });
     apiMock.getDownstreamApiKeys.mockResolvedValue({ items: [] });
     apiMock.getRoutesLite.mockResolvedValue([]);
@@ -67,28 +78,16 @@ describe('Settings system proxy', () => {
       saved: null,
       restartRequired: false,
     });
-    apiMock.updateRuntimeSettings.mockResolvedValue({
-      success: true,
-      systemProxyUrl: 'http://127.0.0.1:7890',
-    });
-    apiMock.testSystemProxy.mockResolvedValue({
-      success: true,
-      proxyUrl: 'http://127.0.0.1:7890',
-      probeUrl: 'https://www.gstatic.com/generate_204',
-      finalUrl: 'https://www.gstatic.com/generate_204',
-      reachable: true,
-      ok: true,
-      statusCode: 204,
-      latencyMs: 321,
-    });
+    apiMock.updateRuntimeSettings.mockResolvedValue({ success: true });
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
+    apiMock.getProxyPool.mockResolvedValue({ items: [] });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  it('saves system proxy url from settings', async () => {
+  it('no longer renders the legacy proxy input and buttons', async () => {
     let root!: WebTestRenderer;
     try {
       await act(async () => {
@@ -102,68 +101,15 @@ describe('Settings system proxy', () => {
       });
       await flushMicrotasks();
 
-      const proxyInput = root.root.find((node) => (
+      expect(collectText(root.root)).not.toContain('保存系统代理');
+      expect(collectText(root.root)).not.toContain('测试系统代理');
+      // 旧卡片的地址输入框（占位符带完整 URL 示例）也不再出现
+      const legacyInputs = root.root.findAll((node) => (
         node.type === 'input'
-        && node.props.placeholder === '系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）'
+        && String(node.props.placeholder || '').startsWith('系统代理 URL')
       ));
-      await act(async () => {
-        proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
-      });
-
-      const saveButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).trim() === '保存系统代理'
-      ));
-      await act(async () => {
-        saveButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith({
-        systemProxyUrl: 'http://127.0.0.1:7890',
-      });
-    } finally {
-      root?.unmount();
-    }
-  });
-
-  it('tests system proxy from settings', async () => {
-    let root!: WebTestRenderer;
-    try {
-      await act(async () => {
-        root = create(
-          <MemoryRouter>
-            <ToastProvider>
-              <Settings />
-            </ToastProvider>
-          </MemoryRouter>,
-        );
-      });
-      await flushMicrotasks();
-
-      const proxyInput = root.root.find((node) => (
-        node.type === 'input'
-        && node.props.placeholder === '系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）'
-      ));
-      await act(async () => {
-        proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
-      });
-
-      const testButton = root.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).trim() === '测试系统代理'
-      ));
-      await act(async () => {
-        testButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.testSystemProxy).toHaveBeenCalledWith({
-        proxyUrl: 'http://127.0.0.1:7890',
-      });
-      expect(collectText(root.root)).toContain('连通成功，延迟 321 ms');
+      expect(legacyInputs).toHaveLength(0);
+      expect(apiMock.testSystemProxy).not.toHaveBeenCalled();
     } finally {
       root?.unmount();
     }

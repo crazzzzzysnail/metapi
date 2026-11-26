@@ -41,6 +41,7 @@ export interface BackupWebdavState {
 }
 
 type SiteRow = typeof schema.sites.$inferSelect;
+type ProxyPoolRow = typeof schema.proxyPool.$inferSelect;
 type SiteApiEndpointRow = typeof schema.siteApiEndpoints.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
 type AccountTokenRow = typeof schema.accountTokens.$inferSelect;
@@ -106,6 +107,7 @@ type BackupDownstreamApiKeyRow = Pick<DownstreamApiKeyRow,
 
 interface AccountsBackupSection {
   sites: SiteRow[];
+  proxyPool?: ProxyPoolRow[];
   siteApiEndpoints?: SiteApiEndpointRow[];
   accounts: BackupAccountRow[];
   accountTokens: AccountTokenRow[];
@@ -776,6 +778,7 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       externalCheckinUrl: null,
       platform: input.platform,
       proxyUrl: null,
+      proxyId: null,
       useSystemProxy: false,
       customHeaders: null,
       status: 'active',
@@ -1028,6 +1031,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         externalCheckinUrl: null,
         platform,
         proxyUrl: null,
+        proxyId: null,
         useSystemProxy: false,
         customHeaders: null,
         status: 'active',
@@ -1358,6 +1362,7 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
 async function exportAccountsSection(): Promise<AccountsBackupSection> {
   const [
     sites,
+    proxyPool,
     siteApiEndpoints,
     accounts,
     accountTokens,
@@ -1369,6 +1374,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     downstreamApiKeys,
   ] = await Promise.all([
     db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all(),
+    db.select().from(schema.proxyPool).orderBy(asc(schema.proxyPool.id)).all(),
     db.select().from(schema.siteApiEndpoints)
       .orderBy(
         asc(schema.siteApiEndpoints.siteId),
@@ -1393,6 +1399,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
 
   return {
     sites,
+    proxyPool,
     siteApiEndpoints,
     accounts: accounts.map(({ balanceUsed: _balanceUsed, lastCheckinAt: _lastCheckinAt, lastBalanceRefresh: _lastBalanceRefresh, ...row }) => row),
     accountTokens,
@@ -1474,6 +1481,7 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
   if (!isRecord(input)) return null;
 
   const sites = Array.isArray(input.sites) ? input.sites as SiteRow[] : null;
+  const proxyPool = Array.isArray(input.proxyPool) ? input.proxyPool as ProxyPoolRow[] : undefined;
   const siteApiEndpoints = Array.isArray(input.siteApiEndpoints)
     ? input.siteApiEndpoints as SiteApiEndpointRow[]
     : undefined;
@@ -1498,6 +1506,7 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
 
   return {
     sites,
+    proxyPool,
     siteApiEndpoints,
     accounts,
     accountTokens,
@@ -1618,6 +1627,21 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     if (shouldReplaceDownstreamApiKeys) {
       await tx.delete(schema.downstreamApiKeys).run();
     }
+    // 代理池随账号分区整批替换；旧备份无该分区时保留现网池（老站点行不带 proxyId，落为 null）
+    const shouldReplaceProxyPool = Array.isArray(section.proxyPool);
+    if (shouldReplaceProxyPool) {
+      await tx.delete(schema.proxyPool).run();
+      for (const row of section.proxyPool || []) {
+        await tx.insert(schema.proxyPool).values({
+          id: row.id,
+          name: row.name,
+          url: row.url,
+          isDefault: row.isDefault ?? false,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        }).run();
+      }
+    }
     await tx.delete(schema.proxyLogs).run();
     await tx.delete(schema.routeChannels).run();
     await tx.delete(schema.routeGroupSources).run();
@@ -1636,6 +1660,8 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         externalCheckinUrl: row.externalCheckinUrl ?? null,
         platform: row.platform,
         proxyUrl: row.proxyUrl ?? null,
+        // 旧备份不带该字段 → 落 null；新备份按导入的池 id 引用
+        proxyId: row.proxyId ?? null,
         useSystemProxy: row.useSystemProxy ?? false,
         customHeaders: row.customHeaders ?? null,
         status: row.status || 'active',

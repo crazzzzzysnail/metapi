@@ -1,6 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api } from "../api.js";
+import { api, type ProxyPoolEntry } from "../api.js";
+import {
+  buildBatchProxyFields,
+  isValidProxyUrlValue,
+  proxyPoolLabel,
+  proxyPoolOptionLabel,
+  resolveEffectiveProxy,
+  type BatchProxyMode,
+} from "./helpers/proxySelection.js";
 import CenteredModal from "../components/CenteredModal.js";
 import ResponsiveFilterPanel from "../components/ResponsiveFilterPanel.js";
 import ResponsiveFormGrid from "../components/ResponsiveFormGrid.js";
@@ -42,6 +50,7 @@ import {
   type SortMode,
 } from "./helpers/listSorting.js";
 import { shouldIgnoreRowSelectionClick } from "./helpers/rowSelection.js";
+import { fetchProxyPoolQuietly } from "./helpers/proxyPoolFetch.js";
 import { buildBatchSelectionInfo } from "./helpers/batchSelectionInfo.js";
 import { SITE_DOCS_URL } from "../docsLink.js";
 import { getSiteInitializationPreset } from "../../shared/siteInitializationPresets.js";
@@ -113,6 +122,44 @@ function resolveConnectionsSegment(search: string): ConnectionsSegment {
   return "session";
 }
 
+/**
+ * 编辑面板“当前生效”一行：账号层三格按地址轴推导；
+ * 账号层为空时跟随站点层（与服务端 resolveChannelProxyUrl 的“账号整层>站点整层”同序）。
+ */
+function describeAccountEffectiveProxy(
+  form: { proxyUrl?: string | null; proxyId?: number | null; useSystemProxy?: boolean },
+  pool: ProxyPoolEntry[],
+  site?: { proxyUrl?: string | null; proxyId?: number | null; useSystemProxy?: boolean } | null,
+): string {
+  const accountMode = resolveEffectiveProxy(form, pool);
+  if (accountMode === 'custom') return tr('自定义代理地址（覆盖站点）');
+  if (accountMode === 'pool') return `代理池 · ${proxyPoolLabel(pool, form.proxyId)}`;
+  if (accountMode === 'system') return tr('系统代理（默认条目，覆盖站点）');
+  const siteMode = site ? resolveEffectiveProxy(site, pool) : 'direct';
+  if (siteMode === 'custom') return tr('跟随站点：自定义代理地址');
+  if (siteMode === 'pool') return `${tr('跟随站点')}：${tr('代理池')} · ${proxyPoolLabel(pool, site?.proxyId)}`;
+  if (siteMode === 'system') return `${tr('跟随站点')}：${tr('系统代理')}`;
+  return tr('跟随站点：直连');
+}
+
+/** 列表徽标：账号层任一格已设置才显示；文案按账号层生效源 */
+function accountProxyBadgeLabel(
+  extra: { proxyUrl?: unknown; proxyId?: unknown; useSystemProxy?: unknown },
+  pool: ProxyPoolEntry[],
+): string | null {
+  const input = {
+    proxyUrl: typeof extra?.proxyUrl === 'string' ? extra.proxyUrl : null,
+    proxyId: Number.isInteger(Number(extra?.proxyId)) && Number(extra?.proxyId) > 0 ? Number(extra?.proxyId) : null,
+    useSystemProxy: extra?.useSystemProxy === true,
+  };
+  if (!input.proxyUrl && input.proxyId === null && !input.useSystemProxy) return null;
+  const mode = resolveEffectiveProxy(input, pool);
+  if (mode === 'custom') return tr('代理');
+  if (mode === 'pool') return `${tr('代理池')}·${proxyPoolLabel(pool, input.proxyId)}`;
+  if (mode === 'system') return tr('系统代理');
+  return null;
+}
+
 function getAccountRuntimeStatusRank(account: any): number {
   if (account?.status === "expired") return 4;
   if (account?.status === "disabled" || account?.site?.status === "disabled") {
@@ -169,6 +216,14 @@ export default function Accounts() {
     useState<React.ReactNode>(null);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [proxyPool, setProxyPool] = useState<ProxyPoolEntry[]>([]);
+  const [batchProxyOpen, setBatchProxyOpen] = useState(false);
+  const [batchProxyForm, setBatchProxyForm] = useState<{
+    applyProxy: boolean;
+    proxyMode: BatchProxyMode;
+    proxyUrl: string;
+    proxyId: number | null;
+  }>({ applyProxy: false, proxyMode: "clear", proxyUrl: "", proxyId: null });
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: "single" | "batch";
     accountId?: number;
@@ -187,6 +242,8 @@ export default function Accounts() {
     refreshToken: "",
     tokenExpiresAt: "",
     proxyUrl: "",
+    proxyId: null as number | null,
+    useSystemProxy: false,
     manualBalanceUsd: "",
   });
   const [savingEdit, setSavingEdit] = useState(false);
@@ -261,6 +318,15 @@ export default function Accounts() {
   };
   useEffect(() => {
     void load();
+  }, []);
+
+  // 代理池只在设置页编辑，本页按挂载拉一次即可（编辑弹窗/批量/徽标名称共用）；静默失败不影响列表
+  useEffect(() => {
+    let cancelled = false;
+    void fetchProxyPoolQuietly().then((items) => {
+      if (!cancelled) setProxyPool(items);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   const selectedTokenSite = useMemo(
@@ -1023,6 +1089,8 @@ export default function Accounts() {
     const managedAuth = extractManagedSub2ApiAuth(account);
     const parsedExtra = parseAccountExtraConfig(account);
     const proxyUrl = parsedExtra?.proxyUrl || "";
+    const rawProxyId = Number(parsedExtra?.proxyId);
+    const proxyId = Number.isInteger(rawProxyId) && rawProxyId > 0 ? rawProxyId : null;
     // 手动余额存的是数字，输入框要字符串；null/缺省一律显示空（= 自动获取）
     const manualBalanceUsd =
       parsedExtra?.manualBalanceUsd === undefined ||
@@ -1046,6 +1114,8 @@ export default function Accounts() {
       refreshToken: managedAuth.refreshToken,
       tokenExpiresAt: managedAuth.tokenExpiresAt,
       proxyUrl,
+      proxyId,
+      useSystemProxy: parsedExtra?.useSystemProxy === true,
       manualBalanceUsd,
     });
   };
@@ -1074,6 +1144,9 @@ export default function Accounts() {
           ? Number.parseInt(editForm.tokenExpiresAt.trim(), 10)
           : null,
         proxyUrl: editForm.proxyUrl.trim() || null,
+        // 三格共存：未填的格下发 null=清除，由服务端合并进 extra_config
+        proxyId: editForm.proxyId ?? null,
+        useSystemProxy: editForm.useSystemProxy,
         manualBalanceUsd: editForm.manualBalanceUsd.trim() || null,
       });
       toast.success("账号已更新");
@@ -1155,6 +1228,60 @@ export default function Accounts() {
       load(true);
     } catch (e: any) {
       toast.error(e.message || "批量操作失败");
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
+
+  // 批量设置代理：与站点批量同形（四模式互斥），走 /api/accounts/batch 的 updateSettings
+  const runBatchProxySettings = async () => {
+    if (selectedAccountIds.length === 0) return;
+    if (!batchProxyForm.applyProxy) {
+      toast.info(tr('请勾选批量设置连接代理'));
+      return;
+    }
+    if (batchProxyForm.proxyMode === 'custom') {
+      const trimmed = batchProxyForm.proxyUrl.trim();
+      if (!trimmed || !isValidProxyUrlValue(trimmed)) {
+        toast.error(tr('请填写合法的代理地址（支持 http(s)://、socks4://、socks5://）'));
+        return;
+      }
+    } else if (batchProxyForm.proxyMode === 'pool' && !batchProxyForm.proxyId) {
+      toast.error(tr('请选择代理池中的一个代理'));
+      return;
+    }
+    const fields = buildBatchProxyFields(batchProxyForm.proxyMode, {
+      proxyUrl: batchProxyForm.proxyUrl,
+      proxyId: batchProxyForm.proxyId,
+    });
+    setBatchActionLoading(true);
+    try {
+      const result = await api.batchUpdateAccounts({
+        ids: selectedAccountIds,
+        action: 'updateSettings',
+        proxyUrl: fields.proxyUrl,
+        proxyId: fields.proxyId,
+        useSystemProxy: fields.useSystemProxy,
+      });
+      const successIds = Array.isArray(result?.successIds)
+        ? result.successIds.map((id: unknown) => Number(id))
+        : [];
+      const failedItems = Array.isArray(result?.failedItems) ? result.failedItems : [];
+      if (failedItems.length > 0) {
+        toast.info(`批量设置完成：成功 ${successIds.length}，失败 ${failedItems.length}`);
+        setBatchProxyOpen(true);
+      } else {
+        toast.success(`批量设置完成：成功 ${successIds.length}`);
+        setBatchProxyOpen(false);
+      }
+      setSelectedAccountIds(
+        failedItems
+          .map((item: any) => Number(item.id))
+          .filter((id: number) => Number.isFinite(id) && id > 0),
+      );
+      load(true);
+    } catch (e: any) {
+      toast.error(e.message || "批量设置代理失败");
     } finally {
       setBatchActionLoading(false);
     }
@@ -1628,6 +1755,18 @@ export default function Accounts() {
             style={{ border: "1px solid var(--color-border)" }}
           >
             {isMobile ? tr('禁用') : tr('批量禁用')}
+          </button>
+          <button
+            data-testid="accounts-batch-proxy"
+            onClick={() => {
+              setBatchProxyForm({ applyProxy: true, proxyMode: "clear", proxyUrl: "", proxyId: null });
+              setBatchProxyOpen(true);
+            }}
+            disabled={batchActionLoading}
+            className="btn btn-ghost"
+            style={{ border: "1px solid var(--color-border)" }}
+          >
+            {isMobile ? tr('代理') : tr('批量设置代理')}
           </button>
           <button
             onClick={() => runBatchAccountAction("delete")}
@@ -2726,6 +2865,7 @@ export default function Accounts() {
             }
           >
             {editingAccount ? (
+              <>
               <ResponsiveFormGrid>
                 <input
                   placeholder="账号名称"
@@ -2807,47 +2947,23 @@ export default function Accounts() {
                   }
                   style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
                 />
-                <input
-                  placeholder="代理地址（可选，如 http://127.0.0.1:7890）"
-                  value={editForm.proxyUrl}
-                  onChange={(e) =>
-                    setEditForm((prev) => ({
-                      ...prev,
-                      proxyUrl: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                />
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: "var(--color-text-muted)",
-                    marginTop: -4,
-                  }}
-                >
-                  覆盖站点和系统代理，留空则使用站点设置。支持 http/https/socks5
-                  协议。
-                </div>
-                <input
-                  placeholder={`${tr("手动余额")}（USD，${tr("留空则自动获取")}）`}
-                  value={editForm.manualBalanceUsd}
-                  onChange={(e) =>
-                    setEditForm((prev) => ({
-                      ...prev,
-                      manualBalanceUsd: e.target.value,
-                    }))
-                  }
-                  inputMode="decimal"
-                  style={inputStyle}
-                />
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: "var(--color-text-muted)",
-                    marginTop: -4,
-                  }}
-                >
-                  {tr("上游读不到余额时，可在此填一个固定值；保存后立即生效，并停止向上游读取余额。")}
+                {/* 手动余额与它的说明放同一格：说明是解释这个输入框的，不能按 grid 换列 */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <input
+                    placeholder={`${tr("手动余额")}（USD，${tr("留空则自动获取")}）`}
+                    value={editForm.manualBalanceUsd}
+                    onChange={(e) =>
+                      setEditForm((prev) => ({
+                        ...prev,
+                        manualBalanceUsd: e.target.value,
+                      }))
+                    }
+                    inputMode="decimal"
+                    style={inputStyle}
+                  />
+                  <div style={{ fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.6 }}>
+                    {tr("上游读不到余额时，可在此填一个固定值；保存后立即生效，并停止向上游读取余额。")}
+                  </div>
                 </div>
                 {(editingAccount?.site?.platform || "").toLowerCase() ===
                   "sub2api" && (
@@ -2877,6 +2993,63 @@ export default function Accounts() {
                   </>
                 )}
               </ResponsiveFormGrid>
+              {/* 代理设置独立成组（与站点编辑同款卡片），放在字段网格之后 */}
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  padding: 12,
+                  border: "1px solid var(--color-border)",
+                  borderRadius: "var(--radius-sm)",
+                  background: "color-mix(in srgb, var(--color-surface) 82%, transparent)",
+                  marginTop: 12,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{tr("代理设置")}</div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--color-text-primary)" }}>
+                    <input
+                      type="checkbox"
+                      checked={editForm.useSystemProxy}
+                      onChange={(e) =>
+                        setEditForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))
+                      }
+                    />
+                    {tr("使用系统代理")}
+                  </label>
+                  <ModernSelect
+                    data-testid="accounts-edit-proxy-pool"
+                    value={editForm.proxyId ? String(editForm.proxyId) : ""}
+                    onChange={(value) =>
+                      setEditForm((prev) => ({ ...prev, proxyId: value ? Number(value) : null }))
+                    }
+                    options={[
+                      { value: "", label: proxyPool.length > 0 ? tr("代理池（不选）") : tr("代理池为空，请先到设置页维护") },
+                      ...proxyPool.map((entry) => ({
+                        value: String(entry.id),
+                        label: proxyPoolOptionLabel(entry),
+                      })),
+                    ]}
+                  />
+                  <input
+                    placeholder={tr("自定义代理地址（可选，如 http://127.0.0.1:7890）")}
+                    value={editForm.proxyUrl}
+                    onChange={(e) =>
+                      setEditForm((prev) => ({
+                        ...prev,
+                        proxyUrl: e.target.value,
+                      }))
+                    }
+                    style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+                  />
+                </div>
+                <div style={{ fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.6 }}>
+                  {tr("三格可共存；生效顺序：自定义地址 > 代理池 > 系统代理勾选，全部为空则跟随所属站点。当前生效")}：
+                  {describeAccountEffectiveProxy(editForm, proxyPool, editingAccount?.site)}
+                </div>
+              </div>
+              </>
             ) : null}
           </CenteredModal>
 
@@ -2927,14 +3100,17 @@ export default function Accounts() {
                                 ? "API Key"
                                 : "Session"}
                             </span>
-                            {parseAccountExtraConfig(a)?.proxyUrl && (
-                              <span
-                                className="badge badge-purple"
-                                style={{ fontSize: 10 }}
-                              >
-                                代理
-                              </span>
-                            )}
+                            {(() => {
+                              const badge = accountProxyBadgeLabel(parseAccountExtraConfig(a), proxyPool);
+                              return badge ? (
+                                <span
+                                  className="badge badge-purple"
+                                  style={{ fontSize: 10 }}
+                                >
+                                  {badge}
+                                </span>
+                              ) : null;
+                            })()}
                           </div>
                         }
                         footerActions={
@@ -3312,14 +3488,17 @@ export default function Accounts() {
                                   ? "API Key"
                                   : "Session"}
                               </span>
-                              {parseAccountExtraConfig(a)?.proxyUrl && (
-                                <span
-                                  className="badge badge-purple"
-                                  style={{ fontSize: 10 }}
-                                >
-                                  代理
-                                </span>
-                              )}
+                              {(() => {
+                                const badge = accountProxyBadgeLabel(parseAccountExtraConfig(a), proxyPool);
+                                return badge ? (
+                                  <span
+                                    className="badge badge-purple"
+                                    style={{ fontSize: 10 }}
+                                  >
+                                    {badge}
+                                  </span>
+                                ) : null;
+                              })()}
                             </div>
                           </td>
                           <td>
@@ -3661,6 +3840,77 @@ export default function Accounts() {
           </>
         ) : null}
       />
+
+      <CenteredModal
+        open={batchProxyOpen}
+        onClose={() => setBatchProxyOpen(false)}
+        title={tr("批量设置连接代理")}
+        maxWidth={560}
+        bodyStyle={{ display: "flex", flexDirection: "column", gap: 14 }}
+        footer={(
+          <>
+            <button className="btn btn-ghost" onClick={() => setBatchProxyOpen(false)} disabled={batchActionLoading}>{tr("取消")}</button>
+            <button className="btn btn-primary" onClick={() => void runBatchProxySettings()} disabled={batchActionLoading}>
+              {batchActionLoading ? <><span className="spinner spinner-sm" style={{ borderTopColor: "white", borderColor: "rgba(255,255,255,0.3)" }} /> {tr("保存中")}...</> : tr("应用到所选连接")}
+            </button>
+          </>
+        )}
+      >
+        <div className="info-tip" style={{ marginBottom: 0 }}>
+          {tr("本次会对已选中的")} {selectedAccountIds.length} {tr("个连接批量设置代理。未勾选的项目不会改动。")}
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+          <input
+            type="checkbox"
+            aria-label={tr("启用批量设置连接代理")}
+            checked={batchProxyForm.applyProxy}
+            onChange={(event) => setBatchProxyForm((prev) => ({ ...prev, applyProxy: event.target.checked }))}
+            style={{ marginTop: 10 }}
+          />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 6 }}>{tr("批量设置连接代理")}</div>
+            <div style={{ marginBottom: 8 }}>
+              <ModernSelect
+                data-testid="accounts-batch-proxy-mode"
+                value={batchProxyForm.proxyMode}
+                disabled={!batchProxyForm.applyProxy}
+                onChange={(value) => setBatchProxyForm((prev) => ({ ...prev, proxyMode: value as BatchProxyMode }))}
+                options={[
+                  { value: "clear", label: tr("跟随站点（清除账号级代理）") },
+                  { value: "system", label: tr("使用系统代理") },
+                  { value: "pool", label: tr("代理池") },
+                  { value: "custom", label: tr("自定义代理") },
+                ]}
+              />
+            </div>
+            <input
+              style={inputStyle}
+              value={batchProxyForm.proxyUrl}
+              onChange={(event) => setBatchProxyForm((prev) => ({ ...prev, proxyUrl: event.target.value }))}
+              placeholder={tr("自定义代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）")}
+              disabled={!batchProxyForm.applyProxy || batchProxyForm.proxyMode !== "custom"}
+            />
+            <div style={{ marginTop: 8 }}>
+              <ModernSelect
+                data-testid="accounts-batch-proxy-pool"
+                value={batchProxyForm.proxyId ? String(batchProxyForm.proxyId) : ""}
+                disabled={!batchProxyForm.applyProxy || batchProxyForm.proxyMode !== "pool"}
+                onChange={(value) => setBatchProxyForm((prev) => ({ ...prev, proxyId: value ? Number(value) : null }))}
+                options={[
+                  { value: "", label: proxyPool.length > 0 ? tr("请选择代理") : tr("代理池为空，请先到设置页维护") },
+                  ...proxyPool.map((entry) => ({
+                    value: String(entry.id),
+                    label: proxyPoolOptionLabel(entry),
+                  })),
+                ]}
+              />
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.6 }}>
+              {tr("未勾选则保持各连接现状；四种模式互斥；「跟随站点」会清空账号级的自定义地址、池引用与系统代理勾选，改由所属站点决定。")}
+            </div>
+          </div>
+        </div>
+      </CenteredModal>
     </div>
   );
 }

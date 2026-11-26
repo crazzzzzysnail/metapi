@@ -76,6 +76,12 @@ describe('navigationFocus helpers', () => {
       expect(deduped).toBe('/sites?focusSiteId=5&editTarget=site&editField=cnyRate&pendingSiteIds=6');
     });
 
+    it('accepts the proxy field as an editor focus target', () => {
+      const path = buildSiteFocusPath(7, { editField: 'proxy' });
+      expect(path).toBe('/sites?focusSiteId=7&editTarget=site&editField=proxy');
+      expect(readSiteEditorIntent(path.slice(path.indexOf('?')))).toEqual({ siteId: 7, field: 'proxy' });
+    });
+
     it('ignores an editTarget that is not exactly "site"', () => {
       // 负控制：去掉 editTarget 或换成别的值都不该弹窗，否则普通 focusSiteId 跳转
       // （比如事件中心点站点）会意外弹出编辑框

@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import {
+  getProxyIdFromExtraConfig,
   getProxyUrlFromExtraConfig,
   getUseSystemProxyFromExtraConfig,
   mergeAccountExtraConfig,
@@ -465,6 +466,7 @@ async function activatePersistedOauthAccount(input: {
   };
   rebindAccountId?: number;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
   persistedStatus?: 'active' | 'disabled';
   activateExistingAfterRefresh?: boolean;
@@ -479,6 +481,7 @@ async function activatePersistedOauthAccount(input: {
     exchange: input.exchange,
     rebindAccountId: input.rebindAccountId,
     proxyUrl: input.proxyUrl,
+    proxyId: input.proxyId,
     useSystemProxy: input.useSystemProxy,
     persistedStatus: input.persistedStatus,
   });
@@ -598,6 +601,7 @@ async function upsertOauthAccount(input: {
   };
   rebindAccountId?: number;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
   persistedStatus?: 'active' | 'disabled';
 }) {
@@ -629,6 +633,7 @@ async function upsertOauthAccount(input: {
   const extraConfig = mergeAccountExtraConfig(existing?.extraConfig, {
     credentialMode: 'session',
     ...(input.proxyUrl !== undefined ? { proxyUrl: input.proxyUrl } : {}),
+    ...(input.proxyId !== undefined ? { proxyId: input.proxyId ?? undefined } : {}),
     ...(input.useSystemProxy !== undefined ? { useSystemProxy: input.useSystemProxy } : {}),
     oauth: buildStoredOauthState(oauth),
   });
@@ -699,6 +704,7 @@ export async function startOauthProviderFlow(input: {
   rebindAccountId?: number;
   projectId?: string;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
   requestOrigin?: string;
 }) {
@@ -717,6 +723,7 @@ export async function startOauthProviderFlow(input: {
     rebindAccountId: input.rebindAccountId,
     projectId: input.projectId,
     proxyUrl: input.proxyUrl,
+    proxyId: input.proxyId,
     useSystemProxy: input.useSystemProxy,
   });
   return {
@@ -773,11 +780,12 @@ export async function handleOauthCallback(input: {
   }
 
   try {
-    const resolvedProxyUrl = session.proxyUrl
-      ? session.proxyUrl
-      : session.useSystemProxy
-        ? resolveProxyUrlFromExtraConfig({ useSystemProxy: true })
-        : await resolveOauthProviderProxyUrl(input.provider);
+    // 与账号链同序：自定义 > 池 > 勾选系统；皆空再退到 provider 站点层
+    const resolvedProxyUrl = resolveProxyUrlFromExtraConfig({
+      proxyUrl: session.proxyUrl ?? undefined,
+      proxyId: session.proxyId ?? undefined,
+      useSystemProxy: session.useSystemProxy === true,
+    }) || await resolveOauthProviderProxyUrl(input.provider);
     const exchange = await definition.exchangeAuthorizationCode({
       code,
       state: input.state,
@@ -955,6 +963,7 @@ export async function listOauthConnections(options: {
       lastModelSyncAt: oauth.lastModelSyncAt,
       lastModelSyncError: oauth.lastModelSyncError,
       proxyUrl: getProxyUrlFromExtraConfig(row.accounts.extraConfig),
+      proxyId: getProxyIdFromExtraConfig(row.accounts.extraConfig),
       useSystemProxy: getUseSystemProxyFromExtraConfig(row.accounts.extraConfig),
       routeParticipation,
       routeUnit,
@@ -1029,6 +1038,7 @@ export async function importOauthConnectionsFromNativeJson(input: {
   data?: unknown;
   items?: unknown[];
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
 }) {
   const payloadItems = normalizeImportedOauthJsonItems(input);
@@ -1064,6 +1074,7 @@ export async function importOauthConnectionsFromNativeJson(input: {
         definition,
         exchange: resolvedIdentity.exchange,
         proxyUrl: input.proxyUrl,
+        proxyId: input.proxyId,
         useSystemProxy: input.useSystemProxy,
         persistedStatus: resolvedIdentity.disabled ? 'disabled' : 'active',
       });
@@ -1106,6 +1117,7 @@ export async function importOauthConnectionsFromNativeJson(input: {
 export async function updateOauthConnectionProxySettings(input: {
   accountId: number;
   proxyUrl?: string | null;
+  proxyId?: number | null;
   useSystemProxy?: boolean;
 }) {
   const account = await db.select().from(schema.accounts)
@@ -1121,6 +1133,7 @@ export async function updateOauthConnectionProxySettings(input: {
 
   const extraConfig = mergeAccountExtraConfig(account.extraConfig, {
     ...(input.proxyUrl !== undefined ? { proxyUrl: input.proxyUrl } : {}),
+    ...(input.proxyId !== undefined ? { proxyId: input.proxyId ?? undefined } : {}),
     ...(input.useSystemProxy !== undefined ? { useSystemProxy: input.useSystemProxy } : {}),
   });
   const updatedAt = new Date().toISOString();
@@ -1137,6 +1150,7 @@ export async function updateOauthConnectionProxySettings(input: {
     success: true as const,
     accountId: input.accountId,
     proxyUrl: getProxyUrlFromExtraConfig(extraConfig),
+    proxyId: getProxyIdFromExtraConfig(extraConfig),
     useSystemProxy: getUseSystemProxyFromExtraConfig(extraConfig),
     refreshedRoutes: true,
     modelRefresh: {
@@ -1151,9 +1165,9 @@ export async function updateOauthConnectionProxySettings(input: {
 
 export async function startOauthRebindFlow(
   accountId: number,
-  options?: { requestOrigin?: string; proxyUrl?: string | null; useSystemProxy?: boolean },
+  options?: { requestOrigin?: string; proxyUrl?: string | null; proxyId?: number | null; useSystemProxy?: boolean },
 ) {
-  const { requestOrigin, proxyUrl, useSystemProxy } = options ?? {};
+  const { requestOrigin, proxyUrl, proxyId, useSystemProxy } = options ?? {};
   const account = await db.select().from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
@@ -1171,6 +1185,9 @@ export async function startOauthRebindFlow(
     proxyUrl: proxyUrl !== undefined
       ? proxyUrl
       : (getProxyUrlFromExtraConfig(account.extraConfig) ?? undefined),
+    proxyId: proxyId !== undefined
+      ? proxyId
+      : (getProxyIdFromExtraConfig(account.extraConfig) ?? undefined),
     useSystemProxy: useSystemProxy !== undefined
       ? useSystemProxy
       : (getUseSystemProxyFromExtraConfig(account.extraConfig) || undefined),
